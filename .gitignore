@@ -14,12 +14,14 @@
 **/*.jpg
 **/*.pdf
 
-# But include important pintle files
+# But include important pintle source files
+!pintle_models/*.py
+!pintle_pipeline/*.py
+!pintle_pipeline/*.md
 !examples/pintle_engine/*.py
 !examples/pintle_engine/*.yaml
 !examples/pintle_engine/*.md
 !examples/pintle_engine/*.tex
-!examples/pintle_engine/README.md
 
 # Include pintle-related documentation in root
 !PHYSICS_*.md
