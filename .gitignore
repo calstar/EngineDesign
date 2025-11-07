@@ -1,0 +1,32 @@
+# Ignore everything by default
+*
+
+# But include pintle engine files
+!pintle_models/
+!pintle_pipeline/
+!examples/pintle_engine/
+
+# Within pintle directories, ignore cache and compiled files
+**/__pycache__/
+**/*.pyc
+**/*.npz
+**/*.png
+**/*.jpg
+**/*.pdf
+
+# But include important pintle files
+!examples/pintle_engine/*.py
+!examples/pintle_engine/*.yaml
+!examples/pintle_engine/*.md
+!examples/pintle_engine/*.tex
+!examples/pintle_engine/README.md
+
+# Include pintle-related documentation in root
+!PHYSICS_*.md
+!SPRAY_ANGLE_*.md
+!WHY_HALF_ANGLE.md
+!README_PINTLE_PIPELINE.md
+
+# Include .gitignore itself
+!.gitignore
+
