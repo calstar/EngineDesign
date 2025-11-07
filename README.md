@@ -54,6 +54,9 @@ python run_full_pipeline.py
 # Generate all performance plots
 python run_all_plots.py
 
+# Interactive CLI (forward & inverse modes)
+python interactive_pipeline.py
+
 # Pressure sweep (2D grid)
 python pressure_sweep_example.py
 
