@@ -23,11 +23,8 @@
 !examples/pintle_engine/*.md
 !examples/pintle_engine/*.tex
 
-# Include pintle-related documentation in root
-!PHYSICS_*.md
-!SPRAY_ANGLE_*.md
-!WHY_HALF_ANGLE.md
-!README_PINTLE_PIPELINE.md
+# Include README in root
+!README.md
 
 # Include .gitignore itself
 !.gitignore
