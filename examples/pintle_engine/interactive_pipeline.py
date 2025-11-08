@@ -110,8 +110,8 @@ def forward_mode(runner: PintleEngineRunner) -> None:
 # -----------------------------------------------------------------------------
 
 def _thrust_difference(
-    runner: PintleEngineRunner,
     scale: float,
+    runner: PintleEngineRunner,
     base_pressures: Tuple[float, float],
     target_thrust_kN: float,
 ) -> float:
@@ -142,19 +142,23 @@ def solve_for_thrust(
 
     base_pressures_pa = (base_O_psi * PSI_TO_PA, base_F_psi * PSI_TO_PA)
 
+    # Evaluate baseline to understand where we stand relative to target
+    baseline_results = runner.evaluate(*base_pressures_pa)
+    baseline_thrust = baseline_results["F"] / 1000.0
+
     low, high = scale_bounds
-    f_low = _thrust_difference(runner, low, base_pressures_pa, target_thrust_kN)
-    f_high = _thrust_difference(runner, high, base_pressures_pa, target_thrust_kN)
+    f_low = _thrust_difference(low, runner, base_pressures_pa, target_thrust_kN)
+    f_high = _thrust_difference(high, runner, base_pressures_pa, target_thrust_kN)
 
     # Expand bounds until we bracket the root
     iterations = 0
     while f_low * f_high > 0 and iterations < max_expand:
-        if f_low > 0:
-            low *= 0.5
-            f_low = _thrust_difference(runner, low, base_pressures_pa, target_thrust_kN)
-        else:
+        if target_thrust_kN > baseline_thrust:
             high *= 1.5
-            f_high = _thrust_difference(runner, high, base_pressures_pa, target_thrust_kN)
+            f_high = _thrust_difference(high, runner, base_pressures_pa, target_thrust_kN)
+        else:
+            low *= 0.5
+            f_low = _thrust_difference(low, runner, base_pressures_pa, target_thrust_kN)
         iterations += 1
 
     if f_low * f_high > 0:

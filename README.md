@@ -15,7 +15,7 @@ A comprehensive physics-based simulation pipeline that takes tank pressures as i
 
 ```bash
 # Install required packages
-pip install numpy scipy matplotlib pydantic pyyaml rocketcea
+pip install numpy scipy matplotlib pydantic pyyaml rocketcea streamlit
 ```
 
 ### 2. Basic Usage
@@ -56,6 +56,9 @@ python run_all_plots.py
 
 # Interactive CLI (forward & inverse modes)
 python interactive_pipeline.py
+
+# Streamlit UI (forward & inverse modes)
+streamlit run ui_app.py
 
 # Pressure sweep (2D grid)
 python pressure_sweep_example.py
