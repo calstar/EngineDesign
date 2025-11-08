@@ -7,7 +7,10 @@ A comprehensive physics-based simulation pipeline that takes tank pressures as i
 **Input:** Tank pressures (LOX and RP-1)  
 **Output:** Thrust, mass flow rates, chamber pressure, and all performance parameters
 
-**Key Feature:** Chamber pressure (Pc) is **never** an input - it's always **solved** from tank pressures by balancing mass flow supply (from injectors) and demand (from combustion).
+**Key Features:**
+- Chamber pressure (Pc) is **never** an input - it's always **solved** from tank pressures by balancing supply and demand.
+- Modular injector architecture: pintle (LOX axial / fuel annulus), shear-coaxial, and impinging doublet models with their own flow and spray physics.
+- Independent cooling models: regenerative channels, film cooling films, and ablative liners can be evaluated separately or in combination.
 
 ## Quick Start
 
@@ -15,7 +18,7 @@ A comprehensive physics-based simulation pipeline that takes tank pressures as i
 
 ```bash
 # Install required packages
-pip install numpy scipy matplotlib pydantic pyyaml rocketcea streamlit
+pip install -r requirements.txt
 ```
 
 ### 2. Basic Usage
@@ -59,6 +62,12 @@ python interactive_pipeline.py
 
 # Streamlit UI (forward & inverse modes)
 streamlit run ui_app.py
+
+# Streamlit UI features:
+#  - Edit key configuration parameters from the sidebar
+#  - Upload alternate YAML configs
+#  - Forward & inverse solvers
+#  - Time-series evaluation (upload pressure profiles to generate thrust curves)
 
 # Pressure sweep (2D grid)
 python pressure_sweep_example.py
@@ -141,7 +150,8 @@ All engine parameters are defined in `examples/pintle_engine/config_minimal.yaml
 ### 1. Feed System Losses
 Generalized model: `Δp_feed = K_eff(P) × (ρ/2) × (ṁ/(ρ×A_hyd))²`
 
-### 2. Regenerative Cooling
+### 2. Cooling Models (Optional)
+#### Regenerative Cooling (Channels)
 Models pressure drop through:
 - Inlet pipe
 - Manifold split (into N parallel channels)
@@ -149,7 +159,15 @@ Models pressure drop through:
 - Manifold merge
 - Outlet pipe
 
-Dynamic discharge coefficients for channel entrance and exit.
+Dynamic discharge coefficients are applied to channel entrance and exit losses.
+
+#### Film Cooling
+- Allocates a configurable fraction of fuel mass flow to a wall film.
+- Effectiveness controls the heat-flux reduction factor without altering injector hydraulics.
+
+#### Ablative Cooling
+- Energy balance between imposed heat flux and ablator recession rate.
+- Supports radiative relief and surface temperature constraints.
 
 ### 3. Injector Flow
 Standard orifice flow: `ṁ = Cd × A × √(2 × ρ × Δp)`
@@ -284,8 +302,9 @@ examples/pintle_engine/  # Example scripts and configs
 2. **Tank Pressures are Inputs**: Provide `P_tank_O` and `P_tank_F` in Pascals (or convert from psi: `P_Pa = P_psi × 6894.76`).
 
 3. **CEA Cache**: First run builds a cache file (`cea_cache_LOX_RP1.npz`). This is slow but only happens once.
+   - Cache metadata is checked automatically. If you change propellants, mixture range, or expansion ratio, the cache is rebuilt for you.
 
-4. **Regenerative Cooling**: Optional but recommended for realistic fuel line pressure drops. Configure in `config_minimal.yaml` under `regen_cooling`.
+4. **Cooling Models**: Regenerative, film, and ablative cooling are independent. Enable only what you need in `config_minimal.yaml`.
 
 5. **Dynamic Discharge Coefficients**: Cd varies with Reynolds number. The model is `Cd(Re) = Cd_∞ - a_Re/√Re`, with optional pressure and temperature corrections.
 

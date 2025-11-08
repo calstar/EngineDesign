@@ -32,6 +32,14 @@ PA_TO_PSI = 1.0 / PSI_TO_PA
 CONFIG_PATH = Path(__file__).parent / "config_minimal.yaml"
 
 
+class ThrustSolveError(RuntimeError):
+    """Custom exception carrying diagnostics for inverse thrust solving."""
+
+    def __init__(self, message: str, diagnostics: Dict[str, Any]):
+        super().__init__(message)
+        self.diagnostics = diagnostics
+
+
 def load_runner() -> PintleEngineRunner:
     """Load configuration and create a runner instance."""
     config = load_config(str(CONFIG_PATH))
@@ -72,6 +80,28 @@ def summarize_results(results: Dict[str, Any]) -> None:
     print(f"  c* (actual)        : {format_value(cstar, 'm/s', 1)}")
     print(f"  Exit Velocity      : {format_value(v_exit, 'm/s', 1)}")
     print(f"  Exit Pressure      : {format_value(P_exit_psi, 'psi', 2)}")
+
+    cooling = results.get("cooling", {})
+    if cooling:
+        print("\nCooling Summary:")
+        regen = cooling.get("regen")
+        if regen and regen.get("enabled", False):
+            print(f"  Regen outlet T   : {regen['coolant_outlet_temperature']:.1f} K")
+            print(f"  Regen heat flux  : {regen['overall_heat_flux']/1000:.1f} kW/m²")
+            if 'mdot_coolant' in regen:
+                print(f"  Coolant flow     : {regen['mdot_coolant']:.3f} kg/s")
+        film = cooling.get("film")
+        if film and film.get("enabled", False):
+            print(
+                f"  Film effectiveness: {film['effectiveness']:.2f} (mass fraction {film['mass_fraction']:.3f})"
+            )
+            print(f"  Film heat factor : {film['heat_flux_factor']:.2f} | Film flow {film['mdot_film']:.3f} kg/s")
+        ablative = cooling.get("ablative")
+        if ablative and ablative.get("enabled", False):
+            print(
+                f"  Ablative recession: {ablative['recession_rate']*1e6:.3f} µm/s"
+            )
+            print(f"  Ablative heat flux: {ablative['effective_heat_flux']/1000:.1f} kW/m²")
 
 
 # -----------------------------------------------------------------------------
@@ -129,11 +159,12 @@ def solve_for_thrust(
     target_thrust_kN: float,
     base_pressures_psi: Tuple[float, float],
     scale_bounds: Tuple[float, float] = (0.2, 5.0),
-    max_expand: int = 10,
-) -> Tuple[Tuple[float, float], Dict[str, Any]]:
+    num_samples: int = 60,
+) -> Tuple[Tuple[float, float], Dict[str, Any], Dict[str, Any]]:
     """Solve for tank pressures that achieve the target thrust.
 
     The solution scales the baseline tank pressures by a factor 'scale'.
+    The function also returns diagnostic information useful for UIs.
     """
 
     base_O_psi, base_F_psi = base_pressures_psi
@@ -142,46 +173,91 @@ def solve_for_thrust(
 
     base_pressures_pa = (base_O_psi * PSI_TO_PA, base_F_psi * PSI_TO_PA)
 
-    # Evaluate baseline to understand where we stand relative to target
     baseline_results = runner.evaluate(*base_pressures_pa)
     baseline_thrust = baseline_results["F"] / 1000.0
 
-    low, high = scale_bounds
-    f_low = _thrust_difference(low, runner, base_pressures_pa, target_thrust_kN)
-    f_high = _thrust_difference(high, runner, base_pressures_pa, target_thrust_kN)
+    scale_min, scale_max = scale_bounds
+    if scale_min <= 0 or scale_max <= 0:
+        raise ValueError("Scale bounds must be positive.")
 
-    # Expand bounds until we bracket the root
-    iterations = 0
-    while f_low * f_high > 0 and iterations < max_expand:
-        if target_thrust_kN > baseline_thrust:
-            high *= 1.5
-            f_high = _thrust_difference(high, runner, base_pressures_pa, target_thrust_kN)
-        else:
-            low *= 0.5
-            f_low = _thrust_difference(low, runner, base_pressures_pa, target_thrust_kN)
-        iterations += 1
+    # Sample thrust across scale range to bracket the target
+    sample_scales = np.linspace(scale_min, scale_max, num_samples)
+    sample_scales = np.unique(np.append(sample_scales, 1.0))  # ensure baseline included
+    sample_scales.sort()
 
-    if f_low * f_high > 0:
-        raise RuntimeError(
-            "Could not bracket solution. Try adjusting target thrust or baseline pressures."
+    thrust_samples = []
+    diff_samples = []
+    cache: Dict[float, Dict[str, Any]] = {}
+
+    for scale in sample_scales:
+        P_tank_O = scale * base_pressures_pa[0]
+        P_tank_F = scale * base_pressures_pa[1]
+        res = runner.evaluate(P_tank_O, P_tank_F)
+        cache[scale] = res
+        thrust = res["F"] / 1000.0
+        thrust_samples.append(thrust)
+        diff_samples.append(thrust - target_thrust_kN)
+
+    thrust_min = min(thrust_samples)
+    thrust_max = max(thrust_samples)
+
+    diagnostics = {
+        "baseline_thrust": baseline_thrust,
+        "min_thrust": thrust_min,
+        "max_thrust": thrust_max,
+        "scale_bounds": scale_bounds,
+        "sample_scales": sample_scales,
+        "sample_thrusts": thrust_samples,
+    }
+
+    if target_thrust_kN < thrust_min or target_thrust_kN > thrust_max:
+        raise ThrustSolveError(
+            f"Target thrust {target_thrust_kN:.2f} kN is outside achievable range "
+            f"[{thrust_min:.2f}, {thrust_max:.2f}] kN for scale bounds {scale_bounds}. "
+            f"Baseline thrust: {baseline_thrust:.2f} kN.",
+            diagnostics,
         )
 
-    scale = brentq(
-        _thrust_difference,
-        low,
-        high,
-        args=(runner, base_pressures_pa, target_thrust_kN),
-        xtol=1e-4,
-        rtol=1e-4,
-        maxiter=100,
-    )
+    bracket: Optional[Tuple[float, float]] = None
+    for i in range(len(sample_scales) - 1):
+        diff_i = diff_samples[i]
+        diff_j = diff_samples[i + 1]
 
-    # Evaluate at solution
+        if abs(diff_i) < 1e-3:
+            scale = sample_scales[i]
+            P_tank_O_solution = scale * base_pressures_pa[0]
+            P_tank_F_solution = scale * base_pressures_pa[1]
+            results = cache[scale]
+            return (P_tank_O_solution, P_tank_F_solution), results, diagnostics
+
+        if diff_i * diff_j <= 0:
+            bracket = (sample_scales[i], sample_scales[i + 1])
+            break
+
+    if bracket is None:
+        raise ThrustSolveError(
+            "Failed to bracket target thrust. Consider expanding scale bounds.",
+            diagnostics,
+        )
+
+    try:
+        scale = brentq(
+            _thrust_difference,
+            bracket[0],
+            bracket[1],
+            args=(runner, base_pressures_pa, target_thrust_kN),
+            xtol=1e-5,
+            rtol=1e-5,
+            maxiter=100,
+        )
+    except Exception as exc:
+        raise ThrustSolveError(f"Root finding failed: {exc}", diagnostics) from exc
+
     P_tank_O_solution = scale * base_pressures_pa[0]
     P_tank_F_solution = scale * base_pressures_pa[1]
     results = runner.evaluate(P_tank_O_solution, P_tank_F_solution)
 
-    return (P_tank_O_solution, P_tank_F_solution), results
+    return (P_tank_O_solution, P_tank_F_solution), results, diagnostics
 
 
 def inverse_mode(runner: PintleEngineRunner) -> None:
@@ -209,11 +285,19 @@ def inverse_mode(runner: PintleEngineRunner) -> None:
         return
 
     try:
-        (P_tank_O_solution, P_tank_F_solution), results = solve_for_thrust(
+        (P_tank_O_solution, P_tank_F_solution), results, diagnostics = solve_for_thrust(
             runner,
             target_thrust_kN,
             (base_O_psi, base_F_psi),
         )
+    except ThrustSolveError as exc:
+        print(f"Failed to find tank pressures for target thrust: {exc}")
+        diag = exc.diagnostics
+        print(
+            f"Achievable thrust range within scale bounds {diag['scale_bounds']}: "
+            f"{diag['min_thrust']:.2f} - {diag['max_thrust']:.2f} kN"
+        )
+        return
     except Exception as exc:
         print(f"Failed to find tank pressures for target thrust: {exc}")
         return
@@ -225,6 +309,13 @@ def inverse_mode(runner: PintleEngineRunner) -> None:
     print(f"Required LOX tank pressure : {format_value(P_tank_O_psi, 'psi', 1)}")
     print(f"Required Fuel tank pressure: {format_value(P_tank_F_psi, 'psi', 1)}")
     summarize_results(results)
+
+    print_header("DIAGNOSTICS")
+    print(
+        f"Baseline thrust (scale=1.0): {diagnostics['baseline_thrust']:.2f} kN"
+        f" | Achievable range within scales {diagnostics['scale_bounds']}: "
+        f"{diagnostics['min_thrust']:.2f} - {diagnostics['max_thrust']:.2f} kN"
+    )
 
 
 # -----------------------------------------------------------------------------

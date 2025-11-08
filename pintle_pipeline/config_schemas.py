@@ -1,7 +1,7 @@
 """Pydantic schemas for YAML/JSON configuration validation"""
 
 from pydantic import BaseModel, Field, field_validator
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 import numpy as np
 
 
@@ -12,6 +12,9 @@ class FluidConfig(BaseModel):
     viscosity: float = Field(gt=0, description="Dynamic viscosity [Pa·s]")
     surface_tension: float = Field(gt=0, description="Surface tension [N/m]")
     vapor_pressure: float = Field(ge=0, description="Vapor pressure [Pa]")
+    specific_heat: float = Field(default=2200.0, gt=0, description="Specific heat at constant pressure [J/(kg·K)]")
+    thermal_conductivity: float = Field(default=0.15, gt=0, description="Thermal conductivity [W/(m·K)]")
+    temperature: float = Field(default=293.15, gt=0, description="Bulk fluid temperature [K]")
 
 
 class PintleLOXConfig(BaseModel):
@@ -36,6 +39,63 @@ class PintleGeometryConfig(BaseModel):
     """Pintle injector geometry configuration"""
     lox: PintleLOXConfig
     fuel: PintleFuelConfig
+
+
+class InjectorBaseConfig(BaseModel):
+    """Base injector configuration with type identifier"""
+    type: Literal["pintle", "coaxial", "impinging"]
+
+
+class PintleInjectorConfig(InjectorBaseConfig):
+    """Complete pintle injector configuration"""
+    type: Literal["pintle"] = "pintle"
+    geometry: PintleGeometryConfig
+
+
+class CoaxialCoreConfig(BaseModel):
+    """Core (inner) element geometry for coaxial injector"""
+    n_ports: int = Field(gt=0, description="Number of core ports/nozzles")
+    d_port: float = Field(gt=0, description="Diameter of each core port [m]")
+    length: Optional[float] = Field(default=None, gt=0, description="Port length for loss modeling [m]")
+
+
+class CoaxialAnnulusConfig(BaseModel):
+    """Annular (outer) element geometry for coaxial injector"""
+    inner_diameter: float = Field(gt=0, description="Inner diameter of annulus (matches core OD) [m]")
+    gap_thickness: float = Field(gt=0, description="Annulus gap thickness [m]")
+    swirl_angle: float = Field(default=0.0, ge=0, le=90, description="Swirl angle for outer flow [deg]")
+
+
+class CoaxialInjectorGeometry(BaseModel):
+    """Complete geometry description for a shear coaxial injector"""
+    core: CoaxialCoreConfig
+    annulus: CoaxialAnnulusConfig
+
+
+class CoaxialInjectorConfig(InjectorBaseConfig):
+    """Coaxial injector configuration"""
+    type: Literal["coaxial"] = "coaxial"
+    geometry: CoaxialInjectorGeometry
+
+
+class ImpingingElementConfig(BaseModel):
+    """Geometry parameters for a single impinging jet element"""
+    n_elements: int = Field(gt=0, description="Number of elements (pairs or triplets)")
+    d_jet: float = Field(gt=0, description="Jet diameter [m]")
+    impingement_angle: float = Field(gt=0, le=180, description="Included impingement angle [deg]")
+    spacing: float = Field(gt=0, description="Center-to-center spacing between jets [m]")
+
+
+class ImpingingInjectorGeometry(BaseModel):
+    """Complete geometry for an impinging injector"""
+    oxidizer: ImpingingElementConfig
+    fuel: ImpingingElementConfig
+
+
+class ImpingingInjectorConfig(InjectorBaseConfig):
+    """Impinging-element injector configuration"""
+    type: Literal["impinging"] = "impinging"
+    geometry: ImpingingInjectorGeometry
 
 
 class FeedSystemConfig(BaseModel):
@@ -71,6 +131,37 @@ class RegenCoolingConfig(BaseModel):
     Cd_exit_inf: float = Field(default=0.9, gt=0, le=1, description="Asymptotic Cd at high Re for channel exit")
     a_Re_exit: float = Field(default=0.1, ge=0, description="Reynolds correction parameter for exit")
     Cd_exit_min: float = Field(default=0.7, ge=0, le=1, description="Minimum Cd for exit")
+    # Heat-transfer coupling (Phase 2)
+    use_heat_transfer: bool = Field(default=False, description="Enable coupled heat-transfer calculations for regen cooling")
+    wall_thickness: float = Field(default=0.002, gt=0, description="Hot-wall thickness between gas and coolant [m]")
+    wall_thermal_conductivity: float = Field(default=300.0, gt=0, description="Wall material thermal conductivity [W/(m·K)]")
+    chamber_inner_diameter: Optional[float] = Field(default=None, gt=0, description="Chamber inner diameter for hot-side area [m]")
+    hot_gas_prandtl: float = Field(default=0.7, gt=0, description="Assumed hot-gas Prandtl number")
+    hot_gas_viscosity: float = Field(default=4.0e-5, gt=0, description="Effective hot-gas viscosity [Pa·s]")
+    hot_gas_thermal_conductivity: float = Field(default=0.1, gt=0, description="Effective hot-gas thermal conductivity [W/(m·K)]")
+    radiation_emissivity_hot: float = Field(default=0.8, ge=0, le=1, description="Effective hot-side emissivity for radiation")
+    radiation_view_factor: float = Field(default=1.0, ge=0, le=1, description="Radiation view factor to coolant surface")
+
+
+class FilmCoolingConfig(BaseModel):
+    """Film cooling configuration"""
+    enabled: bool = Field(default=False, description="Enable film cooling model")
+    mass_fraction: float = Field(default=0.05, ge=0, le=0.5, description="Fraction of total mass flow used for film injection")
+    injection_temperature: Optional[float] = Field(default=None, gt=0, description="Film injection temperature [K] (defaults to fuel temperature)")
+    effectiveness_ref: float = Field(default=0.4, ge=0, le=1, description="Reference film effectiveness at injection location")
+    decay_length: float = Field(default=0.1, gt=0, description="Characteristic decay length for film effectiveness [m]")
+    apply_to_fraction_of_length: float = Field(default=1.0, gt=0, description="Portion of chamber length covered by film cooling")
+
+
+class AblativeCoolingConfig(BaseModel):
+    """Ablative cooling configuration"""
+    enabled: bool = Field(default=False, description="Enable ablative cooling model")
+    material_density: float = Field(default=1600.0, gt=0, description="Ablator density [kg/m³]")
+    heat_of_ablation: float = Field(default=2.5e6, gt=0, description="Effective heat of ablation [J/kg]")
+    thermal_conductivity: float = Field(default=0.35, gt=0, description="Ablator thermal conductivity [W/(m·K)]")
+    specific_heat: float = Field(default=1500.0, gt=0, description="Ablator specific heat [J/(kg·K)]")
+    initial_thickness: float = Field(default=0.01, gt=0, description="Initial ablative thickness [m]")
+    surface_temperature_limit: float = Field(default=1200.0, gt=0, description="Allowable surface temperature [K]")
 
 
 class DischargeConfig(BaseModel):
@@ -210,12 +301,17 @@ class SolverConfig(BaseModel):
     closure: ClosureConfig = Field(default_factory=ClosureConfig)
 
 
+InjectorConfig = Union[PintleInjectorConfig, CoaxialInjectorConfig, ImpingingInjectorConfig]
+
+
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
     fluids: dict[str, FluidConfig]
-    pintle_geometry: PintleGeometryConfig
+    injector: InjectorConfig
     feed_system: dict[str, FeedSystemConfig]  # "oxidizer" and "fuel"
     regen_cooling: Optional[RegenCoolingConfig] = Field(default=None, description="Regenerative cooling configuration (fuel only)")
+    film_cooling: Optional[FilmCoolingConfig] = Field(default=None, description="Film cooling configuration")
+    ablative_cooling: Optional[AblativeCoolingConfig] = Field(default=None, description="Ablative cooling configuration")
     discharge: dict[str, DischargeConfig]  # "oxidizer" and "fuel"
     spray: SprayConfig = Field(default_factory=SprayConfig)
     combustion: CombustionConfig = Field(default_factory=CombustionConfig)

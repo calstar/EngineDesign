@@ -1,8 +1,10 @@
 """Regenerative cooling channel pressure drop model"""
 
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict
 from .config_schemas import RegenCoolingConfig
+
+SIGMA = 5.670374419e-8  # Stefan-Boltzmann constant
 
 
 def calculate_channel_hydraulic_diameter(width: float, height: float) -> float:
@@ -272,4 +274,213 @@ def calculate_regen_velocity_profile(
         "u_channel": float(u_channel),
         "u_outlet": float(u_outlet),
         "mdot_channel": float(mdot_channel),
+    }
+
+
+def compute_regen_heat_transfer(
+    mdot_coolant: float,
+    coolant_props: Dict[str, float],
+    gas_props: Dict[str, float],
+    config: RegenCoolingConfig,
+    mdot_total: float,
+) -> Dict[str, float]:
+    """Calculate heat-transfer coupling for regenerative cooling channels."""
+
+    results = {
+        "enabled": config.use_heat_transfer,
+        "coolant_outlet_temperature": coolant_props.get("temperature", 0.0),
+        "heat_removed": 0.0,
+        "heat_flux_convective": 0.0,
+        "heat_flux_radiative": 0.0,
+        "overall_heat_flux": 0.0,
+        "h_hot": 0.0,
+        "h_coolant": 0.0,
+        "wall_temperature_hot": gas_props.get("Tc", 0.0),
+        "wall_temperature_coolant": coolant_props.get("temperature", 0.0),
+        "film_effectiveness": 0.0,
+    }
+
+    if not config.use_heat_transfer or mdot_coolant <= 0:
+        return results
+
+    cp_c = max(coolant_props.get("cp", 2000.0), 1.0)
+    k_c = max(coolant_props.get("thermal_conductivity", 0.1), 1e-4)
+    mu_c = max(coolant_props.get("viscosity", 1e-4), 1e-8)
+    rho_c = max(coolant_props.get("density", 700.0), 1.0)
+    T_c_in = coolant_props.get("temperature", 300.0)
+
+    channel_area = config.channel_width * config.channel_height
+    d_hyd_channel = calculate_channel_hydraulic_diameter(
+        config.channel_width, config.channel_height
+    )
+    perimeter_channel = 2.0 * (config.channel_width + config.channel_height)
+    wetted_area = perimeter_channel * config.channel_length * config.n_channels
+
+    mdot_channel = mdot_coolant / max(config.n_channels, 1)
+    u_channel = mdot_channel / (rho_c * channel_area)
+    Re_c = rho_c * u_channel * d_hyd_channel / mu_c if mu_c > 0 else 0.0
+    Pr_c = mu_c * cp_c / max(k_c, 1e-4)
+    if Re_c < 2000:
+        Nu_c = 3.66  # laminar, constant wall temp
+    else:
+        Nu_c = 0.023 * (Re_c ** 0.8) * (Pr_c ** 0.4)
+    h_c = Nu_c * k_c / d_hyd_channel
+
+    Pc = gas_props.get("Pc", 0.0)
+    Tc = gas_props.get("Tc", 0.0)
+    gamma = gas_props.get("gamma", 1.2)
+    R_g = gas_props.get("R", 350.0)
+
+    chamber_d_inner = config.chamber_inner_diameter
+    if chamber_d_inner is None:
+        chamber_area = gas_props.get("chamber_area")
+        if chamber_area is not None and chamber_area > 0:
+            chamber_d_inner = np.sqrt(4.0 * chamber_area / np.pi)
+        else:
+            throat_area = gas_props.get("A_throat", 1e-3)
+            chamber_d_inner = np.sqrt(4.0 * throat_area / np.pi)
+
+    chamber_length = config.channel_length
+    A_hot = np.pi * chamber_d_inner * chamber_length
+    A_cross = np.pi * (chamber_d_inner ** 2) / 4.0
+
+    rho_g = max(Pc / (R_g * max(Tc, 1.0)), 0.01)
+    V_g = mdot_total / (rho_g * A_cross)
+    mu_g = config.hot_gas_viscosity
+    k_g = config.hot_gas_thermal_conductivity
+    cp_g = gamma * R_g / max(gamma - 1.0, 1e-6)
+    Pr_g = config.hot_gas_prandtl if config.hot_gas_prandtl > 0 else (mu_g * cp_g / max(k_g, 1e-4))
+
+    Re_g = rho_g * V_g * chamber_d_inner / max(mu_g, 1e-8)
+    if Re_g < 2000:
+        Nu_g = 4.36
+    else:
+        Nu_g = 0.023 * (Re_g ** 0.8) * (Pr_g ** 0.4)
+    h_g = Nu_g * k_g / chamber_d_inner
+
+    T_g_effective = Tc
+
+    # Iterative energy balance for coolant outlet temperature
+    T_out = T_c_in
+    for _ in range(3):
+        T_bulk = 0.5 * (T_c_in + T_out)
+        delta_T = max(T_g_effective - T_bulk, 0.0)
+        if delta_T <= 0:
+            heat_flux_conv = 0.0
+        else:
+            U_inv = (1.0 / max(h_g, 1e-6)) + (config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)) + (1.0 / max(h_c, 1e-6))
+            U = 1.0 / U_inv
+            heat_flux_conv = U * delta_T
+
+        heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * SIGMA * (
+            T_g_effective ** 4 - T_bulk ** 4
+        )
+        heat_flux_rad = max(heat_flux_rad, 0.0)
+
+        total_heat_flux = heat_flux_conv + heat_flux_rad
+        heat_removed = total_heat_flux * A_hot
+
+        if mdot_coolant * cp_c <= 0:
+            break
+
+        T_out = T_c_in + heat_removed / (mdot_coolant * cp_c)
+
+    T_bulk = 0.5 * (T_c_in + T_out)
+    delta_T = max(T_g_effective - T_bulk, 0.0)
+    U_inv = (1.0 / max(h_g, 1e-6)) + (config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)) + (1.0 / max(h_c, 1e-6))
+    U = 1.0 / U_inv
+    heat_flux_conv = U * delta_T
+    heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * SIGMA * (
+        T_g_effective ** 4 - T_bulk ** 4
+    )
+    heat_flux_rad = max(heat_flux_rad, 0.0)
+    total_heat_flux = heat_flux_conv + heat_flux_rad
+    heat_removed = total_heat_flux * A_hot
+
+    Tw_hot = T_g_effective - heat_flux_conv / max(h_g, 1e-6)
+    Tw_cold = Tw_hot - heat_flux_conv * config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)
+    Tw_coolant_interface = T_out + heat_flux_conv / max(h_c, 1e-6)
+
+    results.update(
+        {
+            "coolant_outlet_temperature": float(T_out),
+            "heat_removed": float(heat_removed),
+            "heat_flux_convective": float(heat_flux_conv),
+            "heat_flux_radiative": float(heat_flux_rad),
+            "overall_heat_flux": float(total_heat_flux),
+            "h_hot": float(h_g),
+            "h_coolant": float(h_c),
+            "wall_temperature_hot": float(Tw_hot),
+            "wall_temperature_coolant": float(Tw_cold),
+            "wall_temperature_coolant_interface": float(Tw_coolant_interface),
+            "film_effectiveness": 0.0,
+            "effective_gas_temperature": float(T_g_effective),
+            "coolant_bulk_temperature": float(T_bulk),
+        }
+    )
+
+    return results
+
+
+def estimate_hot_wall_heat_flux(
+    gas_props: Dict[str, float],
+    config: Optional[RegenCoolingConfig],
+    wall_temperature: float,
+    mdot_total: float,
+) -> Dict[str, float]:
+    """Estimate convective and radiative heat flux from hot gas to wall (no coolant)."""
+
+    Tc = gas_props.get("Tc", 0.0)
+    Pc = gas_props.get("Pc", 0.0)
+    gamma = gas_props.get("gamma", 1.2)
+    R_g = gas_props.get("R", 350.0)
+    chamber_length = 0.1
+    if config is not None and config.channel_length > 0:
+        chamber_length = config.channel_length
+    else:
+        chamber_length = gas_props.get("chamber_length", chamber_length)
+
+    chamber_d_inner = config.chamber_inner_diameter if config is not None else None
+    if chamber_d_inner is None:
+        chamber_area = gas_props.get("chamber_area")
+        if chamber_area is not None and chamber_area > 0:
+            chamber_d_inner = np.sqrt(4.0 * chamber_area / np.pi)
+        else:
+            throat_area = gas_props.get("A_throat", 1e-3)
+            chamber_d_inner = np.sqrt(4.0 * throat_area / np.pi)
+
+    A_cross = np.pi * (chamber_d_inner ** 2) / 4.0
+    rho_g = max(Pc / (R_g * max(Tc, 1.0)), 0.01)
+    V_g = mdot_total / (rho_g * A_cross)
+
+    mu_g = config.hot_gas_viscosity if config is not None else 4.0e-5
+    k_g = config.hot_gas_thermal_conductivity if config is not None else 0.1
+    cp_g = gamma * R_g / max(gamma - 1.0, 1e-6)
+    Pr_g_source = config.hot_gas_prandtl if (config is not None and config.hot_gas_prandtl > 0) else None
+    Pr_g = Pr_g_source if Pr_g_source is not None else (mu_g * cp_g / max(k_g, 1e-4))
+
+    Re_g = rho_g * V_g * chamber_d_inner / max(mu_g, 1e-8)
+    if Re_g < 2000:
+        Nu_g = 4.36
+    else:
+        Nu_g = 0.023 * (Re_g ** 0.8) * (Pr_g ** 0.4)
+    h_g = Nu_g * k_g / chamber_d_inner
+
+    delta_T = max(Tc - wall_temperature, 0.0)
+    heat_flux_conv = h_g * delta_T
+    emissivity = config.radiation_emissivity_hot if config is not None else 0.8
+    view_factor = config.radiation_view_factor if config is not None else 1.0
+    heat_flux_rad = emissivity * view_factor * SIGMA * (
+        Tc ** 4 - wall_temperature ** 4
+    )
+    heat_flux_total = heat_flux_conv + max(heat_flux_rad, 0.0)
+
+    A_hot = np.pi * chamber_d_inner * chamber_length
+
+    return {
+        "heat_flux_total": float(heat_flux_total),
+        "heat_flux_conv": float(heat_flux_conv),
+        "heat_flux_rad": float(max(heat_flux_rad, 0.0)),
+        "h_hot": float(h_g),
+        "surface_area": float(A_hot),
     }

@@ -217,7 +217,7 @@ class ChamberSolver:
             "Tc": cea_props["Tc"],
             "gamma": cea_props["gamma"],
             "R": cea_props["R"],
-            "M": cea_props.get("M", 0),  # Mach number if available
+            "M": cea_props.get("M"),  # Molecular weight [kg/kmol]
             "spray_quality_good": self.spray_quality_good,
             **closure_diag,
         }

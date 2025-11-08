@@ -16,6 +16,9 @@ fluids:
     viscosity: 1.8e-4  # Pa·s
     surface_tension: 0.013  # N/m
     vapor_pressure: 101325.0  # Pa
+    specific_heat: 2300.0  # J/(kg·K)
+    thermal_conductivity: 0.15  # W/(m·K)
+    temperature: 90.0  # K - typical LOX tank temperature
   
   fuel:
     name: "RP-1"
@@ -23,33 +26,66 @@ fluids:
     viscosity: 2.0e-3  # Pa·s
     surface_tension: 0.025  # N/m
     vapor_pressure: 1000.0  # Pa
+    specific_heat: 2000.0  # J/(kg·K)
+    thermal_conductivity: 0.13  # W/(m·K)
+    temperature: 293.0  # K - ambient
 
-# Pintle Geometry (Fixed - no variable stroke)
-pintle_geometry:
-  # LOX (Axial Flow - Through Orifices)
-  # LOX enters through single entry hole, flows through pintle tip,
-  # and exits through N orifices at angle theta_orifice
-  # From user: 16 orifices, each with area 0.00385154962 in² = 2.485 mm²
-  # Equivalent diameter: 1.779 mm
-  lox:
-    n_orifices: 16  # Number of orifices on pintle tip
-    d_orifice: 0.001779  # m - Diameter of each orifice (1.779 mm, calculated from area)
-    theta_orifice: 30.0  # degrees - Angle of orifices from axis
-    A_entry: 0.00001  # m² - Single entry hole area
-    d_hydraulic: 0.001779  # m - Hydraulic diameter for Re calculation (same as orifice diameter)
-  
-  # Fuel (Radial Flow - Reservoir with Gap Spillage)
-  # Fuel enters reservoir through entry port, fills reservoir,
-  # then spills out through gap between pintle tip and reservoir wall
-  # From user: D_p = 0.750 in (19.05 mm), gap thickness = 0.313 mm, C_D,a = 0.65
-  # Area calculated using exact annulus formula: A = π × (R_outer² - R_inner²)
-  # where R_inner = d_pintle_tip/2, R_outer = R_inner + h_gap
-  fuel:
-    d_pintle_tip: 0.019050  # m - Outer diameter of pintle tip (0.750 in = 19.05 mm)
-    d_reservoir_inner: 0.019676  # m - Inner diameter of fuel reservoir (D_p + 2×h_gap = 19.05 + 2×0.313 = 19.676 mm)
-    h_gap: 0.000313  # m - Gap height (0.313 mm from user)
-    A_entry: 0.000015  # m² - Entry port area into reservoir
-    d_hydraulic: 0.000626  # m - Gap hydraulic diameter (2×h_gap = 2×0.313 = 0.626 mm for annulus)
+# Injector Configuration
+injector:
+  type: pintle
+  geometry:
+    # LOX (Axial Flow - Through Orifices)
+    # LOX enters through single entry hole, flows through pintle tip,
+    # and exits through N orifices at angle theta_orifice
+    # From user: 16 orifices, each with area 0.00385154962 in² = 2.485 mm²
+    # Equivalent diameter: 1.779 mm
+    lox:
+      n_orifices: 16  # Number of orifices on pintle tip
+      d_orifice: 0.001779  # m - Diameter of each orifice (1.779 mm, calculated from area)
+      theta_orifice: 30.0  # degrees - Angle of orifices from axis
+      A_entry: 0.00001  # m² - Single entry hole area
+      d_hydraulic: 0.001779  # m - Hydraulic diameter for Re calculation (same as orifice diameter)
+    
+    # Fuel (Radial Flow - Reservoir with Gap Spillage)
+    # Fuel enters reservoir through entry port, fills reservoir,
+    # then spills out through gap between pintle tip and reservoir wall
+    # From user: D_p = 0.750 in (19.05 mm), gap thickness = 0.313 mm, C_D,a = 0.65
+    # Area calculated using exact annulus formula: A = π × (R_outer² - R_inner²)
+    # where R_inner = d_pintle_tip/2, R_outer = R_inner + h_gap
+    fuel:
+      d_pintle_tip: 0.019050  # m - Outer diameter of pintle tip (0.750 in = 19.05 mm)
+      d_reservoir_inner: 0.019676  # m - Inner diameter of fuel reservoir (D_p + 2×h_gap = 19.05 + 2×0.313 = 19.676 mm)
+      h_gap: 0.000313  # m - Gap height (0.313 mm from user)
+      A_entry: 0.000015  # m² - Entry port area into reservoir
+      d_hydraulic: 0.000626  # m - Gap hydraulic diameter (2×h_gap = 2×0.313 = 0.626 mm for annulus)
+
+# Example coaxial injector configuration (for future runs)
+# injector:
+#   type: coaxial
+#   geometry:
+#     core:
+#       n_ports: 12
+#       d_port: 0.0014
+#       length: 0.015
+#     annulus:
+#       inner_diameter: 0.005
+#       gap_thickness: 0.0008
+#       swirl_angle: 25.0
+
+# Example impinging injector configuration (for future runs)
+# injector:
+#   type: impinging
+#   geometry:
+#     oxidizer:
+#       n_elements: 8
+#       d_jet: 0.0012
+#       impingement_angle: 60.0
+#       spacing: 0.004
+#     fuel:
+#       n_elements: 8
+#       d_jet: 0.0012
+#       impingement_angle: 60.0
+#       spacing: 0.004
 
 # Feed System (Tank → Injector)
 # Calculates pressure losses: Δp_feed = K_eff(P) × (ρ/2) × (ṁ/(ρ×A_hyd))²
@@ -93,6 +129,32 @@ regen_cooling:
   Cd_exit_inf: 0.9  # Asymptotic Cd at high Re for channel exit
   a_Re_exit: 0.1  # Reynolds correction parameter for exit
   Cd_exit_min: 0.7  # Minimum Cd for exit
+  use_heat_transfer: true
+  wall_thickness: 0.002  # m - wall between gas and coolant
+  wall_thermal_conductivity: 320.0  # W/(m·K) - copper alloy
+  chamber_inner_diameter: 0.08491  # m - from engine specs (Dc)
+  hot_gas_prandtl: 0.7
+  hot_gas_viscosity: 4.0e-5  # Pa·s
+  hot_gas_thermal_conductivity: 0.12  # W/(m·K)
+  radiation_emissivity_hot: 0.85
+  radiation_view_factor: 1.0
+
+film_cooling:
+  enabled: false
+  mass_fraction: 0.05
+  injection_temperature: null  # defaults to fuel temperature
+  effectiveness_ref: 0.45
+  decay_length: 0.05
+  apply_to_fraction_of_length: 0.6
+
+ablative_cooling:
+  enabled: false
+  material_density: 1600.0
+  heat_of_ablation: 2.5e6
+  thermal_conductivity: 0.35
+  specific_heat: 1500.0
+  initial_thickness: 0.01
+  surface_temperature_limit: 1200.0
 
 # Injector Discharge
 # Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]

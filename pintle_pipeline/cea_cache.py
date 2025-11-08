@@ -3,12 +3,13 @@
 import numpy as np
 import os
 import re
+import json
 from rocketcea.cea_obj import CEA_Obj
 from typing import Tuple, Optional
 from .config_schemas import CEAConfig
 
 
-def parse_cea_basic(out: str) -> Tuple[float, float, float, float]:
+def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
     """
     Extract Tc, gamma, R, and c* from NASA CEA text output (chamber values only).
     
@@ -29,6 +30,7 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float]:
         M = float(mw_match.group(1))  # molecular weight [kg/kmol]
         R = 8314.462618 / M  # J/kg·K
     else:
+        M = np.nan
         R = np.nan
 
     # Extract chamber temperature (Tc)
@@ -46,7 +48,7 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float]:
     if re.search(r'CSTAR.*FT/SEC', block, re.IGNORECASE):
         cstar *= 0.3048
 
-    return Tc, gamma, R, cstar
+    return Tc, gamma, R, cstar, M
 
 
 class CEACache:
@@ -86,6 +88,7 @@ class CEACache:
         self.Tc_table = None
         self.gamma_table = None
         self.R_table = None
+        self.M_table = None
         
         # Load from cache or build
         if os.path.exists(self.cache_file):
@@ -97,12 +100,62 @@ class CEACache:
         """Load CEA data from cache file"""
         print(f"[OK] Loading CEA cache from {self.cache_file}")
         data = np.load(self.cache_file)
+
+        meta_expected = {
+            "ox_name": self.config.ox_name,
+            "fuel_name": self.config.fuel_name,
+            "expansion_ratio": self.config.expansion_ratio,
+            "Pc_range": list(self.config.Pc_range),
+            "MR_range": list(self.config.MR_range),
+            "n_points": self.n_points,
+        }
+
+        meta_loaded = None
+        if "meta" in data:
+            try:
+                meta_loaded = json.loads(data["meta"].tolist())
+            except Exception:
+                meta_loaded = None
+
+        def _meta_matches(meta_loaded_dict: Optional[dict], meta_expected_dict: dict) -> bool:
+            if meta_loaded_dict is None:
+                return False
+            try:
+                if meta_loaded_dict.get("ox_name") != meta_expected_dict["ox_name"]:
+                    return False
+                if meta_loaded_dict.get("fuel_name") != meta_expected_dict["fuel_name"]:
+                    return False
+                if float(meta_loaded_dict.get("expansion_ratio", -1)) != float(meta_expected_dict["expansion_ratio"]):
+                    return False
+                if meta_loaded_dict.get("n_points") != meta_expected_dict["n_points"]:
+                    return False
+                if not np.allclose(meta_loaded_dict.get("Pc_range", []), meta_expected_dict["Pc_range"], atol=1e-6):
+                    return False
+                if not np.allclose(meta_loaded_dict.get("MR_range", []), meta_expected_dict["MR_range"], atol=1e-6):
+                    return False
+            except Exception:
+                return False
+            return True
+
+        if not _meta_matches(meta_loaded, meta_expected):
+            print("[WARNING] CEA cache metadata does not match configuration; regenerating...")
+            try:
+                os.remove(self.cache_file)
+            except OSError:
+                pass
+            self._build_cache()
+            return
         
         self.cstar_table = data["cstar"]
         self.Cf_table = data["Cf"]
         self.Tc_table = data["Tc"]
         self.gamma_table = data["gamma"]
         self.R_table = data["R"]
+        if "M" in data:
+            self.M_table = data["M"]
+        else:
+            # Backwards compatibility: derive M from R
+            self.M_table = 8314.462618 / self.R_table
         
         # Verify grid matches
         Pc_loaded = data["Pc"]
@@ -127,6 +180,7 @@ class CEACache:
         self.Tc_table = np.zeros((self.n_points, self.n_points))
         self.gamma_table = np.zeros((self.n_points, self.n_points))
         self.R_table = np.zeros((self.n_points, self.n_points))
+        self.M_table = np.zeros((self.n_points, self.n_points))
         
         # Convert Pc from Pa to psia for CEA
         Pc_psia_grid = self.Pc_grid / 6894.76
@@ -144,7 +198,7 @@ class CEACache:
                         MR=MR,
                         eps=self.config.expansion_ratio
                     )
-                    Tc, gamma, R, cstar = parse_cea_basic(out)
+                    Tc, gamma, R, cstar, M = parse_cea_basic(out)
                     
                     # Get Isp and calculate Cf_ideal
                     isp = chamber.estimate_Ambient_Isp(
@@ -170,6 +224,7 @@ class CEACache:
                     self.Tc_table[i, j] = Tc
                     self.gamma_table[i, j] = gamma
                     self.R_table[i, j] = R
+                    self.M_table[i, j] = M
                     
                 except Exception as e:
                     print(f"   ⚠️  Error at Pc={Pc_psia:.1f} psia, MR={MR:.2f}: {e}")
@@ -178,6 +233,7 @@ class CEACache:
                     self.Tc_table[i, j] = np.nan
                     self.gamma_table[i, j] = np.nan
                     self.R_table[i, j] = np.nan
+                    self.M_table[i, j] = np.nan
         
         # Save to cache
         self._save_cache()
@@ -185,6 +241,15 @@ class CEACache:
     
     def _save_cache(self):
         """Save CEA data to cache file"""
+        meta = {
+            "ox_name": self.config.ox_name,
+            "fuel_name": self.config.fuel_name,
+            "expansion_ratio": self.config.expansion_ratio,
+            "Pc_range": list(self.config.Pc_range),
+            "MR_range": list(self.config.MR_range),
+            "n_points": self.n_points,
+        }
+
         np.savez_compressed(
             self.cache_file,
             Pc=self.Pc_grid,
@@ -194,6 +259,8 @@ class CEACache:
             Tc=self.Tc_table,
             gamma=self.gamma_table,
             R=self.R_table,
+            M=self.M_table,
+            meta=np.array(json.dumps(meta))
         )
     
     def _bilinear_interpolate(self, Pc: float, MR: float, table: np.ndarray) -> float:
@@ -280,4 +347,5 @@ class CEACache:
             "Tc": self._bilinear_interpolate(Pc, MR, self.Tc_table),
             "gamma": self._bilinear_interpolate(Pc, MR, self.gamma_table),
             "R": self._bilinear_interpolate(Pc, MR, self.R_table),
+            "M": self._bilinear_interpolate(Pc, MR, self.M_table),
         }

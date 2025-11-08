@@ -80,8 +80,10 @@ if not np.isnan(gamma):
     print(f"    Gamma: {gamma:.4f}")
 if not np.isnan(R):
     print(f"    Gas Constant R: {R:.2f} J/(kg·K)")
-if not np.isnan(M):
+if np.isfinite(M):
     print(f"    Molecular Weight: {M:.2f} kg/kmol ({M:.2f} lb/lbmol)")
+else:
+    print("    Molecular Weight: unavailable from CEA cache")
 
 # Performance metrics
 F = results['F']
@@ -152,18 +154,18 @@ print(f"      Δp_injector = {delta_p_inj_F/6894.76:.1f} psi")
 # Injector geometry
 from pintle_models.geometry import get_effective_areas, get_hydraulic_diameters
 
-A_LOX, A_fuel = get_effective_areas(config.pintle_geometry)
-d_hyd_O, d_hyd_F = get_hydraulic_diameters(config.pintle_geometry)
+A_LOX, A_fuel = get_effective_areas(config.injector.geometry)
+d_hyd_O, d_hyd_F = get_hydraulic_diameters(config.injector.geometry)
 
 print(f"\n  Injector Geometry:")
 print(f"    LOX:")
-print(f"      Number of orifices: {config.pintle_geometry.lox.n_orifices}")
-print(f"      Orifice diameter: {config.pintle_geometry.lox.d_orifice*1000:.2f} mm")
+print(f"      Number of orifices: {config.injector.geometry.lox.n_orifices}")
+print(f"      Orifice diameter: {config.injector.geometry.lox.d_orifice*1000:.2f} mm")
 print(f"      Total area: {A_LOX*1e6:.4f} mm²")
 print(f"      Hydraulic diameter: {d_hyd_O*1000:.2f} mm")
 print(f"    Fuel:")
-print(f"      Pintle tip diameter: {config.pintle_geometry.fuel.d_pintle_tip*1000:.2f} mm")
-print(f"      Gap height: {config.pintle_geometry.fuel.h_gap*1000:.2f} mm")
+print(f"      Pintle tip diameter: {config.injector.geometry.fuel.d_pintle_tip*1000:.2f} mm")
+print(f"      Gap height: {config.injector.geometry.fuel.h_gap*1000:.2f} mm")
 print(f"      Total area: {A_fuel*1e6:.4f} mm²")
 print(f"      Hydraulic diameter: {d_hyd_F*1000:.2f} mm")
 
@@ -227,6 +229,39 @@ if not np.isnan(x_star):
 
 constraints_satisfied = diagnostics.get('constraints_satisfied', False)
 print(f"  Spray Constraints Satisfied: {constraints_satisfied}")
+
+# Cooling diagnostics
+cooling = results.get("cooling", {})
+if cooling:
+    print(f"\n{'='*80}")
+    print("COOLING SUMMARY")
+    print(f"{'='*80}")
+
+    regen = cooling.get("regen")
+    if regen and regen.get("enabled", False):
+        print("  Regenerative Cooling:")
+        print(f"    Coolant outlet temperature: {regen['coolant_outlet_temperature']:.1f} K")
+        print(f"    Heat removed: {regen['heat_removed']/1000:.1f} kW")
+        print(f"    Hot-side heat flux: {regen['overall_heat_flux']/1000:.1f} kW/m²")
+        if 'mdot_coolant' in regen:
+            print(f"    Coolant flow through channels: {regen['mdot_coolant']:.3f} kg/s")
+        print(f"    Wall temperature (hot/cool): {regen['wall_temperature_hot']:.1f} K / {regen['wall_temperature_coolant']:.1f} K")
+        if regen.get('film_effectiveness', 0.0) > 0:
+            print(f"    Film effectiveness applied: {regen['film_effectiveness']:.2f}")
+
+    film = cooling.get("film")
+    if film and film.get("enabled", False):
+        print("  Film Cooling:")
+        print(f"    Mass fraction: {film['mass_fraction']:.3f}")
+        print(f"    Effectiveness: {film['effectiveness']:.2f}")
+        print(f"    Film mass flow: {film['mdot_film']:.3f} kg/s")
+        print(f"    Heat-flux reduction factor: {film['heat_flux_factor']:.2f}")
+
+    ablative = cooling.get("ablative")
+    if ablative and ablative.get("enabled", False):
+        print("  Ablative Cooling:")
+        print(f"    Recession rate: {ablative['recession_rate']*1e6:.3f} µm/s")
+        print(f"    Effective heat flux: {ablative['effective_heat_flux']/1000:.1f} kW/m²")
 
 # Compare to target
 print(f"\n{'='*80}")
