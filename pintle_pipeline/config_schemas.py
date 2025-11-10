@@ -141,6 +141,10 @@ class RegenCoolingConfig(BaseModel):
     hot_gas_thermal_conductivity: float = Field(default=0.1, gt=0, description="Effective hot-gas thermal conductivity [W/(m·K)]")
     radiation_emissivity_hot: float = Field(default=0.8, ge=0, le=1, description="Effective hot-side emissivity for radiation")
     radiation_view_factor: float = Field(default=1.0, ge=0, le=1, description="Radiation view factor to coolant surface")
+    n_segments: int = Field(default=20, gt=0, description="Number of axial segments for heat-transfer integration")
+    gas_turbulence_intensity: float = Field(default=0.1, ge=0, description="Estimated turbulence intensity of hot gas (0-1)")
+    coolant_turbulence_intensity: float = Field(default=0.05, ge=0, description="Estimated turbulence intensity of coolant (0-1)")
+    hot_gas_cp: float = Field(default=2200.0, gt=0, description="Hot-gas specific heat [J/(kg·K)]")
 
 
 class FilmCoolingConfig(BaseModel):
@@ -151,6 +155,16 @@ class FilmCoolingConfig(BaseModel):
     effectiveness_ref: float = Field(default=0.4, ge=0, le=1, description="Reference film effectiveness at injection location")
     decay_length: float = Field(default=0.1, gt=0, description="Characteristic decay length for film effectiveness [m]")
     apply_to_fraction_of_length: float = Field(default=1.0, gt=0, description="Portion of chamber length covered by film cooling")
+    slot_height: float = Field(default=3.0e-4, gt=0, description="Annular slot height for film injection [m]")
+    reference_blowing_ratio: float = Field(default=0.5, gt=0, description="Reference blowing ratio for effectiveness correlation")
+    blowing_exponent: float = Field(default=0.6, gt=0, description="Exponent on blowing ratio for effectiveness correlation")
+    turbulence_reference_intensity: float = Field(default=0.08, gt=0, description="Reference turbulence intensity for film erosion")
+    turbulence_sensitivity: float = Field(default=1.0, ge=0, description="Sensitivity of film effectiveness to turbulence intensity")
+    turbulence_exponent: float = Field(default=1.0, gt=0, description="Exponent governing turbulence erosion scaling")
+    turbulence_min_multiplier: float = Field(default=0.4, ge=0, le=1, description="Minimum multiplier applied to effectiveness due to turbulence erosion")
+    reference_wall_temperature: float = Field(default=1100.0, gt=0, description="Reference hot wall temperature used for heat-flux estimation [K]")
+    density_override: Optional[float] = Field(default=None, gt=0, description="Override density for film coolant if different from bulk fuel [kg/m³]")
+    cp_override: Optional[float] = Field(default=None, gt=0, description="Override specific heat for film coolant if different from bulk fuel [J/(kg·K)]")
 
 
 class AblativeCoolingConfig(BaseModel):
@@ -162,6 +176,13 @@ class AblativeCoolingConfig(BaseModel):
     specific_heat: float = Field(default=1500.0, gt=0, description="Ablator specific heat [J/(kg·K)]")
     initial_thickness: float = Field(default=0.01, gt=0, description="Initial ablative thickness [m]")
     surface_temperature_limit: float = Field(default=1200.0, gt=0, description="Allowable surface temperature [K]")
+    coverage_fraction: float = Field(default=1.0, gt=0, le=1.0, description="Fraction of chamber surface protected by ablative liner")
+    pyrolysis_temperature: float = Field(default=900.0, gt=0, description="Characteristic pyrolysis temperature of ablator [K]")
+    blowing_efficiency: float = Field(default=0.8, ge=0, le=1, description="Effectiveness of ablative gases in blocking convective heat flux")
+    turbulence_reference_intensity: float = Field(default=0.08, gt=0, description="Reference turbulence intensity for ablative augmentation")
+    turbulence_sensitivity: float = Field(default=1.5, ge=0, description="Sensitivity of ablative heat flux to turbulence")
+    turbulence_exponent: float = Field(default=1.0, gt=0, description="Exponent on turbulence intensity for ablative response")
+    turbulence_max_multiplier: float = Field(default=3.0, gt=0, description="Maximum multiplier applied to convective heat flux due to turbulence")
 
 
 class DischargeConfig(BaseModel):
@@ -210,6 +231,9 @@ class SprayConfig(BaseModel):
     weber: dict = Field(default_factory=lambda: {"We_min": 15.0})
     smd: SMDConfig = Field(default_factory=SMDConfig)
     evaporation: EvaporationConfig = Field(default_factory=EvaporationConfig)
+    use_turbulence_corrections: bool = Field(default=False, description="Enable turbulence-dependent spray corrections")
+    turbulence_breakup_gain: float = Field(default=1.0, ge=0, description="Gain applied to droplet breakup due to turbulence")
+    turbulence_penetration_gain: float = Field(default=0.5, ge=0, description="Gain applied to evaporation length reduction due to turbulence")
 
 
 class CEAConfig(BaseModel):
@@ -247,6 +271,76 @@ class CombustionEfficiencyConfig(BaseModel):
         le=1,
         description="Penalty factor if spray constraints violated"
     )
+    use_mixture_coupling: bool = Field(
+        default=False,
+        description="Couple droplet metrics to combustion efficiency"
+    )
+    target_smd_microns: float = Field(
+        default=50.0,
+        gt=0,
+        description="Target SMD for full efficiency [µm]"
+    )
+    smd_penalty_exponent: float = Field(
+        default=1.5,
+        gt=0,
+        description="Exponent controlling how strongly large droplets penalize efficiency"
+    )
+    xstar_limit_mm: float = Field(
+        default=50.0,
+        gt=0,
+        description="Target evaporation length [mm]"
+    )
+    xstar_penalty_exponent: float = Field(
+        default=1.0,
+        gt=0,
+        description="Exponent for evaporation length penalty"
+    )
+    we_reference: float = Field(
+        default=20.0,
+        gt=0,
+        description="Reference Weber number for good atomization"
+    )
+    we_penalty_exponent: float = Field(
+        default=1.0,
+        gt=0,
+        description="Exponent for Weber-number-based penalty"
+    )
+    mixture_efficiency_floor: float = Field(
+        default=0.4,
+        ge=0,
+        le=1,
+        description="Minimum mixture efficiency multiplier"
+    )
+    use_cooling_coupling: bool = Field(
+        default=False,
+        description="Couple cooling heat removal to combustion efficiency"
+    )
+    cooling_efficiency_floor: float = Field(
+        default=0.4,
+        ge=0,
+        le=1,
+        description="Minimum cooling efficiency multiplier"
+    )
+    use_turbulence_coupling: bool = Field(
+        default=False,
+        description="Couple injector/chamber turbulence intensity to combustion efficiency"
+    )
+    target_turbulence_intensity: float = Field(
+        default=0.08,
+        gt=0,
+        description="Target turbulence intensity for full mixing efficiency"
+    )
+    turbulence_penalty_exponent: float = Field(
+        default=1.0,
+        ge=0,
+        description="Exponent for turbulence-based efficiency modifier"
+    )
+    turbulence_efficiency_floor: float = Field(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="Minimum efficiency multiplier attributable to turbulence effects"
+    )
 
 
 class CombustionConfig(BaseModel):
@@ -259,6 +353,7 @@ class ChamberConfig(BaseModel):
     """Chamber geometry configuration"""
     volume: float = Field(gt=0, description="Chamber volume [m³]")
     A_throat: float = Field(gt=0, description="Throat area [m²]")
+    length: Optional[float] = Field(default=None, gt=0, description="Characteristic chamber length [m]")
     Lstar: Optional[float] = Field(
         default=None,
         gt=0,

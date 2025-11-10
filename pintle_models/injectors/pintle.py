@@ -88,6 +88,11 @@ class PintleInjector(InjectorModel):
             "D32_F": None,
             "x_star": None,
             "injector_type": "pintle",
+            "turbulence_intensity_O": None,
+            "turbulence_intensity_F": None,
+            "turbulence_length_O": None,
+            "turbulence_length_F": None,
+            "turbulence_intensity_mix": None,
         }
 
         mdot_O = mdot_O_guess
@@ -184,6 +189,18 @@ class PintleInjector(InjectorModel):
             Oh_O = ohnesorge_number(mu_O, rho_O, sigma_O, injector_geom.lox.d_orifice)
             Oh_F = ohnesorge_number(mu_F, rho_F, sigma_F, d_hyd_F)
 
+            turbulence_intensity_O = 0.16 * (Re_O ** -0.125) if Re_O > 0 else 0.1
+            turbulence_intensity_F = 0.16 * (Re_F ** -0.125) if Re_F > 0 else 0.1
+            turbulence_intensity_O = float(np.clip(turbulence_intensity_O, 0.02, 0.3))
+            turbulence_intensity_F = float(np.clip(turbulence_intensity_F, 0.02, 0.3))
+            turbulence_length_O = 0.07 * d_hyd_O
+            turbulence_length_F = 0.07 * d_hyd_F
+            velocity_total = max(u_O + u_F, 1e-6)
+            turbulence_intensity_mix = (
+                (turbulence_intensity_O * u_O + turbulence_intensity_F * u_F) / velocity_total
+            )
+            turbulence_intensity_mix = float(np.clip(turbulence_intensity_mix, 0.02, 0.35))
+
             D32_O = smd_lefebvre(
                 injector_geom.lox.d_orifice,
                 We_O,
@@ -201,10 +218,27 @@ class PintleInjector(InjectorModel):
                 spray_cfg.smd.p,
             )
 
+            if spray_cfg.use_turbulence_corrections:
+                breakup_gain = max(spray_cfg.turbulence_breakup_gain, 0.0)
+                penetration_gain = max(spray_cfg.turbulence_penetration_gain, 0.0)
+                breakup_multiplier = 1.0 / (1.0 + breakup_gain * turbulence_intensity_mix)
+                breakup_multiplier = float(np.clip(breakup_multiplier, 0.3, 1.0))
+                D32_O *= breakup_multiplier
+                D32_F *= breakup_multiplier
+            else:
+                breakup_multiplier = 1.0
+
             U_rel = np.sqrt(u_O ** 2 + u_F ** 2)
             tau_evap_O = tau_evap(D32_O, spray_cfg.evaporation.K)
             x_star_O = xstar(U_rel, tau_evap_O)
             x_star_combined = max(x_star_O, xstar(U_rel, tau_evap(D32_F, spray_cfg.evaporation.K)))
+
+            if spray_cfg.use_turbulence_corrections:
+                penetration_multiplier = 1.0 / (1.0 + penetration_gain * turbulence_intensity_mix)
+                penetration_multiplier = float(np.clip(penetration_multiplier, 0.3, 1.0))
+                x_star_combined *= penetration_multiplier
+            else:
+                penetration_multiplier = 1.0
 
             constraints_ok, violations = check_spray_constraints(We_O, We_F, x_star_combined, spray_cfg)
 
@@ -221,6 +255,13 @@ class PintleInjector(InjectorModel):
                     "D32_O": D32_O,
                     "D32_F": D32_F,
                     "x_star": x_star_combined,
+                    "turbulence_intensity_O": turbulence_intensity_O,
+                    "turbulence_intensity_F": turbulence_intensity_F,
+                    "turbulence_length_O": turbulence_length_O,
+                    "turbulence_length_F": turbulence_length_F,
+                    "turbulence_intensity_mix": turbulence_intensity_mix,
+                    "breakup_multiplier": breakup_multiplier,
+                    "penetration_multiplier": penetration_multiplier,
                 }
             )
 

@@ -149,7 +149,10 @@ def _thrust_difference(
     P_tank_O_base, P_tank_F_base = base_pressures
     P_tank_O = scale * P_tank_O_base
     P_tank_F = scale * P_tank_F_base
-    results = runner.evaluate(P_tank_O, P_tank_F)
+    try:
+        results = runner.evaluate(P_tank_O, P_tank_F)
+    except Exception as exc:  # propagate for root finder diagnostics
+        raise RuntimeError(f"Evaluation failed at scale={scale:.4f}: {exc}") from exc
     thrust_kN = results["F"] / 1000.0
     return thrust_kN - target_thrust_kN
 
@@ -173,7 +176,16 @@ def solve_for_thrust(
 
     base_pressures_pa = (base_O_psi * PSI_TO_PA, base_F_psi * PSI_TO_PA)
 
-    baseline_results = runner.evaluate(*base_pressures_pa)
+    try:
+        baseline_results = runner.evaluate(*base_pressures_pa)
+    except Exception as exc:
+        raise ThrustSolveError(
+            f"Baseline evaluation failed: {exc}",
+            {
+                "baseline_pressed": base_pressures_pa,
+                "target_thrust": target_thrust_kN,
+            },
+        ) from exc
     baseline_thrust = baseline_results["F"] / 1000.0
 
     scale_min, scale_max = scale_bounds
@@ -188,18 +200,48 @@ def solve_for_thrust(
     thrust_samples = []
     diff_samples = []
     cache: Dict[float, Dict[str, Any]] = {}
+    invalid_samples: list[Tuple[float, str]] = []
 
     for scale in sample_scales:
         P_tank_O = scale * base_pressures_pa[0]
         P_tank_F = scale * base_pressures_pa[1]
-        res = runner.evaluate(P_tank_O, P_tank_F)
+        try:
+            res = runner.evaluate(P_tank_O, P_tank_F)
+        except Exception as exc:
+            invalid_samples.append((scale, str(exc)))
+            cache[scale] = {"error": str(exc)}
+            thrust_samples.append(np.nan)
+            diff_samples.append(np.nan)
+            continue
+
         cache[scale] = res
         thrust = res["F"] / 1000.0
         thrust_samples.append(thrust)
         diff_samples.append(thrust - target_thrust_kN)
 
-    thrust_min = min(thrust_samples)
-    thrust_max = max(thrust_samples)
+    thrust_array = np.asarray(thrust_samples, dtype=float)
+    diff_array = np.asarray(diff_samples, dtype=float)
+    finite_mask = np.isfinite(thrust_array)
+
+    if not np.any(finite_mask):
+        diagnostics = {
+            "baseline_thrust": baseline_thrust,
+            "scale_bounds": scale_bounds,
+            "sample_scales": sample_scales,
+            "sample_thrusts": thrust_samples,
+            "invalid_samples": invalid_samples,
+        }
+        raise ThrustSolveError(
+            "All sampled scale evaluations failed. Consider adjusting baseline pressures or scale bounds.",
+            diagnostics,
+        )
+
+    valid_scales = sample_scales[finite_mask]
+    valid_thrusts = thrust_array[finite_mask]
+    valid_diffs = diff_array[finite_mask]
+
+    thrust_min = float(np.min(valid_thrusts))
+    thrust_max = float(np.max(valid_thrusts))
 
     diagnostics = {
         "baseline_thrust": baseline_thrust,
@@ -208,6 +250,7 @@ def solve_for_thrust(
         "scale_bounds": scale_bounds,
         "sample_scales": sample_scales,
         "sample_thrusts": thrust_samples,
+        "invalid_samples": invalid_samples,
     }
 
     if target_thrust_kN < thrust_min or target_thrust_kN > thrust_max:
@@ -219,19 +262,21 @@ def solve_for_thrust(
         )
 
     bracket: Optional[Tuple[float, float]] = None
-    for i in range(len(sample_scales) - 1):
-        diff_i = diff_samples[i]
-        diff_j = diff_samples[i + 1]
+    for idx in range(len(valid_scales) - 1):
+        diff_i = valid_diffs[idx]
+        diff_j = valid_diffs[idx + 1]
 
         if abs(diff_i) < 1e-3:
-            scale = sample_scales[i]
+            scale = valid_scales[idx]
             P_tank_O_solution = scale * base_pressures_pa[0]
             P_tank_F_solution = scale * base_pressures_pa[1]
-            results = cache[scale]
+            results = cache.get(scale)
+            if not results:
+                results = runner.evaluate(P_tank_O_solution, P_tank_F_solution)
             return (P_tank_O_solution, P_tank_F_solution), results, diagnostics
 
         if diff_i * diff_j <= 0:
-            bracket = (sample_scales[i], sample_scales[i + 1])
+            bracket = (valid_scales[idx], valid_scales[idx + 1])
             break
 
     if bracket is None:

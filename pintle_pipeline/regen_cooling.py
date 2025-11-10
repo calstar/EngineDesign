@@ -1,7 +1,7 @@
 """Regenerative cooling channel pressure drop model"""
 
 import numpy as np
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from .config_schemas import RegenCoolingConfig
 
 SIGMA = 5.670374419e-8  # Stefan-Boltzmann constant
@@ -298,6 +298,10 @@ def compute_regen_heat_transfer(
         "wall_temperature_hot": gas_props.get("Tc", 0.0),
         "wall_temperature_coolant": coolant_props.get("temperature", 0.0),
         "film_effectiveness": 0.0,
+        "effective_gas_temperature": gas_props.get("Tc", 0.0),
+        "coolant_bulk_temperature": coolant_props.get("temperature", 0.0),
+        "segment_wall_temperatures": [],
+        "segment_heat_flux": [],
     }
 
     if not config.use_heat_transfer or mdot_coolant <= 0:
@@ -307,24 +311,11 @@ def compute_regen_heat_transfer(
     k_c = max(coolant_props.get("thermal_conductivity", 0.1), 1e-4)
     mu_c = max(coolant_props.get("viscosity", 1e-4), 1e-8)
     rho_c = max(coolant_props.get("density", 700.0), 1.0)
-    T_c_in = coolant_props.get("temperature", 300.0)
+    T_c_bulk = coolant_props.get("temperature", 300.0)
 
     channel_area = config.channel_width * config.channel_height
-    d_hyd_channel = calculate_channel_hydraulic_diameter(
-        config.channel_width, config.channel_height
-    )
-    perimeter_channel = 2.0 * (config.channel_width + config.channel_height)
-    wetted_area = perimeter_channel * config.channel_length * config.n_channels
-
+    d_hyd_channel = calculate_channel_hydraulic_diameter(config.channel_width, config.channel_height)
     mdot_channel = mdot_coolant / max(config.n_channels, 1)
-    u_channel = mdot_channel / (rho_c * channel_area)
-    Re_c = rho_c * u_channel * d_hyd_channel / mu_c if mu_c > 0 else 0.0
-    Pr_c = mu_c * cp_c / max(k_c, 1e-4)
-    if Re_c < 2000:
-        Nu_c = 3.66  # laminar, constant wall temp
-    else:
-        Nu_c = 0.023 * (Re_c ** 0.8) * (Pr_c ** 0.4)
-    h_c = Nu_c * k_c / d_hyd_channel
 
     Pc = gas_props.get("Pc", 0.0)
     Tc = gas_props.get("Tc", 0.0)
@@ -341,9 +332,12 @@ def compute_regen_heat_transfer(
             chamber_d_inner = np.sqrt(4.0 * throat_area / np.pi)
 
     chamber_length = config.channel_length
-    A_hot = np.pi * chamber_d_inner * chamber_length
-    A_cross = np.pi * (chamber_d_inner ** 2) / 4.0
+    circumference = np.pi * chamber_d_inner
+    segment_count = max(config.n_segments, 1)
+    segment_length = chamber_length / segment_count
+    segment_area_hot = circumference * segment_length
 
+    A_cross = np.pi * (chamber_d_inner ** 2) / 4.0
     rho_g = max(Pc / (R_g * max(Tc, 1.0)), 0.01)
     V_g = mdot_total / (rho_g * A_cross)
     mu_g = config.hot_gas_viscosity
@@ -356,66 +350,72 @@ def compute_regen_heat_transfer(
         Nu_g = 4.36
     else:
         Nu_g = 0.023 * (Re_g ** 0.8) * (Pr_g ** 0.4)
-    h_g = Nu_g * k_g / chamber_d_inner
+    turbulence_boost_g = (1.0 + config.gas_turbulence_intensity) ** 0.8
+    h_g_base = Nu_g * k_g / chamber_d_inner * turbulence_boost_g
 
-    T_g_effective = Tc
+    heat_removed_total = 0.0
+    heat_flux_conv_total = 0.0
+    heat_flux_rad_total = 0.0
+    wall_hot_segments: List[float] = []
+    wall_cold_segments: List[float] = []
+    segment_heat_fluxes: List[float] = []
 
-    # Iterative energy balance for coolant outlet temperature
-    T_out = T_c_in
-    for _ in range(3):
-        T_bulk = 0.5 * (T_c_in + T_out)
-        delta_T = max(T_g_effective - T_bulk, 0.0)
-        if delta_T <= 0:
-            heat_flux_conv = 0.0
+    for _ in range(segment_count):
+        u_channel = mdot_channel / (rho_c * channel_area)
+        Re_c = rho_c * u_channel * d_hyd_channel / max(mu_c, 1e-8)
+        Pr_c = mu_c * cp_c / max(k_c, 1e-4)
+
+        if Re_c <= 0:
+            Nu_c = 0.0
         else:
-            U_inv = (1.0 / max(h_g, 1e-6)) + (config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)) + (1.0 / max(h_c, 1e-6))
-            U = 1.0 / U_inv
-            heat_flux_conv = U * delta_T
+            f_c = (0.79 * np.log(Re_c) - 1.64) ** -2 if Re_c > 2300 else 64.0 / max(Re_c, 1.0)
+            Nu_c = (f_c / 8.0 * (Re_c - 1000.0) * Pr_c) / (1.0 + 12.7 * np.sqrt(f_c / 8.0) * (Pr_c ** (2.0 / 3.0) - 1.0))
+            if Nu_c <= 0:
+                Nu_c = 4.36
+        turbulence_boost_c = (1.0 + config.coolant_turbulence_intensity) ** 0.8
+        h_c = Nu_c * k_c / d_hyd_channel * turbulence_boost_c
 
-        heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * SIGMA * (
-            T_g_effective ** 4 - T_bulk ** 4
-        )
+        h_g = h_g_base
+        U_inv = (1.0 / max(h_g, 1e-6)) + (config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)) + (1.0 / max(h_c, 1e-6))
+        U = 1.0 / U_inv
+        delta_T = max(Tc - T_c_bulk, 0.0)
+        heat_flux_conv = U * delta_T
+        heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * SIGMA * (Tc ** 4 - T_c_bulk ** 4)
         heat_flux_rad = max(heat_flux_rad, 0.0)
+        heat_flux_total = heat_flux_conv + heat_flux_rad
 
-        total_heat_flux = heat_flux_conv + heat_flux_rad
-        heat_removed = total_heat_flux * A_hot
+        q_segment = heat_flux_total * segment_area_hot
+        heat_removed_total += q_segment
+        heat_flux_conv_total += heat_flux_conv * segment_area_hot
+        heat_flux_rad_total += heat_flux_rad * segment_area_hot
 
-        if mdot_coolant * cp_c <= 0:
-            break
+        T_c_bulk += q_segment / max(mdot_coolant * cp_c, 1e-6)
 
-        T_out = T_c_in + heat_removed / (mdot_coolant * cp_c)
+        Tw_hot = Tc - heat_flux_conv / max(h_g, 1e-6)
+        Tw_cold = Tw_hot - heat_flux_conv * config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)
 
-    T_bulk = 0.5 * (T_c_in + T_out)
-    delta_T = max(T_g_effective - T_bulk, 0.0)
-    U_inv = (1.0 / max(h_g, 1e-6)) + (config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)) + (1.0 / max(h_c, 1e-6))
-    U = 1.0 / U_inv
-    heat_flux_conv = U * delta_T
-    heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * SIGMA * (
-        T_g_effective ** 4 - T_bulk ** 4
-    )
-    heat_flux_rad = max(heat_flux_rad, 0.0)
-    total_heat_flux = heat_flux_conv + heat_flux_rad
-    heat_removed = total_heat_flux * A_hot
+        wall_hot_segments.append(Tw_hot)
+        wall_cold_segments.append(Tw_cold)
+        segment_heat_fluxes.append(heat_flux_total)
 
-    Tw_hot = T_g_effective - heat_flux_conv / max(h_g, 1e-6)
-    Tw_cold = Tw_hot - heat_flux_conv * config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)
-    Tw_coolant_interface = T_out + heat_flux_conv / max(h_c, 1e-6)
+    avg_heat_flux = heat_removed_total / (circumference * chamber_length) if chamber_length > 0 else 0.0
 
     results.update(
         {
-            "coolant_outlet_temperature": float(T_out),
-            "heat_removed": float(heat_removed),
-            "heat_flux_convective": float(heat_flux_conv),
-            "heat_flux_radiative": float(heat_flux_rad),
-            "overall_heat_flux": float(total_heat_flux),
-            "h_hot": float(h_g),
+            "coolant_outlet_temperature": float(T_c_bulk),
+            "heat_removed": float(heat_removed_total),
+            "heat_flux_convective": float(heat_flux_conv_total / max(circumference * chamber_length, 1e-6)),
+            "heat_flux_radiative": float(heat_flux_rad_total / max(circumference * chamber_length, 1e-6)),
+            "overall_heat_flux": float(avg_heat_flux),
+            "h_hot": float(h_g_base),
             "h_coolant": float(h_c),
-            "wall_temperature_hot": float(Tw_hot),
-            "wall_temperature_coolant": float(Tw_cold),
-            "wall_temperature_coolant_interface": float(Tw_coolant_interface),
-            "film_effectiveness": 0.0,
-            "effective_gas_temperature": float(T_g_effective),
-            "coolant_bulk_temperature": float(T_bulk),
+            "wall_temperature_hot": float(np.mean(wall_hot_segments) if wall_hot_segments else Tc),
+            "wall_temperature_coolant": float(np.mean(wall_cold_segments) if wall_cold_segments else T_c_bulk),
+            "effective_gas_temperature": float(Tc),
+            "coolant_bulk_temperature": float(T_c_bulk),
+            "segment_wall_temperatures": wall_hot_segments,
+            "segment_coolant_wall_temperatures": wall_cold_segments,
+            "segment_heat_flux": segment_heat_fluxes,
         }
     )
 

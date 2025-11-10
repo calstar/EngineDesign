@@ -146,6 +146,16 @@ film_cooling:
   effectiveness_ref: 0.45
   decay_length: 0.05
   apply_to_fraction_of_length: 0.6
+  slot_height: 0.00035  # m - approximate annular slot gap
+  reference_blowing_ratio: 0.6
+  blowing_exponent: 0.62
+  turbulence_reference_intensity: 0.08
+  turbulence_sensitivity: 1.0
+  turbulence_exponent: 1.0
+  turbulence_min_multiplier: 0.5
+  reference_wall_temperature: 1100.0
+  density_override: null
+  cp_override: null
 
 ablative_cooling:
   enabled: false
@@ -155,6 +165,13 @@ ablative_cooling:
   specific_heat: 1500.0
   initial_thickness: 0.01
   surface_temperature_limit: 1200.0
+  coverage_fraction: 0.85
+  pyrolysis_temperature: 950.0
+  blowing_efficiency: 0.75
+  turbulence_reference_intensity: 0.08
+  turbulence_sensitivity: 1.5
+  turbulence_exponent: 1.0
+  turbulence_max_multiplier: 3.0
 
 # Injector Discharge
 # Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]
@@ -207,6 +224,9 @@ spray:
     K: 3e5  # s/m²
     x_star_limit: 0.05  # m
     use_constraint: true
+  use_turbulence_corrections: true
+  turbulence_breakup_gain: 1.2
+  turbulence_penetration_gain: 0.8
 
 # Combustion
 combustion:
@@ -234,6 +254,12 @@ combustion:
     K: 0.15  # Recovery rate parameter (0.1-0.3 typical)
     use_spray_correction: false  # Adjust efficiency based on spray quality
     spray_penalty_factor: 0.8  # Penalty if spray constraints violated
+    use_mixture_coupling: true
+    use_cooling_coupling: true
+    use_turbulence_coupling: true
+    target_turbulence_intensity: 0.08
+    turbulence_penalty_exponent: 1.0
+    turbulence_efficiency_floor: 0.5
 
 # Chamber Geometry
 # From engine specs:
@@ -245,6 +271,7 @@ combustion:
 chamber:
   volume: 0.000857892  # m³ - Calculated from L*×At = 1.0 × 0.000857892
   A_throat: 0.000857892  # m² - From Dt = 33.05 mm
+  length: 0.18162  # m - From engine specs (Lc = 181.62 mm)
   Lstar: 1.0  # m - From engine specs (1000.00 mm)
 
 # Nozzle

@@ -67,7 +67,9 @@ streamlit run ui_app.py
 #  - Edit key configuration parameters from the sidebar
 #  - Upload alternate YAML configs
 #  - Forward & inverse solvers
-#  - Time-series evaluation (upload pressure profiles to generate thrust curves)
+#  - Time-series designer (analytic profiles, CSV upload, blowdown curves)
+#  - Custom plot builder (select any variables and chart style)
+#  - Built-in dashboards for cooling, thrust, Pc, mdot, MR, etc.
 
 # Pressure sweep (2D grid)
 python pressure_sweep_example.py

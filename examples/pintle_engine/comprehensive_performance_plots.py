@@ -63,8 +63,8 @@ P_inj_F = P_tank_F/6894.76 - delta_p_feed_F
 delta_p_inj_O = P_inj_O - Pc
 delta_p_inj_F = P_inj_F - Pc
 
-A_LOX, A_fuel = get_effective_areas(config.pintle_geometry)
-d_hyd_O, d_hyd_F = get_hydraulic_diameters(config.pintle_geometry)
+A_LOX, A_fuel = get_effective_areas(config.injector.geometry)
+d_hyd_O, d_hyd_F = get_hydraulic_diameters(config.injector.geometry)
 rho_O = config.fluids["oxidizer"].density
 rho_F = config.fluids["fuel"].density
 u_O = mdot_O / (rho_O * A_LOX)

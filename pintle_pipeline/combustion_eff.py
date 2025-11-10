@@ -41,7 +41,9 @@ def calculate_Lstar(
 def eta_cstar(
     Lstar: float,
     config: CombustionEfficiencyConfig,
-    spray_quality_good: bool = True
+    spray_quality_good: bool = True,
+    mixture_efficiency: float = 1.0,
+    cooling_efficiency: float = 1.0
 ) -> float:
     """
     Calculate combustion efficiency based on characteristic length L*.
@@ -75,9 +77,14 @@ def eta_cstar(
     # Apply spray quality correction if enabled
     if config.use_spray_correction and not spray_quality_good:
         eta *= config.spray_penalty_factor
+
+    mixture_efficiency = float(np.clip(mixture_efficiency, config.mixture_efficiency_floor, 1.0))
+    cooling_efficiency = float(np.clip(cooling_efficiency, config.cooling_efficiency_floor, 1.0))
+    eta *= mixture_efficiency * cooling_efficiency
     
     # Clamp to reasonable range
-    eta = np.clip(eta, 0.5, 1.0)  # Minimum 50% efficiency
+    lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
+    eta = np.clip(eta, lower_bound, 1.0)
     
     return float(eta)
 

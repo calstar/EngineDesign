@@ -2,15 +2,11 @@
 
 import numpy as np
 from typing import Dict, Any, Optional, Union
+
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.cea_cache import CEACache
 from pintle_models.chamber_solver import ChamberSolver
 from pintle_models.nozzle import calculate_thrust
-from pintle_models.closure import flows
-from pintle_pipeline.film_cooling import compute_film_cooling
-from pintle_pipeline.regen_cooling import compute_regen_heat_transfer, estimate_hot_wall_heat_flux
-from pintle_pipeline.ablative_cooling import compute_ablative_response
-from pintle_pipeline.regen_cooling import RegenCoolingConfig
 
 
 class PintleEngineRunner:
@@ -98,86 +94,7 @@ class PintleEngineRunner:
         v_exit = thrust_results["v_exit"]
         P_exit = thrust_results["P_exit"]
 
-        cooling_results = {}
-        film_results = {
-            "enabled": False,
-            "mass_fraction": 0.0,
-            "mdot_film": 0.0,
-            "mdot_available_for_regen": mdot_F,
-            "effectiveness": 0.0,
-            "heat_flux_factor": 1.0,
-            "film_temperature": self.config.fluids["fuel"].temperature,
-        }
-
-        fuel_fluid = self.config.fluids["fuel"]
-
-        if self.config.film_cooling is not None:
-            film_results = compute_film_cooling(
-                mdot_total,
-                mdot_F,
-                diagnostics["Tc"],
-                self.config.film_cooling,
-                fuel_fluid.temperature,
-            )
-            cooling_results["film"] = film_results
-
-        regen_results = {
-            "enabled": False,
-        }
-
-        if self.config.regen_cooling is not None and self.config.regen_cooling.enabled:
-            coolant_props = {
-                "density": float(fuel_fluid.density),
-                "viscosity": float(fuel_fluid.viscosity),
-                "cp": float(fuel_fluid.specific_heat),
-                "thermal_conductivity": float(fuel_fluid.thermal_conductivity),
-                "temperature": float(fuel_fluid.temperature),
-            }
-
-            chamber_area = None
-            if self.config.regen_cooling.channel_length > 0:
-                chamber_area = self.config.chamber.volume / self.config.regen_cooling.channel_length
-
-            gas_props = {
-                "Pc": Pc,
-                "Tc": diagnostics["Tc"],
-                "gamma": diagnostics["gamma"],
-                "R": diagnostics["R"],
-                "chamber_area": chamber_area,
-                "A_throat": self.config.chamber.A_throat,
-            }
-
-            mdot_coolant = max(mdot_F, 1e-9)
-
-            regen_results = compute_regen_heat_transfer(
-                mdot_coolant,
-                coolant_props,
-                gas_props,
-                self.config.regen_cooling,
-                mdot_total,
-            )
-            regen_results["mdot_coolant"] = mdot_coolant
-            cooling_results["regen"] = regen_results
-
-        if self.config.ablative_cooling is not None and self.config.ablative_cooling.enabled:
-            abl_surface_temp = self.config.ablative_cooling.surface_temperature_limit
-            hot_flux = estimate_hot_wall_heat_flux(
-                gas_props,
-                self.config.regen_cooling,
-                abl_surface_temp,
-                mdot_total,
-            )
-            net_heat_flux = hot_flux["heat_flux_total"]
-            surface_temp = abl_surface_temp
-            ablative_results = compute_ablative_response(
-                net_heat_flux,
-                surface_temp,
-                diagnostics["Tc"],
-                self.config.ablative_cooling,
-            )
-            cooling_results["ablative"] = ablative_results
-
-        diagnostics["cooling"] = cooling_results
+        cooling_results = diagnostics.get("cooling", {})
         
         # Compile results
         results = {
