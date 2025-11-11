@@ -283,6 +283,73 @@ def update_chamber_geometry_from_ablation(
     )
 
 
+def update_nozzle_exit_from_ablation(
+    A_exit_initial: float,
+    D_exit_initial: float,
+    recession_thickness_exit: float,
+    coverage_fraction: float = 1.0,
+) -> Tuple[float, float, Dict[str, float]]:
+    """
+    Update nozzle exit area due to ablative recession.
+    
+    For graphite nozzle inserts, the exit area grows as material recedes.
+    This affects the expansion ratio: ε = A_exit / A_throat
+    
+    Parameters:
+    -----------
+    A_exit_initial : float
+        Initial nozzle exit area [m²]
+    D_exit_initial : float
+        Initial nozzle exit diameter [m]
+    recession_thickness_exit : float
+        Total thickness of ablative material removed from nozzle exit [m]
+    coverage_fraction : float
+        Fraction of nozzle exit with ablative (default 1.0)
+    
+    Returns:
+    --------
+    A_exit_new : float
+        Updated nozzle exit area [m²]
+    D_exit_new : float
+        Updated nozzle exit diameter [m]
+    diagnostics : dict
+        Additional diagnostic information
+    """
+    if recession_thickness_exit <= 0 or coverage_fraction <= 0:
+        return (
+            A_exit_initial,
+            D_exit_initial,
+            {
+                "recession_exit": 0.0,
+                "exit_area_change_pct": 0.0,
+            },
+        )
+    
+    # Apply coverage fraction
+    effective_recession_exit = recession_thickness_exit * coverage_fraction
+    
+    # Update exit diameter and area
+    # For circular exit: A = π × r²
+    D_exit_new = D_exit_initial + 2.0 * effective_recession_exit
+    R_exit_new = D_exit_new / 2.0
+    A_exit_new = np.pi * (R_exit_new ** 2)
+    
+    # Calculate percentage change
+    exit_area_change_pct = (A_exit_new - A_exit_initial) / A_exit_initial * 100.0
+    
+    diagnostics = {
+        "recession_exit": float(effective_recession_exit),
+        "exit_area_change_pct": float(exit_area_change_pct),
+        "D_exit_change": float(D_exit_new - D_exit_initial),
+    }
+    
+    return (
+        float(A_exit_new),
+        float(D_exit_new),
+        diagnostics,
+    )
+
+
 def calculate_Lstar_time_varying(
     V_chamber_initial: float,
     A_throat_initial: float,

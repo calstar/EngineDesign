@@ -10,6 +10,7 @@ from pintle_models.chamber_solver import ChamberSolver
 from pintle_models.nozzle import calculate_thrust
 from pintle_pipeline.ablative_geometry import (
     update_chamber_geometry_from_ablation,
+    update_nozzle_exit_from_ablation,
     calculate_throat_recession_multiplier,
     calculate_local_recession_rate,
 )
@@ -86,13 +87,17 @@ class PintleEngineRunner:
         # Use sea level ambient pressure (101325 Pa) as default
         Pa = 101325.0  # Pa - Ambient pressure (sea level)
         
+        # Calculate current expansion ratio (for 3D CEA cache)
+        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
+        
         thrust_results = calculate_thrust(
             Pc,
             MR,
             mdot_total,
             self.cea_cache,
             self.config.nozzle,
-            Pa
+            Pa,
+            eps=eps_current  # Pass current expansion ratio
         )
         
         F = thrust_results["F"]
@@ -271,8 +276,11 @@ class PintleEngineRunner:
             "Lstar": np.full(n, np.nan),
             "V_chamber": np.full(n, np.nan),
             "A_throat": np.full(n, np.nan),
+            "A_exit": np.full(n, np.nan),
+            "eps": np.full(n, np.nan),  # Expansion ratio
             "recession_chamber": np.full(n, 0.0),
             "recession_throat": np.full(n, 0.0),
+            "recession_exit": np.full(n, 0.0),
             "throat_recession_multiplier": np.full(n, np.nan),
             "diagnostics": [],
         }
@@ -280,13 +288,16 @@ class PintleEngineRunner:
         # Initial geometry
         V_chamber_initial = self.config.chamber.volume
         A_throat_initial = self.config.chamber.A_throat
+        A_exit_initial = self.config.nozzle.A_exit
         L_chamber = self.config.chamber.length if self.config.chamber.length else 0.18
         D_chamber_initial = np.sqrt(4 * V_chamber_initial / (np.pi * L_chamber))
         D_throat_initial = np.sqrt(4 * A_throat_initial / np.pi)
+        D_exit_initial = np.sqrt(4 * A_exit_initial / np.pi)
         
         # Track cumulative recession
         cumulative_recession_chamber = 0.0
         cumulative_recession_throat = 0.0
+        cumulative_recession_exit = 0.0
         
         # Create a mutable config copy for geometry updates
         config_copy = copy.deepcopy(self.config)
@@ -309,13 +320,18 @@ class PintleEngineRunner:
                 
                 # Calculate thrust and performance
                 Pa = 101325.0  # Ambient pressure
+                
+                # Calculate current expansion ratio (for 3D CEA cache)
+                eps_current = config_copy.nozzle.A_exit / config_copy.chamber.A_throat
+                
                 thrust_results = calculate_thrust(
                     Pc,
                     diagnostics["MR"],
                     diagnostics["mdot_total"],
                     self.cea_cache,
                     config_copy.nozzle,
-                    Pa
+                    Pa,
+                    eps=eps_current  # Pass current expansion ratio
                 )
                 thrust = thrust_results["F"]
                 v_exit = thrust_results["v_exit"]
@@ -351,8 +367,11 @@ class PintleEngineRunner:
                 results["Lstar"][i] = solver_temp.Lstar
                 results["V_chamber"][i] = config_copy.chamber.volume
                 results["A_throat"][i] = config_copy.chamber.A_throat
+                results["A_exit"][i] = config_copy.nozzle.A_exit
+                results["eps"][i] = eps_current  # Store expansion ratio
                 results["recession_chamber"][i] = cumulative_recession_chamber
                 results["recession_throat"][i] = cumulative_recession_throat
+                results["recession_exit"][i] = cumulative_recession_exit
                 
                 # Store diagnostics
                 results["diagnostics"].append(point_results["diagnostics"])
@@ -421,6 +440,25 @@ class PintleEngineRunner:
                         # Update L* if specified
                         if config_copy.chamber.Lstar is not None:
                             config_copy.chamber.Lstar = V_new / A_throat_new
+                        
+                        # Update nozzle exit geometry if nozzle is ablative
+                        if ablative_cfg.nozzle_ablative:
+                            # Nozzle exit recedes at similar rate to chamber (can be tuned)
+                            # For now, assume exit recession rate = 0.8 × chamber rate (less severe than throat)
+                            recession_increment_exit = recession_rate * 0.8 * dt
+                            cumulative_recession_exit += recession_increment_exit
+                            
+                            A_exit_new, D_exit_new, exit_diag = update_nozzle_exit_from_ablation(
+                                A_exit_initial,
+                                D_exit_initial,
+                                cumulative_recession_exit,
+                                ablative_cfg.coverage_fraction,
+                            )
+                            
+                            # Update nozzle config
+                            config_copy.nozzle.A_exit = A_exit_new
+                            
+                            # Expansion ratio will be recalculated on next iteration
                 
             except Exception as e:
                 # If solve fails, leave NaN values
