@@ -250,7 +250,11 @@ combustion:
     Pc_range: [1.0e6, 9.0e6]  # Pa - Lookup table range (NOT pipeline input! Just for table grid)
     MR_range: [1.6, 3.5]  # Mixture ratio range for lookup table (extended to capture peaks and falling edges)
     eps_range: [4.0, 15.0]  # Expansion ratio range for 3D cache (covers throat growth from ablation)
+<<<<<<< HEAD
     n_points: 20  # Grid points per dimension (20³ = 8,000 points, ~67 min build time)
+=======
+    n_points: 200  # Grid points per dimension (20³ = 8,000 points, ~67 min build time)
+>>>>>>> c38baa4 (DOCS: Complete 3D CEA cache documentation + updated n_points to 20^3 + test script)
                   # Original 2D was 200² = 40,000 points
                   # For 3D: 20³ = 8,000 is good balance of resolution vs speed
                   # Can increase to 30³ = 27,000 for production (~225 min build)
