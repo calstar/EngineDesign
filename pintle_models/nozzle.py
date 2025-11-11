@@ -11,7 +11,8 @@ def calculate_thrust(
     mdot_total: float,
     cea_cache: CEACache,
     nozzle_config: NozzleConfig,
-    Pa: float = 101325.0
+    Pa: float = 101325.0,
+    eps: float = None
 ) -> dict:
     """
     Calculate engine thrust with high fidelity.
@@ -41,6 +42,9 @@ def calculate_thrust(
         Nozzle configuration
     Pa : float
         Ambient pressure [Pa] (default: sea level)
+    eps : float, optional
+        Expansion ratio (A_exit / A_throat). If None, uses nozzle_config.expansion_ratio.
+        For ablative nozzles, this changes over time as throat/exit areas evolve.
     
     Returns:
     --------
@@ -55,8 +59,12 @@ def calculate_thrust(
         - v_exit: Exit velocity [m/s]
         - Isp: Specific impulse [s]
     """
-    # Get CEA properties
-    cea_props = cea_cache.eval(MR, Pc, Pa, nozzle_config.expansion_ratio)
+    # Use provided eps or default from config
+    if eps is None:
+        eps = nozzle_config.expansion_ratio
+    
+    # Get CEA properties (now with eps parameter for 3D cache)
+    cea_props = cea_cache.eval(MR, Pc, Pa, eps)
     Cf_ideal = cea_props["Cf_ideal"]
     gamma = cea_props["gamma"]
     Tc = cea_props["Tc"]
@@ -66,7 +74,7 @@ def calculate_thrust(
     Cf = nozzle_config.efficiency * Cf_ideal
     
     # Calculate exit pressure using isentropic relations
-    eps = nozzle_config.expansion_ratio
+    # eps is already set above (from parameter or config)
     
     # For supersonic nozzles (eps > 1), we need to solve the area-Mach relation:
     # A/A* = (1/M) × [(2/(gamma+1)) × (1 + (gamma-1)/2 × M²)]^((gamma+1)/(2(gamma-1)))
