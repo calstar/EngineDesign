@@ -183,6 +183,10 @@ class AblativeCoolingConfig(BaseModel):
     turbulence_sensitivity: float = Field(default=1.5, ge=0, description="Sensitivity of ablative heat flux to turbulence")
     turbulence_exponent: float = Field(default=1.0, gt=0, description="Exponent on turbulence intensity for ablative response")
     turbulence_max_multiplier: float = Field(default=3.0, gt=0, description="Maximum multiplier applied to convective heat flux due to turbulence")
+    throat_recession_multiplier: Optional[float] = Field(default=None, gt=0, description="Throat recession multiplier vs chamber (if None, calculated from flow conditions). Typically 1.2-2.0")
+    char_layer_conductivity: float = Field(default=0.2, gt=0, description="Thermal conductivity of char layer [W/(m·K)]")
+    char_layer_thickness: float = Field(default=0.001, gt=0, description="Thickness of protective char layer [m]")
+    track_geometry_evolution: bool = Field(default=True, description="Enable time-varying geometry tracking (L* evolution)")
 
 
 class DischargeConfig(BaseModel):

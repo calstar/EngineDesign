@@ -157,6 +157,150 @@ def _thrust_difference(
     return thrust_kN - target_thrust_kN
 
 
+def solve_for_thrust_and_MR(
+    runner: PintleEngineRunner,
+    target_thrust_kN: float,
+    target_MR: float,
+    initial_guess_psi: Optional[Tuple[float, float]] = None,
+    max_iterations: int = 50,
+    tolerance: float = 0.01,
+) -> Tuple[Tuple[float, float], Dict[str, Any], Dict[str, Any]]:
+    """Solve for tank pressures that achieve both target thrust AND target O/F ratio.
+    
+    This uses a 2D Newton-Raphson iteration to find (P_tank_O, P_tank_F) such that:
+    - Thrust(P_O, P_F) = target_thrust_kN
+    - MR(P_O, P_F) = target_MR
+    
+    Parameters:
+    -----------
+    runner : PintleEngineRunner
+        Engine pipeline runner
+    target_thrust_kN : float
+        Desired thrust [kN]
+    target_MR : float
+        Desired mixture ratio (O/F)
+    initial_guess_psi : tuple, optional
+        Starting guess for (P_tank_O, P_tank_F) in psi
+        If None, uses (1305, 974) as default
+    max_iterations : int
+        Maximum Newton iterations
+    tolerance : float
+        Convergence tolerance (relative error)
+    
+    Returns:
+    --------
+    (P_tank_O_psi, P_tank_F_psi) : tuple
+        Solution tank pressures [psi]
+    results : dict
+        Full pipeline results at solution
+    diagnostics : dict
+        Iteration history and convergence info
+    """
+    from scipy.optimize import fsolve
+    
+    if initial_guess_psi is None:
+        initial_guess_psi = (1305.0, 974.0)
+    
+    P_O_guess, P_F_guess = initial_guess_psi
+    
+    # Track iteration history
+    history = {
+        "P_tank_O": [],
+        "P_tank_F": [],
+        "thrust": [],
+        "MR": [],
+        "thrust_error": [],
+        "MR_error": [],
+    }
+    
+    def residual(P_psi: np.ndarray) -> np.ndarray:
+        """Residual function for fsolve: [thrust_error, MR_error]"""
+        P_O_psi, P_F_psi = P_psi
+        
+        # Clamp to positive values
+        if P_O_psi <= 0 or P_F_psi <= 0:
+            return np.array([1e6, 1e6])
+        
+        try:
+            P_O_pa = P_O_psi * PSI_TO_PA
+            P_F_pa = P_F_psi * PSI_TO_PA
+            res = runner.evaluate(P_O_pa, P_F_pa)
+            
+            thrust_kN = res["F"] / 1000.0
+            MR = res["MR"]
+            
+            thrust_error = (thrust_kN - target_thrust_kN) / target_thrust_kN
+            MR_error = (MR - target_MR) / target_MR
+            
+            # Log history
+            history["P_tank_O"].append(P_O_psi)
+            history["P_tank_F"].append(P_F_psi)
+            history["thrust"].append(thrust_kN)
+            history["MR"].append(MR)
+            history["thrust_error"].append(thrust_error)
+            history["MR_error"].append(MR_error)
+            
+            return np.array([thrust_error, MR_error])
+        
+        except Exception as exc:
+            # If evaluation fails, return large error
+            return np.array([1e6, 1e6])
+    
+    # Solve using fsolve (Levenberg-Marquardt-like hybrid method)
+    try:
+        solution, info, ier, msg = fsolve(
+            residual,
+            x0=np.array([P_O_guess, P_F_guess]),
+            full_output=True,
+            xtol=tolerance,
+            maxfev=max_iterations * 10,
+        )
+        
+        P_O_sol, P_F_sol = solution
+        
+        if ier != 1:
+            raise ThrustSolveError(
+                f"fsolve did not converge: {msg}",
+                {
+                    "history": history,
+                    "final_pressures": (P_O_sol, P_F_sol),
+                    "target_thrust": target_thrust_kN,
+                    "target_MR": target_MR,
+                },
+            )
+        
+        # Evaluate final solution
+        final_results = runner.evaluate(P_O_sol * PSI_TO_PA, P_F_sol * PSI_TO_PA)
+        final_thrust = final_results["F"] / 1000.0
+        final_MR = final_results["MR"]
+        
+        thrust_error_pct = abs((final_thrust - target_thrust_kN) / target_thrust_kN) * 100
+        MR_error_pct = abs((final_MR - target_MR) / target_MR) * 100
+        
+        diagnostics = {
+            "history": history,
+            "iterations": len(history["thrust"]),
+            "final_thrust": final_thrust,
+            "final_MR": final_MR,
+            "thrust_error_pct": thrust_error_pct,
+            "MR_error_pct": MR_error_pct,
+            "converged": True,
+        }
+        
+        return (P_O_sol, P_F_sol), final_results, diagnostics
+    
+    except Exception as exc:
+        raise ThrustSolveError(
+            f"Failed to solve for thrust and O/F: {exc}",
+            {
+                "history": history,
+                "target_thrust": target_thrust_kN,
+                "target_MR": target_MR,
+                "initial_guess": initial_guess_psi,
+            },
+        ) from exc
+
+
 def solve_for_thrust(
     runner: PintleEngineRunner,
     target_thrust_kN: float,
