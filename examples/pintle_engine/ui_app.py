@@ -7,7 +7,6 @@ from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
-from types import SimpleNamespace
 
 import sys
 
@@ -31,22 +30,11 @@ from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight
-from examples.pintle_engine.copv_pressure.copv_solve import size_or_check_copv_for_polytropic_N2
 
 PSI_TO_PA = 6894.76
 PA_TO_PSI = 1.0 / PSI_TO_PA
 
 CONFIG_PATH = Path(__file__).parent / "config_minimal.yaml"
-COPV_DATA_DIR = Path(__file__).parent / "copv_pressure"
-N2_Z_LOOKUP_PATH = COPV_DATA_DIR / "n2_Z_lookup.csv"
-PRESSURE_UNIT_TO_PSI = {
-    "psi": 1.0,
-    "kPa": 0.1450377377,
-    "MPa": 145.0377377,
-    "Pa": 0.0001450377377,
-    "bar": 14.50377377,
-    "atm": 14.6959488,
-}
 
 FLUID_LIBRARY: Dict[str, Dict[str, float]] = {
     "LOX": {
@@ -584,7 +572,7 @@ def display_time_series_summary(df: pd.DataFrame) -> None:
     pc_column = df["Pc (psi)"]
     avg_thrust = float(thrust_column.mean())
     max_thrust = float(thrust_column.max())
-    total_impulse = float(np.trapezoid(thrust_column * 1000.0, df["time"])) / 1000.0  # kN·s
+    total_impulse = float(np.trapz(thrust_column * 1000.0, df["time"])) / 1000.0  # kN·s
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Burn duration", f"{duration:.2f} s")
@@ -1696,398 +1684,6 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
     else:
         st.info("Edit configuration above, then click Run Flight Simulation.")
 
-
-def copv_pressure_view(config_obj: PintleEngineConfig) -> None:
-    st.header("COPV Pressure")
-    st.write("Size or verify the COPV fill pressure profile based on a time-series dataset.")
-
-    datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
-    if not datasets:
-        st.info("No datasets available. Run a forward or time-series analysis to populate datasets first.")
-        return
-
-    ds_names = list(datasets.keys())
-    default_ds = st.session_state.get("last_custom_dataset") or ds_names[0]
-    dataset_name = st.selectbox(
-        "Dataset for COPV analysis",
-        ds_names,
-        index=ds_names.index(default_ds) if default_ds in ds_names else 0,
-        key="copv_dataset_select",
-    )
-    ds_df = datasets[dataset_name]
-    if ds_df.empty:
-        st.warning("Selected dataset is empty.")
-        return
-
-    numeric_cols = ds_df.select_dtypes(include=[np.number]).columns.tolist()
-    if not numeric_cols:
-        st.error("Dataset must contain numeric columns for time, mdot_O, and P_tank_O.")
-        return
-
-    columns_all = ds_df.columns.tolist()
-    time_default = "time" if "time" in columns_all else numeric_cols[0]
-    if "mdot_O (kg/s)" in columns_all:
-        mdot_default = "mdot_O (kg/s)"
-    elif len(numeric_cols) > 1:
-        mdot_default = numeric_cols[min(1, len(numeric_cols) - 1)]
-    else:
-        mdot_default = numeric_cols[0]
-    pt_default = "P_tank_O (psi)" if "P_tank_O (psi)" in columns_all else numeric_cols[0]
-
-    with st.expander("Map dataset columns", expanded=True):
-        map_cols = st.columns(3)
-        with map_cols[0]:
-            time_col = st.selectbox(
-                "Time column [s]",
-                columns_all,
-                index=columns_all.index(time_default) if time_default in columns_all else 0,
-                key="copv_time_col",
-            )
-        with map_cols[1]:
-            mdot_col = st.selectbox(
-                "mdot_O column [kg/s]",
-                columns_all,
-                index=columns_all.index(mdot_default) if mdot_default in columns_all else 0,
-                key="copv_mdot_col",
-            )
-        with map_cols[2]:
-            pt_col = st.selectbox(
-                "Prop tank pressure column",
-                columns_all,
-                index=columns_all.index(pt_default) if pt_default in columns_all else 0,
-                key="copv_ptank_col",
-            )
-        inferred_unit = "psi"
-        lower_name = pt_col.lower()
-        for unit_key in PRESSURE_UNIT_TO_PSI:
-            if unit_key in lower_name:
-                inferred_unit = unit_key
-                break
-        P_tank_unit = st.selectbox(
-            "Prop tank pressure units",
-            list(PRESSURE_UNIT_TO_PSI.keys()),
-            index=list(PRESSURE_UNIT_TO_PSI.keys()).index(inferred_unit),
-            key="copv_ptank_units",
-        )
-
-    lox_tank = getattr(config_obj, "lox_tank", None)
-    press_tank = getattr(config_obj, "press_tank", None)
-    propellant_section = getattr(config_obj, "propellant", None)
-
-    def _cylinder_volume(radius: Optional[float], height: Optional[float]) -> Optional[float]:
-        if radius is None or height is None:
-            return None
-        try:
-            r = float(radius)
-            h = float(height)
-        except (TypeError, ValueError):
-            return None
-        if r <= 0 or h <= 0:
-            return None
-        return math.pi * r * r * h
-
-    default_prop_volume = None
-    if propellant_section is not None and getattr(propellant_section, "tank_volume_m3", None):
-        try:
-            default_prop_volume = float(propellant_section.tank_volume_m3)
-        except (TypeError, ValueError):
-            default_prop_volume = None
-    if default_prop_volume is None and lox_tank is not None:
-        default_prop_volume = _cylinder_volume(getattr(lox_tank, "lox_radius", None), getattr(lox_tank, "lox_h", None))
-    default_prop_volume = default_prop_volume or 0.05
-
-    default_copv_volume = _cylinder_volume(getattr(press_tank, "press_radius", None), getattr(press_tank, "press_h", None)) or 0.01
-    default_prop_mass = None
-    if lox_tank is not None and getattr(lox_tank, "mass", None) is not None:
-        try:
-            default_prop_mass = float(lox_tank.mass)
-        except (TypeError, ValueError):
-            default_prop_mass = None
-    default_prop_mass = default_prop_mass or 20.0
-
-    default_pressurant_R = None
-    pressurant_fluid = config_obj.fluids.get("pressurant") if isinstance(getattr(config_obj, "fluids", None), dict) else None
-    if pressurant_fluid is not None and hasattr(pressurant_fluid, "R"):
-        try:
-            default_pressurant_R = float(pressurant_fluid.R)
-        except (TypeError, ValueError):
-            default_pressurant_R = None
-    default_pressurant_R = default_pressurant_R or 296.8
-
-    default_fill_pressure = st.session_state.get("copv_last_fill_pressure", 4500.0)
-
-    with st.form("copv_solver_form"):
-        sizing_mode = st.radio(
-            "Sizing mode",
-            (
-                "Solve fill pressure for a known COPV volume",
-                "Solve COPV volume for a known fill pressure",
-            ),
-            key="copv_sizing_mode",
-        )
-        if sizing_mode == "Solve fill pressure for a known COPV volume":
-            copv_volume_input = st.number_input(
-                "COPV internal volume [m³]",
-                min_value=1e-4,
-                max_value=0.2,
-                value=float(default_copv_volume),
-                format="%.5f",
-                key="copv_volume_input",
-            )
-            fill_pressure_input = None
-        else:
-            fill_pressure_input = st.number_input(
-                "Desired COPV fill pressure [psi]",
-                min_value=500.0,
-                max_value=10000.0,
-                value=float(default_fill_pressure),
-                step=50.0,
-                key="copv_fill_pressure_input",
-            )
-            copv_volume_input = None
-
-        geom_cols = st.columns(2)
-        with geom_cols[0]:
-            prop_tank_volume = st.number_input(
-                "Propellant tank total volume [m³]",
-                min_value=1e-4,
-                max_value=1.0,
-                value=float(default_prop_volume),
-                format="%.4f",
-                key="copv_prop_volume",
-            )
-        with geom_cols[1]:
-            initial_prop_mass = st.number_input(
-                "Initial oxidizer mass [kg]",
-                min_value=0.1,
-                max_value=1000.0,
-                value=float(default_prop_mass),
-                format="%.3f",
-                key="copv_initial_prop_mass",
-            )
-
-        solver_cols = st.columns(3)
-        with solver_cols[0]:
-            polytropic_n = st.number_input(
-                "Polytropic exponent n",
-                min_value=1.0,
-                max_value=1.7,
-                value=1.2,
-                step=0.05,
-                key="copv_polytropic_n",
-            )
-        with solver_cols[1]:
-            T0_K = st.number_input(
-                "COPV temperature T0 [K]",
-                min_value=100.0,
-                max_value=600.0,
-                value=300.0,
-                step=5.0,
-                key="copv_T0",
-            )
-        with solver_cols[2]:
-            Tp_K = st.number_input(
-                "Prop tank temperature Tp [K]",
-                min_value=50.0,
-                max_value=600.0,
-                value=300.0,
-                step=5.0,
-                key="copv_Tp",
-            )
-
-        gas_cols = st.columns(2)
-        with gas_cols[0]:
-            pressurant_R = st.number_input(
-                "Pressurant gas constant R [J/(kg·K)]",
-                min_value=10.0,
-                max_value=500.0,
-                value=float(default_pressurant_R),
-                step=5.0,
-                key="copv_pressurant_R",
-            )
-        with gas_cols[1]:
-            use_real_gas = st.checkbox("Use real-gas compressibility lookup", value=True, key="copv_use_real_gas")
-
-        with st.expander("Advanced solver options", expanded=False):
-            tol = st.number_input("Convergence tolerance", min_value=1e-6, max_value=1e-2, value=1e-4, format="%.1e", key="copv_tol")
-            max_iter = st.number_input("Max iterations", min_value=10, max_value=200, value=60, step=5, key="copv_max_iter")
-            z_lookup_path = st.text_input("N₂ Z lookup CSV", value=str(N2_Z_LOOKUP_PATH), key="copv_z_lookup")
-
-        run_btn = st.form_submit_button("Run COPV Solver", type="primary")
-
-    if not run_btn:
-        st.info("Adjust the inputs above, then click Run COPV Solver.")
-        return
-
-    if prop_tank_volume <= 0 or initial_prop_mass <= 0:
-        st.error("Propellant tank volume and initial mass must be positive.")
-        return
-    if sizing_mode == "Solve fill pressure for a known COPV volume" and (copv_volume_input is None or copv_volume_input <= 0):
-        st.error("Provide a positive COPV volume.")
-        return
-    if sizing_mode == "Solve COPV volume for a known fill pressure" and (fill_pressure_input is None or fill_pressure_input <= 0):
-        st.error("Provide a positive fill pressure.")
-        return
-    if use_real_gas and z_lookup_path and not Path(z_lookup_path).exists():
-        st.error(f"N₂ Z lookup CSV not found at {z_lookup_path}.")
-        return
-
-    try:
-        df_payload = pd.DataFrame(
-            {
-                "time": pd.to_numeric(ds_df[time_col], errors="coerce"),
-                "mdot_O (kg/s)": pd.to_numeric(ds_df[mdot_col], errors="coerce"),
-                "P_tank_raw": pd.to_numeric(ds_df[pt_col], errors="coerce"),
-            }
-        ).dropna(subset=["time", "mdot_O (kg/s)", "P_tank_raw"])
-    except KeyError as exc:
-        st.error(f"Missing column in dataset: {exc}")
-        return
-
-    if df_payload.empty or len(df_payload) < 2:
-        st.error("Dataset must contain at least two valid samples for time, mdot_O, and P_tank.")
-        return
-
-    pressure_factor = PRESSURE_UNIT_TO_PSI.get(P_tank_unit, 1.0)
-    df_payload["P_tank_O (psi)"] = df_payload["P_tank_raw"] * pressure_factor
-    df_payload = df_payload.drop(columns=["P_tank_raw"]).sort_values("time").reset_index(drop=True)
-
-    copv_config = copy.deepcopy(config_obj)
-    lox_section = getattr(copv_config, "lox_tank", None)
-    if lox_section is not None:
-        try:
-            object.__setattr__(lox_section, "mass", float(initial_prop_mass))
-        except Exception:
-            pass
-    else:
-        copv_config.lox_tank = SimpleNamespace(mass=float(initial_prop_mass))
-
-    propellant_ns = getattr(copv_config, "propellant", None)
-    if propellant_ns is None:
-        propellant_ns = SimpleNamespace()
-        copv_config.propellant = propellant_ns
-    setattr(propellant_ns, "tank_volume_m3", float(prop_tank_volume))
-
-    fluids_dict: Dict[str, Any] = dict(getattr(copv_config, "fluids", {}))
-    pressurant_entry = fluids_dict.get("pressurant")
-    if pressurant_entry is None:
-        fluids_dict["pressurant"] = SimpleNamespace(R=float(pressurant_R))
-    else:
-        try:
-            setattr(pressurant_entry, "R", float(pressurant_R))
-        except Exception:
-            fluids_dict["pressurant"] = SimpleNamespace(R=float(pressurant_R))
-    copv_config.fluids = fluids_dict
-
-    solver_kwargs: Dict[str, Any] = {
-        "n": float(polytropic_n),
-        "T0_K": float(T0_K),
-        "Tp_K": float(Tp_K),
-        "use_real_gas": bool(use_real_gas),
-        "n2_Z_csv": str(z_lookup_path),
-        "tol": float(tol),
-        "max_iter": int(max_iter),
-        "copv_volume_m3": float(copv_volume_input) if copv_volume_input is not None else None,
-        "copv_P0_Pa": float(fill_pressure_input) * PSI_TO_PA if fill_pressure_input is not None else None,
-    }
-
-    try:
-        results = size_or_check_copv_for_polytropic_N2(df_payload, copv_config, **solver_kwargs)
-    except Exception as exc:
-        st.error(f"COPV solver failed: {exc}")
-        return
-
-    st.session_state["copv_last_fill_pressure"] = fill_pressure_input or (results.get("P0_Pa", 0.0) * PA_TO_PSI if results.get("P0_Pa") else 0.0)
-
-    p0_pa = results.get("P0_Pa")
-    volume_m3 = results.get("copv_volume_m3")
-    m0_kg = results.get("m0_kg")
-    margin_pa = results.get("min_margin_Pa")
-    delivered_mass = results.get("total_delivered_mass_kg")
-
-    metric_cols = st.columns(4)
-    with metric_cols[0]:
-        st.metric("Fill pressure P0", f"{p0_pa * PA_TO_PSI:.0f} psi" if p0_pa else "N/A")
-    with metric_cols[1]:
-        st.metric("COPV volume", f"{volume_m3*1000:.1f} L" if volume_m3 else "N/A")
-    with metric_cols[2]:
-        st.metric("Initial gas mass", f"{m0_kg:.2f} kg" if m0_kg else "N/A")
-    with metric_cols[3]:
-        st.metric("Delivered gas mass", f"{delivered_mass:.2f} kg" if delivered_mass else "N/A")
-
-    if margin_pa is not None:
-        margin_psi = margin_pa * PA_TO_PSI
-        if margin_psi < 0:
-            st.error(f"Minimum pressure margin is {margin_psi:.1f} psi (insufficient).")
-        else:
-            st.info(f"Minimum pressure margin: {margin_psi:.1f} psi.")
-
-    prop_press = np.asarray(results.get("P_tank_Pa", []), dtype=float) * PA_TO_PSI
-    copv_press = np.asarray(results.get("PH_trace_Pa", []), dtype=float) * PA_TO_PSI
-    time_vals = np.asarray(results.get("time_s", []), dtype=float)
-    mdot_vals = np.asarray(results.get("mdot_o_kg_s", []), dtype=float)
-
-    if time_vals.size and prop_press.size:
-        trace_len = min(time_vals.size, prop_press.size)
-        time_plot = time_vals[:trace_len]
-        prop_plot = prop_press[:trace_len]
-        if copv_press.size >= trace_len:
-            copv_plot = copv_press[:trace_len]
-        elif copv_press.size == 0:
-            copv_plot = np.full(trace_len, np.nan)
-        else:
-            copv_plot = np.full(trace_len, np.nan)
-            copv_plot[: copv_press.size] = copv_press
-        if mdot_vals.size >= trace_len:
-            mdot_plot = mdot_vals[:trace_len]
-        elif trace_len == 0:
-            mdot_plot = mdot_vals
-        else:
-            mdot_plot = np.full(trace_len, np.nan)
-            if mdot_vals.size:
-                mdot_plot[: mdot_vals.size] = mdot_vals
-        margin_trace = copv_plot - prop_plot
-
-        plot_df = pd.DataFrame(
-            {
-                "time (s)": time_plot,
-                "Prop tank (psi)": prop_plot,
-                "COPV supply (psi)": copv_plot,
-            }
-        )
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=plot_df["time (s)"], y=plot_df["Prop tank (psi)"], name="Prop tank (psi)"))
-        fig.add_trace(go.Scatter(x=plot_df["time (s)"], y=plot_df["COPV supply (psi)"], name="COPV supply (psi)"))
-        fig.update_layout(title="Pressure profile", xaxis_title="Time [s]", yaxis_title="Pressure [psi]")
-        st.plotly_chart(fig, use_container_width=True, key="copv_pressure_plot")
-
-        margin_fig = go.Figure()
-        margin_fig.add_trace(go.Scatter(x=time_plot, y=margin_trace, name="Margin (psi)"))
-        margin_fig.update_layout(title="Pressure margin", xaxis_title="Time [s]", yaxis_title="Margin [psi]")
-        st.plotly_chart(margin_fig, use_container_width=True, key="copv_margin_plot")
-
-        results_table = pd.DataFrame(
-            {
-                "time (s)": time_plot,
-                "Prop tank pressure (psi)": prop_plot,
-                "COPV pressure (psi)": copv_plot,
-                "Pressure margin (psi)": margin_trace,
-                "mdot_O (kg/s)": mdot_plot,
-            }
-        )
-        with st.expander("Detailed results", expanded=False):
-            st.dataframe(results_table)
-            st.download_button(
-                "Download COPV results (CSV)",
-                data=results_table.to_csv(index=False).encode("utf-8"),
-                file_name="copv_pressure_results.csv",
-                mime="text/csv",
-                key="copv_results_download",
-            )
-    else:
-        st.warning("Solver did not return pressure traces for plotting.")
-
-
 def detect_fluid_choice(fluid: Dict[str, Any]) -> str:
     name = fluid.get("name")
     if name in FLUID_LIBRARY:
@@ -2682,14 +2278,13 @@ def main():
 
     runner = PintleEngineRunner(config_obj)
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Forward Mode",
         "Inverse Mode",
         "Time-Series Analysis",
         "Plots & Analysis",
         "Custom Plot Builder",
         "Flight Simulation",
-        "COPV Pressure",
     ])
     with tab1:
         forward_view(runner)
@@ -2703,8 +2298,6 @@ def main():
         custom_plot_builder()
     with tab6:
         flight_sim_view(runner, config_obj, config_label)
-    with tab7:
-        copv_pressure_view(config_obj)
 
 
 if __name__ == "__main__":

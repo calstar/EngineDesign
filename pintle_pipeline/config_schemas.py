@@ -15,17 +15,6 @@ class FluidConfig(BaseModel):
     specific_heat: float = Field(default=2200.0, gt=0, description="Specific heat at constant pressure [J/(kg·K)]")
     thermal_conductivity: float = Field(default=0.15, gt=0, description="Thermal conductivity [W/(m·K)]")
     temperature: float = Field(default=293.15, gt=0, description="Bulk fluid temperature [K]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Stored fluid mass [kg] (optional)")
-
-
-class PressurantFluidConfig(BaseModel):
-    """Simplified pressurant gas configuration for COPV sizing"""
-    name: str
-    density: Optional[float] = Field(default=None, gt=0, description="Bulk gas density [kg/m³]")
-    R: float = Field(gt=0, description="Specific gas constant [J/(kg·K)]")
-    specific_heat: Optional[float] = Field(default=None, gt=0, description="Specific heat [J/(kg·K)]")
-    thermal_conductivity: Optional[float] = Field(default=None, gt=0, description="Thermal conductivity [W/(m·K)]")
-    temperature: Optional[float] = Field(default=None, gt=0, description="Bulk gas temperature [K]")
 
 
 class PintleLOXConfig(BaseModel):
@@ -433,7 +422,6 @@ class PressTankConfig(BaseModel):
     press_radius: float = Field(gt=0, description="Pressurant tank radius [m]")
     pres_tank_pos: float = Field(description="Pressurant tank position [m]")
     mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
-    press_volume: Optional[float] = Field(default=None, gt=0, description="Internal pressurant tank volume [m³]")
 
 
 class FinsConfig(BaseModel):
@@ -479,7 +467,7 @@ class ThrustConfig(BaseModel):
 
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
-    fluids: dict[str, Union[FluidConfig, PressurantFluidConfig]]
+    fluids: dict[str, FluidConfig]
     injector: InjectorConfig
     feed_system: dict[str, FeedSystemConfig]  # "oxidizer" and "fuel"
     regen_cooling: Optional[RegenCoolingConfig] = Field(default=None, description="Regenerative cooling configuration (fuel only)")
@@ -507,15 +495,6 @@ class PintleEngineConfig(BaseModel):
             raise ValueError("Must specify both 'oxidizer' and 'fuel' branches")
         return v
 
-    @field_validator("fluids")
-    @classmethod
-    def validate_fluids(cls, v: dict[str, Union[FluidConfig, PressurantFluidConfig]]):
-        """Ensure oxidizer/fuel fluids are present"""
-        for key in ("oxidizer", "fuel"):
-            fluid = v.get(key)
-            if fluid is None or not isinstance(fluid, FluidConfig):
-                raise ValueError(f"Fluids block must include a '{key}' definition with full fluid properties.")
-        return v
-
     class Config:
         extra = "allow"  # Reject unknown fields
+

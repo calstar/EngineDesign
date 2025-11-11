@@ -19,7 +19,6 @@ fluids:
     specific_heat: 2300.0  # J/(kg·K)
     thermal_conductivity: 0.15  # W/(m·K)
     temperature: 90.0  # K - typical LOX tank temperature
-    mass: 22.0  # kg - mass of oxidizer (2.039 kg/s × 10.0 s = 20.39 kg required, with margin)
   
   fuel:
     name: "RP-1"
@@ -30,14 +29,6 @@ fluids:
     specific_heat: 2000.0  # J/(kg·K)
     thermal_conductivity: 0.13  # W/(m·K)
     temperature: 293.0  # K - ambient
-    mass: 4.0         # kg - mass of fuel (0.321 kg/s × 10.0 s = 3.21 kg required, with margin)
-
-  pressurant:
-    name: "GN2"
-    density: 1.2506 #kg / m^3
-    R: 296.8 #molar gas constant
-
-
 
 # Injector Configuration
 injector:
@@ -303,19 +294,17 @@ lox_tank:
   lox_h: 1.14          # [m] LOX tank height
   lox_radius: 0.0762   # [m] LOX tank radius
   ox_tank_pos: 0.6    # [m] Oxidizer tank position relative to motor center (above fuel)
-  mass: 22.0  # kg - mass of oxidizer (2.039 kg/s × 10.0 s = 20.39 kg required, with margin)
-  
+  mass: 22.0  # kg - mass of oxidizer (2.039 kg/s × 10.0 s = 20.39 kg required, with margin)  
 
 fuel_tank:
   rp1_h: .609       # [m] RP-1 tank height
   rp1_radius: 0.0762   # [m] RP-1 tank radius
   fuel_tank_pos: -0.2  # [m] Fuel tank position relative to motor center (below LOX, above motor)
-  mass: 4.0
+  mass: 4.0         # kg - mass of fuel (0.321 kg/s × 10.0 s = 3.21 kg required, with margin)  
 
 press_tank:
   press_h: 0.457         # [m] Pressurant tank height
   press_radius: 0.0762   # [m] Pressurant tank radius
-  press_volume: 0.00265354308 # [m]^3
   pres_tank_pos: 1.2  # [m] Pressurant tank position relative to motor center (above LOX)
 
 
@@ -329,9 +318,9 @@ rocket:
   motor_inertia: [0.1, 0.1, 0.1]
   fins:
     no_fins: 3
-    root_chord: 0.16
-    tip_chord: 0.08
-    fin_span: 0.165
+    root_chord: 0.2
+    tip_chord: 0.1
+    fin_span: 0.3
     fin_position: 0.0  # [m] Fins at bottom (tail) of rocket - will be set to 0.0 in code
   motor: 
     dry_mass: 12.0
@@ -339,7 +328,7 @@ rocket:
 
 # Environment
 environment:
-  date: [2025, 11, 10, 18]
+  date: [2025, 11, 18, 18]
   latitude: 35.34722
   longitude: -117.8099547
   elevation: 626.67

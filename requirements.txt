@@ -7,4 +7,3 @@ PyYAML
 rocketcea
 streamlit
 plotly
-rocketpy
