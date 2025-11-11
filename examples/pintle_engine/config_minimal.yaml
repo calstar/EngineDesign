@@ -19,6 +19,7 @@ fluids:
     specific_heat: 2300.0  # J/(kg·K)
     thermal_conductivity: 0.15  # W/(m·K)
     temperature: 90.0  # K - typical LOX tank temperature
+    mass: 22.0  # kg - mass of oxidizer (2.039 kg/s × 10.0 s = 20.39 kg required, with margin)
   
   fuel:
     name: "RP-1"
@@ -29,6 +30,7 @@ fluids:
     specific_heat: 2000.0  # J/(kg·K)
     thermal_conductivity: 0.13  # W/(m·K)
     temperature: 293.0  # K - ambient
+    mass: 4.0         # kg - mass of fuel (0.321 kg/s × 10.0 s = 3.21 kg required, with margin)
 
 # Injector Configuration
 injector:
@@ -41,10 +43,10 @@ injector:
     # Equivalent diameter: 1.779 mm
     lox:
       n_orifices: 16  # Number of orifices on pintle tip
-      d_orifice: 0.001779  # m - Diameter of each orifice (1.779 mm, calculated from area)
-      theta_orifice: 30.0  # degrees - Angle of orifices from axis
+      d_orifice: 0.003979  # m - Diameter of each orifice (1.779 mm, calculated from area)
+      theta_orifice: 30.01  # degrees - Angle of orifices from axis
       A_entry: 0.00001  # m² - Single entry hole area
-      d_hydraulic: 0.001779  # m - Hydraulic diameter for Re calculation (same as orifice diameter)
+      d_hydraulic: 0.003979  # m - Hydraulic diameter for Re calculation (same as orifice diameter)
     
     # Fuel (Radial Flow - Reservoir with Gap Spillage)
     # Fuel enters reservoir through entry port, fills reservoir,
@@ -110,7 +112,7 @@ feed_system:
 # Pressure drop through cooling channels is added to feed system loss
 # Small channels create significant pressure drop, especially at high flow rates
 regen_cooling:
-  enabled: true  # Enable regen cooling model
+  enabled: false  # Enable regen cooling model
   d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (same as feed_system.fuel.d_inlet)
   L_inlet: 0.5  # m - Length of inlet pipe (estimate)
   n_channels: 100  # Number of parallel cooling channels (optimized for ~90 psi pressure drop)
@@ -269,10 +271,9 @@ combustion:
 #   Lc = 181.62 mm (total chamber length)
 #   Lcyl = 107.45 mm (cylindrical length)
 chamber:
-  volume: 0.000857892  # m³ - Calculated from L*×At = 1.0 × 0.000857892
-  A_throat: 0.000857892  # m² - From Dt = 33.05 mm
-  length: 0.18162  # m - From engine specs (Lc = 181.62 mm)
-  Lstar: 1.0  # m - From engine specs (1000.00 mm)
+  volume: 0.001516  # m³ - Calculated from L*×At = 1.0 × 0.000857892
+  A_throat: 0.00156235266901  # m² - From Dt = 33.05 mm
+  Lstar: 0.97033149433  # m - From engine specs (1000.00 mm)
 
 # Nozzle
 # From engine specs:
@@ -283,10 +284,60 @@ chamber:
 #   F_momentum = ṁ × v_exit
 #   F_pressure = (P_exit - Pa) × A_exit
 nozzle:
-  A_throat: 0.000857892  # m² - From Dt = 33.05 mm
-  A_exit: 0.005615906  # m² - From De = 84.56 mm
-  expansion_ratio: 6.54  # From engine specs: Ae/At = 6.54
+  A_throat: 0.00156235266901     # m² - From Dt = 33.05 mm
+  A_exit: 0.00831498636119     # m² - From De = 84.56 mm
+  expansion_ratio: 5.32209310109    # From engine specs: Ae/At = 6.54
   efficiency: 0.98  # Nozzle efficiency (accounts for losses)
+
+# Tanks
+# Geometric parameters of oxidizer, fuel, and pressurant tanks
+# These are used for RocketPy tank objects and center-of-mass modeling.
+lox_tank:
+  lox_h: 1.14          # [m] LOX tank height
+  lox_radius: 0.0762   # [m] LOX tank radius
+  ox_tank_pos: 0.6    # [m] Oxidizer tank position relative to motor center (above fuel)
+  
+
+fuel_tank:
+  rp1_h: .609       # [m] RP-1 tank height
+  rp1_radius: 0.0762   # [m] RP-1 tank radius
+  fuel_tank_pos: -0.2  # [m] Fuel tank position relative to motor center (below LOX, above motor)
+
+press_tank:
+  press_h: 0.457         # [m] Pressurant tank height
+  press_radius: 0.0762   # [m] Pressurant tank radius
+  pres_tank_pos: 1.2  # [m] Pressurant tank position relative to motor center (above LOX)
+
+
+# Rocket
+rocket:
+  mass: 90.72  # [kg] Total rocket mass (200 lbs = 90.72 kg)
+  inertia: [8.0, 8.0, 0.5]
+  radius: 0.1015
+  cm_wo_motor: 1.3
+  dry_mass: 12.0
+  motor_inertia: [0.1, 0.1, 0.1]
+  fins:
+    no_fins: 3
+    root_chord: 0.2
+    tip_chord: 0.1
+    fin_span: 0.3
+    fin_position: 0.0  # [m] Fins at bottom (tail) of rocket - will be set to 0.0 in code
+  motor: 
+    dry_mass: 12.0
+    inertia: [0.1, 0.1, 0.1]
+
+# Environment
+environment:
+  date: [2025, 11, 20, 18]
+  latitude: 35.34722
+  longitude: -117.8099547
+  elevation: 626.67
+  p_amb: 101325.0 # Pa
+
+thrust:
+  burn_time: 10.0 # seconds
+
 
 # Solver Settings
 # Solves: ṁ_supply(Pc) = ṁ_demand(Pc) to find Pc

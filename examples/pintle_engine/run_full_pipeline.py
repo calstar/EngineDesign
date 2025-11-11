@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from pintle_pipeline.io import load_config
 from pintle_models.runner import PintleEngineRunner
+from examples.pintle_engine.flight_sim import setup_flight
 
 print("=" * 80)
 print("FULL PIPELINE PERFORMANCE ANALYSIS")
@@ -21,8 +22,8 @@ config = load_config(str(config_path))
 runner = PintleEngineRunner(config)
 
 # Test at target operating point from engine specs
-P_tank_O = 1305 * 6894.76  # psi to Pa (from previous analysis)
-P_tank_F = 974 * 6894.76   # psi to Pa (from previous analysis)
+P_tank_O = 400 * 6894.76  # psi to Pa (from previous analysis)
+P_tank_F = 300 * 6894.76   # psi to Pa (from previous analysis)
 
 print(f"\nINPUT CONDITIONS:")
 print(f"  P_tank_O = {P_tank_O/6894.76:.0f} psi ({P_tank_O/1e6:.2f} MPa)")
@@ -262,6 +263,30 @@ if cooling:
         print("  Ablative Cooling:")
         print(f"    Recession rate: {ablative['recession_rate']*1e6:.3f} µm/s")
         print(f"    Effective heat flux: {ablative['effective_heat_flux']/1000:.1f} kW/m²")
+
+# ==============================================================================
+# FLIGHT SIMULATION
+# ==============================================================================
+print(f"\n{'='*80}")
+print("FLIGHT SIMULATION")
+print(f"{'='*80}")
+
+try:
+    rocket = setup_flight(config, F, mdot_O, mdot_F)
+
+    # Display summary results
+    print(f"\n{'-'*80}")
+    print("FLIGHT RESULTS")
+    print(f"{'-'*80}")
+    print(f"  Apogee:        {rocket.apogee:.2f} m")
+    print(f"  Max Velocity:  {rocket.maxVelocity:.2f} m/s")
+    print(f"  Flight Time:   {rocket.totalTime:.2f} s")
+    print(f"  Burn Time:     {rocket.motor.burnOut:.2f} s")
+    print(f"  Launch Rail Exit Velocity: {rocket.outOfRailVelocity:.2f} m/s")
+
+except Exception as e:
+    print(f"\n[ERROR] Flight simulation failed: {e}")
+    print("Skipping flight simulation section.")
 
 # Compare to target
 print(f"\n{'='*80}")

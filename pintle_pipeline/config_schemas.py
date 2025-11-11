@@ -15,6 +15,7 @@ class FluidConfig(BaseModel):
     specific_heat: float = Field(default=2200.0, gt=0, description="Specific heat at constant pressure [J/(kg·K)]")
     thermal_conductivity: float = Field(default=0.15, gt=0, description="Thermal conductivity [W/(m·K)]")
     temperature: float = Field(default=293.15, gt=0, description="Bulk fluid temperature [K]")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
 
 
 class PintleLOXConfig(BaseModel):
@@ -399,6 +400,69 @@ class SolverConfig(BaseModel):
 InjectorConfig = Union[PintleInjectorConfig, CoaxialInjectorConfig, ImpingingInjectorConfig]
 
 
+# Flight simulation configuration classes
+class LOXTankConfig(BaseModel):
+    """LOX tank geometry configuration for flight simulation"""
+    lox_h: float = Field(gt=0, description="LOX tank height [m]")
+    lox_radius: float = Field(gt=0, description="LOX tank radius [m]")
+    ox_tank_pos: float = Field(description="Oxidizer tank position [m]")
+
+
+class FuelTankConfig(BaseModel):
+    """Fuel tank geometry configuration for flight simulation"""
+    rp1_h: float = Field(gt=0, description="RP-1 tank height [m]")
+    rp1_radius: float = Field(gt=0, description="RP-1 tank radius [m]")
+    fuel_tank_pos: float = Field(description="Fuel tank position [m]")
+
+
+class PressTankConfig(BaseModel):
+    """Pressurant tank geometry configuration for flight simulation"""
+    press_h: float = Field(gt=0, description="Pressurant tank height [m]")
+    press_radius: float = Field(gt=0, description="Pressurant tank radius [m]")
+    pres_tank_pos: float = Field(description="Pressurant tank position [m]")
+
+
+class FinsConfig(BaseModel):
+    """Fins configuration for flight simulation"""
+    no_fins: int = Field(gt=0, description="Number of fins")
+    root_chord: float = Field(gt=0, description="Root chord [m]")
+    tip_chord: float = Field(gt=0, description="Tip chord [m]")
+    fin_span: float = Field(gt=0, description="Fin span [m]")
+    fin_position: float = Field(description="Fin position [m]")
+
+
+class MotorConfig(BaseModel):
+    """Motor configuration for flight simulation"""
+    dry_mass: float = Field(gt=0, description="Motor dry mass [kg]")
+    inertia: list[float] = Field(description="Motor inertia [kg·m²]")
+
+
+class RocketConfig(BaseModel):
+    """Rocket configuration for flight simulation"""
+    mass: float = Field(gt=0, description="Rocket mass [kg]")
+    inertia: list[float] = Field(description="Rocket inertia [kg·m²]")
+    radius: float = Field(gt=0, description="Rocket radius [m]")
+    cm_wo_motor: float = Field(description="Center of mass without motor [m]")
+    dry_mass: float = Field(gt=0, description="Dry mass [kg]")
+    motor_inertia: list[float] = Field(description="Motor inertia [kg·m²]")
+    fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
+    motor: Optional[MotorConfig] = Field(default=None, description="Motor configuration")
+
+
+class EnvironmentConfig(BaseModel):
+    """Environment configuration for flight simulation"""
+    date: list[int] = Field(description="Date [year, month, day, hour]")
+    latitude: float = Field(ge=-90, le=90, description="Latitude [deg]")
+    longitude: float = Field(ge=-180, le=180, description="Longitude [deg]")
+    elevation: float = Field(description="Elevation [m]")
+    p_amb: float = Field(gt=0, description="Ambient pressure [Pa]")
+
+
+class ThrustConfig(BaseModel):
+    """Thrust configuration for flight simulation"""
+    burn_time: float = Field(gt=0, description="Burn time [s]")
+
+
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
     fluids: dict[str, FluidConfig]
@@ -413,6 +477,13 @@ class PintleEngineConfig(BaseModel):
     chamber: ChamberConfig
     nozzle: NozzleConfig
     solver: SolverConfig = Field(default_factory=SolverConfig)
+    # Flight simulation fields (optional)
+    lox_tank: Optional[LOXTankConfig] = Field(default=None, description="LOX tank configuration for flight simulation")
+    fuel_tank: Optional[FuelTankConfig] = Field(default=None, description="Fuel tank configuration for flight simulation")
+    press_tank: Optional[PressTankConfig] = Field(default=None, description="Pressurant tank configuration for flight simulation")
+    rocket: Optional[RocketConfig] = Field(default=None, description="Rocket configuration for flight simulation")
+    environment: Optional[EnvironmentConfig] = Field(default=None, description="Environment configuration for flight simulation")
+    thrust: Optional[ThrustConfig] = Field(default=None, description="Thrust configuration for flight simulation")
 
     @field_validator("feed_system", "discharge")
     @classmethod
@@ -423,5 +494,5 @@ class PintleEngineConfig(BaseModel):
         return v
 
     class Config:
-        extra = "forbid"  # Reject unknown fields
+        extra = "allow"  # Reject unknown fields
 
