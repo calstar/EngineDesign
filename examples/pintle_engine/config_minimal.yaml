@@ -178,6 +178,8 @@ ablative_cooling:
   char_layer_conductivity: 0.2  # W/(m·K) - Protective char layer
   char_layer_thickness: 0.001  # m - 1mm char layer
   track_geometry_evolution: true  # Enable time-varying L* tracking
+  nozzle_ablative: false  # If true, nozzle exit also recedes (A_exit grows)
+                          # If false, only throat recedes (expansion ratio decreases)
 
 # Injector Discharge
 # Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]
@@ -242,11 +244,12 @@ combustion:
   cea:
     ox_name: "LOX"
     fuel_name: "RP-1"
-    expansion_ratio: 6.54  # From engine specs: Ae/At = 6.54
-    cache_file: "cea_cache_LOX_RP1.npz"  # Cache file (relative to project root, first run builds it, slow)
+    expansion_ratio: 6.54  # From engine specs: Ae/At = 6.54 (initial/default value)
+    cache_file: "cea_cache_LOX_RP1_3D.npz"  # 3D cache file (Pc, MR, eps)
     Pc_range: [2.0e6, 9.0e6]  # Pa - Lookup table range (NOT pipeline input! Just for table grid)
     MR_range: [1.6, 3.5]  # Mixture ratio range for lookup table (extended to capture peaks and falling edges)
-    n_points: 200  # Grid points (200×200 = 40,000 CEA calls on first run, then cached)
+    eps_range: [4.0, 15.0]  # Expansion ratio range for 3D cache (covers throat growth from ablation)
+    n_points: 15  # Grid points per dimension (15³ = 3,375 points, ~28 min build time)
   
   # Combustion Efficiency (L* correction)
   # CEA assumes infinite-area equilibrium, real chambers have finite volume
