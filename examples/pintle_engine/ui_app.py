@@ -29,35 +29,11 @@ from pintle_pipeline.io import load_config
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
-<<<<<<< HEAD
-from examples.pintle_engine.interactive_pipeline import solve_for_thrust, ThrustSolveError
-from examples.pintle_engine.flight_sim import setup_flight
-from examples.pintle_engine.copv_pressure.copv_solve_both import (
-    size_or_check_copv_for_polytropic_N2,
-)
-from examples.pintle_engine.flight_sim import setup_flight
-from examples.pintle_engine.copv_pressure.copv_solve_both import (
-    size_or_check_copv_for_polytropic_N2,
-)
-
-# RocketPy imports (optional, only needed for flight sim)
-try:
-    from rocketpy import Function
-    ROCKETPY_AVAILABLE = True
-except ImportError:
-    ROCKETPY_AVAILABLE = False
-    Function = None
-
-# RocketPy imports (optional, only needed for flight sim)
-try:
-    from rocketpy import Function
-    ROCKETPY_AVAILABLE = True
-except ImportError:
-    ROCKETPY_AVAILABLE = False
-    Function = None
-=======
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
->>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
+from examples.pintle_engine.flight_sim import setup_flight
+from examples.pintle_engine.copv_pressure.copv_solve_both import (
+    size_or_check_copv_for_polytropic_N2,
+)
 
 PSI_TO_PA = 6894.76
 PA_TO_PSI = 1.0 / PSI_TO_PA
@@ -2901,17 +2877,12 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         chamber = working_copy["chamber"]
         nozzle = working_copy["nozzle"]
         
-<<<<<<< HEAD
         # Chamber geometry specification mode (similar to injector type selector)
         st.markdown("**Chamber Geometry Specification:**")
         
         # Track previous mode to clear state on switch (like injector does)
         previous_geom_mode = st.session_state.get("active_chamber_geom_mode", "Volume + Throat Area")
         
-=======
-        # Chamber geometry specification mode
-        st.markdown("**Chamber Geometry Specification:**")
->>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
         geom_mode = st.radio(
             "Choose how to specify chamber geometry",
             ["Volume + Throat Area", "L* (Characteristic Length)"],
@@ -2920,7 +2891,6 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             help="L* = Volume / A_throat. Choose one mode to avoid conflicts."
         )
         
-<<<<<<< HEAD
         # Clear conflicting keys when mode changes (like injector does)
         if previous_geom_mode != geom_mode:
             # Clear keys that might conflict
@@ -2930,8 +2900,6 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
                     pass
         st.session_state["active_chamber_geom_mode"] = geom_mode
         
-=======
->>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
         if geom_mode == "Volume + Throat Area":
             # User specifies volume and throat, L* is calculated
             chamber["volume"] = st.number_input(
@@ -2946,29 +2914,20 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
                 "Throat area [m²]", 
                 min_value=1e-5, 
                 max_value=0.01, 
-<<<<<<< HEAD
                 value=float(chamber.get("A_throat", 1e-3)), 
-=======
-                value=float(chamber["A_throat"]), 
->>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
                 format="%.6f",
                 key="chamber_athroat_input"
             )
             # Calculate and display L* (but don't store in config to avoid override)
             calculated_lstar = chamber["volume"] / chamber["A_throat"]
             chamber["Lstar"] = None  # Set to None so solver calculates from V/A
-<<<<<<< HEAD
             st.info(f"✓ Calculated L* = **{calculated_lstar:.4f} m** ({calculated_lstar*1000:.2f} mm)")
-=======
-            st.info(f"Calculated L* = {calculated_lstar:.4f} m ({calculated_lstar*1000:.2f} mm)")
->>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
         else:
             # User specifies L* and throat, volume is calculated
             chamber["A_throat"] = st.number_input(
                 "Throat area [m²]", 
                 min_value=1e-5, 
                 max_value=0.01, 
-<<<<<<< HEAD
                 value=float(chamber.get("A_throat", 1e-3)), 
                 format="%.6f",
                 key="chamber_athroat_lstar_mode"
@@ -2997,24 +2956,6 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             # Calculate and store volume from L*
             chamber["volume"] = chamber["Lstar"] * chamber["A_throat"]
             st.info(f"✓ Calculated Volume = **{chamber['volume']:.6f} m³** ({chamber['volume']*1e6:.2f} cm³)")
-=======
-                value=float(chamber["A_throat"]), 
-                format="%.6f",
-                key="chamber_athroat_lstar_mode"
-            )
-            lstar_value = float(chamber.get("Lstar") or 1.0)
-            chamber["Lstar"] = length_number_input(
-                "Characteristic length L*",
-                lstar_value,
-                min_m=0.1,
-                max_m=5.0,
-                step_m=0.05,
-                key="chamber_lstar_input",
-            )
-            # Calculate and store volume from L*
-            chamber["volume"] = chamber["Lstar"] * chamber["A_throat"]
-            st.info(f"Calculated Volume = {chamber['volume']:.6f} m³ ({chamber['volume']*1e6:.2f} cm³)")
->>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
         
         chamber["length"] = length_number_input(
             "Chamber length",
