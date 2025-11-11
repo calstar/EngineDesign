@@ -11,6 +11,7 @@ A comprehensive physics-based simulation pipeline that takes tank pressures as i
 - Chamber pressure (Pc) is **never** an input - it's always **solved** from tank pressures by balancing supply and demand.
 - Modular injector architecture: pintle (LOX axial / fuel annulus), shear-coaxial, and impinging doublet models with their own flow and spray physics.
 - Independent cooling models: regenerative channels, film cooling films, and ablative liners can be evaluated separately or in combination.
+- **Time-varying ablative geometry:** Tracks recession and updates chamber volume, throat area, and L* over time for accurate performance predictions.
 
 ## Quick Start
 
@@ -60,16 +61,21 @@ python run_all_plots.py
 # Interactive CLI (forward & inverse modes)
 python interactive_pipeline.py
 
-# Streamlit UI (forward & inverse modes)
+# Streamlit UI (forward & inverse modes, time-series analysis)
 streamlit run ui_app.py
 
 # Streamlit UI features:
 #  - Edit key configuration parameters from the sidebar
 #  - Upload alternate YAML configs
-#  - Forward & inverse solvers
+#  - Forward solver: Tank pressures → Performance
+#  - Inverse solvers:
+#    * Thrust only: Find tank pressures for target thrust (1D, scales baseline)
+#    * Thrust + O/F: Find tank pressures for target thrust AND O/F ratio (2D, independent pressures)
 #  - Time-series designer (analytic profiles, CSV upload, blowdown curves)
-#  - Custom plot builder (select any variables and chart style)
+#  - Custom plot builder (select any variables and chart style, including heatmaps & contours)
 #  - Built-in dashboards for cooling, thrust, Pc, mdot, MR, etc.
+#  - Dynamic unit selection (psi/kPa/MPa for pressure, mm/m for length, kg/s for mass flow)
+#  - Efficiency coupling controls (mixture, cooling, turbulence) with adjustable floors
 
 # Pressure sweep (2D grid)
 python pressure_sweep_example.py
@@ -330,6 +336,22 @@ examples/pintle_engine/  # Example scripts and configs
 - Verify chamber-driven corrections (L*, efficiency)
 - Review nozzle expansion ratio
 - Check spray constraints (may be reducing Cd)
+
+### L* Changes Don't Affect Performance
+If changing the characteristic length (L*) in the UI doesn't visibly change thrust or Isp, this is likely due to **efficiency coupling floors**. The combustion efficiency model includes three coupling factors:
+- **Mixture efficiency**: Based on spray quality (SMD, evaporation length, Weber number)
+- **Cooling efficiency**: Based on heat removed by cooling systems
+- **Turbulence efficiency**: Based on injector and chamber turbulence intensity
+
+Each coupling has a **floor** (minimum efficiency) that prevents the total efficiency from dropping below a certain value. For example, if `mixture_efficiency_floor = 0.25`, the mixture efficiency will never be less than 25%, even if spray quality is poor.
+
+**Solution:**
+1. In the UI, navigate to "Combustion & Efficiency" section
+2. Look for "Efficiency Floors" (now prominently displayed)
+3. Lower the floors (e.g., to 0.0) to remove the clamping effect
+4. Or disable the coupling entirely by unchecking "Mixture coupling", "Cooling coupling", or "Turbulence coupling"
+
+This will allow L* changes to have a more visible impact on performance. The default floors (0.25-0.30) are conservative and represent physically realistic lower bounds for well-designed engines.
 
 ## References
 

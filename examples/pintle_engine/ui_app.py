@@ -338,6 +338,7 @@ def summarize_results(results: Dict[str, Any]) -> None:
     cstar = results["cstar_actual"]
     v_exit = results["v_exit"]
     P_exit_psi = results["P_exit"] * PA_TO_PSI
+    diagnostics = results.get("diagnostics", {})
 
     st.metric("Thrust", f"{thrust_kN:.2f} kN")
     st.metric("Specific Impulse", f"{Isp:.1f} s")
@@ -352,6 +353,25 @@ def summarize_results(results: Dict[str, Any]) -> None:
     st.metric("c* (actual)", f"{cstar:.1f} m/s")
     st.metric("Exit Velocity", f"{v_exit:.1f} m/s")
     st.metric("Exit Pressure", format_value(results["P_exit"], "pressure", pressure_unit) + f" {pressure_unit}")
+
+    eta_cstar = diagnostics.get("eta_cstar")
+    if eta_cstar is not None:
+        st.metric("η₍c*₎", f"{eta_cstar:.3f}")
+        mixture_eff = diagnostics.get("mixture_efficiency")
+        cooling_eff = diagnostics.get("cooling_efficiency")
+        additional_rows = []
+        if mixture_eff is not None:
+            additional_rows.append(f"Mixture coupling: {mixture_eff:.3f}")
+        if cooling_eff is not None:
+            additional_rows.append(f"Cooling coupling: {cooling_eff:.3f}")
+        turb_mix = diagnostics.get("turbulence_intensity_mix")
+        if turb_mix is not None:
+            additional_rows.append(f"Injector turbulence intensity: {turb_mix:.3f}")
+        gas_turb = diagnostics.get("cooling", {}).get("metadata", {}).get("gas_turbulence_intensity")
+        if gas_turb is not None:
+            additional_rows.append(f"Chamber turbulence intensity: {gas_turb:.3f}")
+        if additional_rows:
+            st.caption(" | ".join(additional_rows))
 
     cooling = results.get("cooling", {})
     if cooling:
@@ -523,7 +543,21 @@ def compute_timeseries_dataframe(
     P_tank_O_pa = np.asarray(P_tank_O_psi) * PSI_TO_PA
     P_tank_F_pa = np.asarray(P_tank_F_psi) * PSI_TO_PA
 
-    results = runner.evaluate_arrays(P_tank_O_pa, P_tank_F_pa)
+    # Check if ablative geometry tracking is enabled
+    ablative_cfg = runner.config.ablative_cooling
+    use_time_varying = (
+        ablative_cfg is not None 
+        and ablative_cfg.enabled 
+        and ablative_cfg.track_geometry_evolution
+        and len(times) >= 2
+    )
+    
+    if use_time_varying:
+        # Use time-varying method for ablative geometry evolution
+        results = runner.evaluate_arrays_with_time(times, P_tank_O_pa, P_tank_F_pa)
+    else:
+        # Use standard method
+        results = runner.evaluate_arrays(P_tank_O_pa, P_tank_F_pa)
 
     df_dict = {
         "time": np.asarray(times),
@@ -591,6 +625,16 @@ def compute_timeseries_dataframe(
         df_dict["Ablative Recession (µm/s)"] = np.asarray(ablative_recession, dtype=float)
         df_dict["Ablative Heat Removed (kW)"] = np.asarray(ablative_heat_removed, dtype=float)
         df_dict["Ablative Heat Flux (kW/m²)"] = np.asarray(ablative_heat_flux, dtype=float)
+
+    # Add ablative geometry evolution data if available
+    if "Lstar" in results:
+        df_dict["L* (mm)"] = np.asarray(results["Lstar"], dtype=float) * 1000.0
+        df_dict["Chamber Volume (cm³)"] = np.asarray(results["V_chamber"], dtype=float) * 1e6
+        df_dict["Throat Area (mm²)"] = np.asarray(results["A_throat"], dtype=float) * 1e6
+        df_dict["Cumulative Chamber Recession (µm)"] = np.asarray(results["recession_chamber"], dtype=float) * 1e6
+        df_dict["Cumulative Throat Recession (µm)"] = np.asarray(results["recession_throat"], dtype=float) * 1e6
+        if "throat_recession_multiplier" in results:
+            df_dict["Throat Recession Multiplier"] = np.asarray(results["throat_recession_multiplier"], dtype=float)
 
     mixture_eff = [diag.get("mixture_efficiency", np.nan) if isinstance(diag, dict) else np.nan for diag in diag_list]
     cooling_eff = [diag.get("cooling_efficiency", np.nan) if isinstance(diag, dict) else np.nan for diag in diag_list]
@@ -715,6 +759,113 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
             title="Injector Mixed Turbulence Intensity",
         )
         st.plotly_chart(turb_fig, width="stretch", key="ts_turb_mix")
+    
+    # Ablative geometry evolution plots
+    if "L* (mm)" in df.columns and not df["L* (mm)"].isna().all():
+        st.subheader("🔥 Ablative Geometry Evolution")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            lstar_fig = px.line(
+                df,
+                x="time",
+                y="L* (mm)",
+                markers=False,
+                title="Characteristic Length (L*) Evolution",
+            )
+            lstar_fig.update_layout(yaxis_title="L* [mm]", xaxis_title="Time [s]")
+            st.plotly_chart(lstar_fig, use_container_width=True, key="ts_lstar_evol")
+        
+        with col2:
+            recession_fig = go.Figure()
+            recession_fig.add_trace(go.Scatter(
+                x=df["time"],
+                y=df["Cumulative Chamber Recession (µm)"],
+                name="Chamber",
+                mode="lines",
+                line=dict(color="purple", width=2),
+            ))
+            recession_fig.add_trace(go.Scatter(
+                x=df["time"],
+                y=df["Cumulative Throat Recession (µm)"],
+                name="Throat",
+                mode="lines",
+                line=dict(color="orange", width=2),
+            ))
+            recession_fig.update_layout(
+                title="Cumulative Ablative Recession",
+                xaxis_title="Time [s]",
+                yaxis_title="Recession [µm]",
+                legend=dict(x=0.02, y=0.98),
+            )
+            st.plotly_chart(recession_fig, use_container_width=True, key="ts_recession_cumul")
+        
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            geom_fig = go.Figure()
+            V_pct_change = (df["Chamber Volume (cm³)"] / df["Chamber Volume (cm³)"].iloc[0] - 1) * 100
+            A_pct_change = (df["Throat Area (mm²)"] / df["Throat Area (mm²)"].iloc[0] - 1) * 100
+            geom_fig.add_trace(go.Scatter(
+                x=df["time"],
+                y=V_pct_change,
+                name="Chamber Volume",
+                mode="lines",
+                line=dict(color="red", width=2),
+            ))
+            geom_fig.add_trace(go.Scatter(
+                x=df["time"],
+                y=A_pct_change,
+                name="Throat Area",
+                mode="lines",
+                line=dict(color="blue", width=2),
+            ))
+            geom_fig.update_layout(
+                title="Geometry Growth",
+                xaxis_title="Time [s]",
+                yaxis_title="Change [%]",
+                legend=dict(x=0.02, y=0.98),
+            )
+            st.plotly_chart(geom_fig, use_container_width=True, key="ts_geom_growth_pct")
+        
+        with col4:
+            if "Throat Recession Multiplier" in df.columns and not df["Throat Recession Multiplier"].isna().all():
+                mult_fig = px.line(
+                    df,
+                    x="time",
+                    y="Throat Recession Multiplier",
+                    markers=False,
+                    title="Throat Recession Multiplier (Physics-Based)",
+                )
+                mult_fig.update_layout(yaxis_title="Multiplier", xaxis_title="Time [s]")
+                mult_mean = df["Throat Recession Multiplier"].mean()
+                mult_fig.add_hline(
+                    y=mult_mean,
+                    line_dash="dash",
+                    line_color="gray",
+                    annotation_text=f"Mean: {mult_mean:.2f}",
+                )
+                st.plotly_chart(mult_fig, use_container_width=True, key="ts_throat_mult_phys")
+        
+        # Performance degradation summary
+        if len(df) > 1:
+            thrust_initial = df["Thrust (kN)"].iloc[0]
+            thrust_final = df["Thrust (kN)"].iloc[-1]
+            thrust_loss_pct = (thrust_final / thrust_initial - 1) * 100
+            
+            lstar_initial = df["L* (mm)"].iloc[0]
+            lstar_final = df["L* (mm)"].iloc[-1]
+            lstar_change_pct = (lstar_final / lstar_initial - 1) * 100
+            
+            st.info(
+                f"**Ablative Geometry Impact:**\n\n"
+                f"- L* increased by **{lstar_change_pct:+.2f}%** ({lstar_initial:.2f} → {lstar_final:.2f} mm)\n"
+                f"- Throat area grew by **{A_pct_change.iloc[-1]:+.3f}%**\n"
+                f"- Thrust degraded by **{thrust_loss_pct:+.2f}%** ({thrust_initial:.3f} → {thrust_final:.3f} kN)\n"
+                f"- Total chamber recession: **{df['Cumulative Chamber Recession (µm)'].iloc[-1]:.1f} µm**\n"
+                f"- Total throat recession: **{df['Cumulative Throat Recession (µm)'].iloc[-1]:.1f} µm**"
+            )
 
 
 def custom_plot_builder() -> None:
@@ -1302,7 +1453,17 @@ def forward_view(runner: PintleEngineRunner) -> None:
 def inverse_view(runner: PintleEngineRunner, config_label: str) -> None:
     if isinstance(runner, PintleEngineConfig):
         runner = PintleEngineRunner(runner)
-    st.header("Inverse Mode: Target Thrust → Tank Pressures")
+    st.header("Inverse Mode: Target Performance → Tank Pressures")
+    
+    # Mode selector
+    inverse_mode = st.radio(
+        "Inverse solver mode",
+        ["Thrust only", "Thrust + O/F ratio"],
+        horizontal=True,
+        help="'Thrust only' scales baseline pressures uniformly. 'Thrust + O/F' solves for independent LOX and fuel pressures.",
+    )
+    
+    st.markdown("---")
 
     target_thrust_kN = st.number_input(
         "Desired Thrust [kN]",
@@ -1310,7 +1471,125 @@ def inverse_view(runner: PintleEngineRunner, config_label: str) -> None:
         value=6.65,
         step=0.1,
     )
+    
+    if inverse_mode == "Thrust + O/F ratio":
+        target_MR = st.number_input(
+            "Desired Mixture Ratio (O/F)",
+            min_value=0.5,
+            max_value=10.0,
+            value=2.36,
+            step=0.1,
+            help="Target oxidizer-to-fuel mass ratio",
+        )
+        
+        st.markdown("**Initial Guess (optional):**")
+        col1, col2 = st.columns(2)
+        with col1:
+            guess_O_psi = st.number_input(
+                "LOX Tank Pressure [psi]",
+                min_value=200.0,
+                value=1305.0,
+                step=10.0,
+                key="guess_O",
+            )
+        with col2:
+            guess_F_psi = st.number_input(
+                "Fuel Tank Pressure [psi]",
+                min_value=200.0,
+                value=974.0,
+                step=10.0,
+                key="guess_F",
+            )
+        
+        if st.button("Solve for Tank Pressures (2D)", type="primary", key="solve_2d"):
+            try:
+                (P_tank_O_solution, P_tank_F_solution), results, diagnostics = solve_for_thrust_and_MR(
+                    runner,
+                    target_thrust_kN,
+                    target_MR,
+                    initial_guess_psi=(guess_O_psi, guess_F_psi),
+                )
+            except ThrustSolveError as exc:
+                st.error(str(exc))
+                diag = exc.diagnostics
+                if "history" in diag and diag["history"]["thrust"]:
+                    with st.expander("Iteration history"):
+                        hist_df = pd.DataFrame({
+                            "Iteration": range(len(diag["history"]["thrust"])),
+                            "P_tank_O [psi]": diag["history"]["P_tank_O"],
+                            "P_tank_F [psi]": diag["history"]["P_tank_F"],
+                            "Thrust [kN]": diag["history"]["thrust"],
+                            "O/F": diag["history"]["MR"],
+                        })
+                        st.dataframe(hist_df)
+                return
+            except Exception as exc:
+                st.error(f"Failed to find tank pressures: {exc}")
+                return
 
+            st.success(f"✅ Converged in {diagnostics['iterations']} iterations!")
+            
+            st.subheader("Required Tank Pressures")
+            col_sol1, col_sol2 = st.columns(2)
+            with col_sol1:
+                st.metric("LOX Tank Pressure", f"{P_tank_O_solution:.1f} psi")
+            with col_sol2:
+                st.metric("Fuel Tank Pressure", f"{P_tank_F_solution:.1f} psi")
+            
+            st.subheader("Performance at Solution")
+            col_perf1, col_perf2, col_perf3 = st.columns(3)
+            with col_perf1:
+                st.metric("Thrust", f"{diagnostics['final_thrust']:.2f} kN", 
+                         delta=f"{diagnostics['thrust_error_pct']:.2f}% error")
+            with col_perf2:
+                st.metric("O/F Ratio", f"{diagnostics['final_MR']:.3f}",
+                         delta=f"{diagnostics['MR_error_pct']:.2f}% error")
+            with col_perf3:
+                st.metric("Iterations", f"{diagnostics['iterations']}")
+            
+            st.session_state["inverse_result"] = {"results": results, "diagnostics": diagnostics}
+            summarize_results(results)
+            dataset_label = f"Inverse 2D {datetime.now().strftime('%H:%M:%S')}"
+            store_dataset(dataset_label, create_single_run_dataframe(results, context="Inverse 2D"))
+            
+            with st.expander("Convergence history"):
+                hist_df = pd.DataFrame({
+                    "Iteration": range(len(diagnostics["history"]["thrust"])),
+                    "P_tank_O [psi]": diagnostics["history"]["P_tank_O"],
+                    "P_tank_F [psi]": diagnostics["history"]["P_tank_F"],
+                    "Thrust [kN]": diagnostics["history"]["thrust"],
+                    "O/F": diagnostics["history"]["MR"],
+                    "Thrust Error": [f"{e*100:.2f}%" for e in diagnostics["history"]["thrust_error"]],
+                    "O/F Error": [f"{e*100:.2f}%" for e in diagnostics["history"]["MR_error"]],
+                })
+                st.dataframe(hist_df)
+                
+                # Plot convergence
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(diagnostics["history"]["thrust"]))),
+                    y=[abs(e)*100 for e in diagnostics["history"]["thrust_error"]],
+                    name="Thrust Error %",
+                    mode="lines+markers",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=list(range(len(diagnostics["history"]["MR"]))),
+                    y=[abs(e)*100 for e in diagnostics["history"]["MR_error"]],
+                    name="O/F Error %",
+                    mode="lines+markers",
+                ))
+                fig.update_layout(
+                    title="Convergence History",
+                    xaxis_title="Iteration",
+                    yaxis_title="Absolute Error (%)",
+                    yaxis_type="log",
+                    height=400,
+                )
+                st.plotly_chart(fig, use_container_width=True, key="inverse_2d_convergence")
+        
+        return  # Exit early for 2D mode
+    
+    # Original 1D mode (thrust only)
     col1, col2 = st.columns(2)
     with col1:
         base_O_psi = st.number_input(
@@ -1327,7 +1606,7 @@ def inverse_view(runner: PintleEngineRunner, config_label: str) -> None:
             step=10.0,
         )
 
-    if st.button("Solve for Tank Pressures", type="primary"):
+    if st.button("Solve for Tank Pressures (1D)", type="primary", key="solve_1d"):
         try:
             (P_tank_O_solution, P_tank_F_solution), results, diagnostics = solve_for_thrust(
                 runner,
@@ -1522,26 +1801,57 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
         df_input = df_input.sort_values("time")
 
         if st.button("Run Time-Series", type="primary"):
+            # Validate pressure ranges
+            P_O_min = df_input["P_tank_O"].min()
+            P_O_max = df_input["P_tank_O"].max()
+            P_F_min = df_input["P_tank_F"].min()
+            P_F_max = df_input["P_tank_F"].max()
+            
+            st.info(f"Pressure ranges in CSV: LOX [{P_O_min:.0f} - {P_O_max:.0f}] psi, Fuel [{P_F_min:.0f} - {P_F_max:.0f}] psi")
+            
+            # Warn if pressures are too low
+            if P_O_min < 800 or P_F_min < 600:
+                st.warning(
+                    f"⚠️ **Low tank pressures detected!** This engine is designed for ~1305 psi LOX and ~974 psi fuel. "
+                    f"Your CSV has LOX as low as {P_O_min:.0f} psi and fuel as low as {P_F_min:.0f} psi. "
+                    f"The solver may fail at these low pressures because there isn't enough pressure to sustain combustion after feed losses and injector drops. "
+                    f"Consider scaling up your pressures by 2-3x."
+                )
+            
             df, errors = compute_timeseries_dataframe(
                 runner,
                 df_input["time"].to_numpy(dtype=float),
                 df_input["P_tank_O"].to_numpy(dtype=float),
                 df_input["P_tank_F"].to_numpy(dtype=float),
             )
-            if errors:
-                st.error("Errors encountered during time-series evaluation:")
-                for err in errors:
-                    st.write(f"- {err}")
-                return
+            
+            # Count failures
+            n_total = len(df)
+            n_failed = df["Pc (psi)"].isna().sum()
+            n_success = n_total - n_failed
+            
+            if n_failed > 0:
+                st.error(f"❌ Solver failed for {n_failed}/{n_total} time steps ({n_failed/n_total*100:.1f}%)")
+                if errors:
+                    with st.expander("View error details"):
+                        for err in errors[:10]:  # Show first 10 errors
+                            st.write(f"- {err}")
+                        if len(errors) > 10:
+                            st.write(f"... and {len(errors)-10} more errors")
+                
+                if n_success == 0:
+                    st.error("All time steps failed. Cannot generate plots. Please check your tank pressures and configuration.")
+                    return
+                else:
+                    st.warning(f"Proceeding with {n_success} successful evaluations. Failed rows contain NaN values.")
+            else:
+                st.success(f"✅ All {n_total} time steps evaluated successfully!")
 
             st.session_state["timeseries_results"] = {"data": df, "meta": {"source": "csv", "config": config_label}}
             store_dataset("Time Series (uploaded)", df)
 
             display_time_series_summary(df)
             plot_time_series_results(df)
-
-            if errors:
-                st.warning("Some time steps did not converge. Affected rows contain NaNs in the output dataset.")
 
             with st.expander("Data table"):
                 st.dataframe(df)
@@ -2514,12 +2824,114 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         ablative_cfg["turbulence_sensitivity"] = st.number_input("Turbulence sensitivity", min_value=0.0, max_value=5.0, value=float(ablative_cfg.get("turbulence_sensitivity", 1.5)), step=0.1, key="ablative_turbulence_sensitivity")
         ablative_cfg["turbulence_exponent"] = st.number_input("Turbulence exponent", min_value=0.1, max_value=3.0, value=float(ablative_cfg.get("turbulence_exponent", 1.0)), step=0.1, key="ablative_turbulence_exponent")
         ablative_cfg["turbulence_max_multiplier"] = st.number_input("Max heat-flux multiplier", min_value=1.0, max_value=5.0, value=float(ablative_cfg.get("turbulence_max_multiplier", 3.0)), step=0.1, key="ablative_turbulence_multiplier")
+        
+        st.markdown("**Geometry Evolution (Time-Varying L*):**")
+        ablative_cfg["track_geometry_evolution"] = st.checkbox(
+            "Enable geometry evolution tracking", 
+            value=bool(ablative_cfg.get("track_geometry_evolution", True)),
+            help="Track cumulative recession and update chamber/throat geometry over time",
+            key="ablative_track_geometry"
+        )
+        
+        throat_mult_raw = ablative_cfg.get("throat_recession_multiplier", None)
+        use_physics_mult = st.checkbox(
+            "Use physics-based throat multiplier (Bartz correlation)",
+            value=(throat_mult_raw is None),
+            help="If unchecked, you can specify a fixed multiplier (typically 1.2-2.0)",
+            key="ablative_use_physics_mult"
+        )
+        
+        if use_physics_mult:
+            ablative_cfg["throat_recession_multiplier"] = None
+            st.info("Throat multiplier calculated from flow conditions (velocity & pressure ratios)")
+        else:
+            ablative_cfg["throat_recession_multiplier"] = st.number_input(
+                "Throat recession multiplier",
+                min_value=1.0,
+                max_value=3.0,
+                value=float(throat_mult_raw if throat_mult_raw is not None else 1.3),
+                step=0.1,
+                help="Throat recedes faster than chamber (typically 1.2-2.0x)",
+                key="ablative_throat_mult_fixed"
+            )
+        
+        ablative_cfg["char_layer_conductivity"] = st.number_input(
+            "Char layer conductivity [W/(m·K)]",
+            min_value=0.01,
+            max_value=2.0,
+            value=float(ablative_cfg.get("char_layer_conductivity", 0.2)),
+            step=0.01,
+            help="Thermal conductivity of protective char layer",
+            key="ablative_char_conductivity"
+        )
+        ablative_cfg["char_layer_thickness"] = length_number_input(
+            "Char layer thickness",
+            float(ablative_cfg.get("char_layer_thickness", 0.001)),
+            min_m=0.0001,
+            max_m=0.01,
+            step_m=0.0001,
+            key="ablative_char_thickness",
+        )
 
         st.markdown("### Chamber & Nozzle")
         chamber = working_copy["chamber"]
         nozzle = working_copy["nozzle"]
-        chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber.get("volume", 1e-3)), format="%.6f")
-        chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber["A_throat"]), format="%.6f")
+        
+        # Chamber geometry specification mode
+        st.markdown("**Chamber Geometry Specification:**")
+        geom_mode = st.radio(
+            "Choose how to specify chamber geometry",
+            ["Volume + Throat Area", "L* (Characteristic Length)"],
+            horizontal=True,
+            key="chamber_geom_mode",
+            help="L* = Volume / A_throat. Choose one mode to avoid conflicts."
+        )
+        
+        if geom_mode == "Volume + Throat Area":
+            # User specifies volume and throat, L* is calculated
+            chamber["volume"] = st.number_input(
+                "Chamber volume [m³]", 
+                min_value=1e-6, 
+                max_value=1.0, 
+                value=float(chamber.get("volume", 1e-3)), 
+                format="%.6f",
+                key="chamber_volume_input"
+            )
+            chamber["A_throat"] = st.number_input(
+                "Throat area [m²]", 
+                min_value=1e-5, 
+                max_value=0.01, 
+                value=float(chamber["A_throat"]), 
+                format="%.6f",
+                key="chamber_athroat_input"
+            )
+            # Calculate and display L* (but don't store in config to avoid override)
+            calculated_lstar = chamber["volume"] / chamber["A_throat"]
+            chamber["Lstar"] = None  # Set to None so solver calculates from V/A
+            st.info(f"Calculated L* = {calculated_lstar:.4f} m ({calculated_lstar*1000:.2f} mm)")
+        else:
+            # User specifies L* and throat, volume is calculated
+            chamber["A_throat"] = st.number_input(
+                "Throat area [m²]", 
+                min_value=1e-5, 
+                max_value=0.01, 
+                value=float(chamber["A_throat"]), 
+                format="%.6f",
+                key="chamber_athroat_lstar_mode"
+            )
+            lstar_value = float(chamber.get("Lstar") or 1.0)
+            chamber["Lstar"] = length_number_input(
+                "Characteristic length L*",
+                lstar_value,
+                min_m=0.1,
+                max_m=5.0,
+                step_m=0.05,
+                key="chamber_lstar_input",
+            )
+            # Calculate and store volume from L*
+            chamber["volume"] = chamber["Lstar"] * chamber["A_throat"]
+            st.info(f"Calculated Volume = {chamber['volume']:.6f} m³ ({chamber['volume']*1e6:.2f} cm³)")
+        
         chamber["length"] = length_number_input(
             "Chamber length",
             float(chamber.get("length", 0.5)),
@@ -2528,15 +2940,142 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             step_m=0.01,
             key="chamber_length",
         )
-        chamber["Lstar"] = length_number_input(
-            "Characteristic length L*",
-            float(chamber["Lstar"]),
-            min_m=0.1,
-            max_m=5.0,
-            step_m=0.05,
-            key="chamber_lstar",
-        )
         nozzle["expansion_ratio"] = st.number_input("Expansion ratio (Ae/At)", min_value=1.0, max_value=200.0, value=float(nozzle["expansion_ratio"]), format="%.4f")
+
+        st.markdown("### Combustion & Efficiency")
+        st.info(
+            "**Note:** L* (characteristic length) is set in Chamber Geometry. "
+            "If coupling is enabled with high efficiency floors, L* changes may have minimal visible effect on performance. "
+            "Disable coupling or lower the floors below to observe L* impact more clearly."
+        )
+        combustion = working_copy.setdefault("combustion", {})
+        efficiency = combustion.setdefault("efficiency", {})
+        eff_model = efficiency.get("model", "exponential")
+        model_options = ["exponential", "linear", "constant"]
+        eff_model = st.selectbox(
+            "η₍c*₎ model",
+            model_options,
+            index=model_options.index(eff_model) if eff_model in model_options else 0,
+            key="comb_eff_model",
+        )
+        efficiency["model"] = eff_model
+        efficiency["C"] = st.number_input(
+            "Efficiency constant C",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(efficiency.get("C", 0.3)),
+            key="comb_eff_C",
+        )
+        efficiency["K"] = st.number_input(
+            "Efficiency exponent K",
+            min_value=0.0,
+            max_value=2.0,
+            value=float(efficiency.get("K", 0.15)),
+            key="comb_eff_K",
+        )
+
+        st.markdown("#### Efficiency Coupling")
+        col_eff1, col_eff2, col_eff3 = st.columns(3)
+        efficiency["use_mixture_coupling"] = col_eff1.checkbox(
+            "Mixture coupling",
+            value=bool(efficiency.get("use_mixture_coupling", False)),
+            key="comb_eff_use_mixture",
+        )
+        efficiency["use_cooling_coupling"] = col_eff2.checkbox(
+            "Cooling coupling",
+            value=bool(efficiency.get("use_cooling_coupling", False)),
+            key="comb_eff_use_cooling",
+        )
+        efficiency["use_turbulence_coupling"] = col_eff3.checkbox(
+            "Turbulence coupling",
+            value=bool(efficiency.get("use_turbulence_coupling", False)),
+            key="comb_eff_use_turbulence",
+        )
+        
+        st.markdown("#### Efficiency Floors")
+        col_floor1, col_floor2, col_floor3 = st.columns(3)
+        efficiency["mixture_efficiency_floor"] = col_floor1.number_input(
+            "Mixture floor",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(efficiency.get("mixture_efficiency_floor", 0.25)),
+            help="Minimum mixture efficiency (0 = no floor, 1 = always 100%)",
+            key="comb_eff_mix_floor_main",
+        )
+        efficiency["cooling_efficiency_floor"] = col_floor2.number_input(
+            "Cooling floor",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(efficiency.get("cooling_efficiency_floor", 0.25)),
+            help="Minimum cooling efficiency (0 = no floor, 1 = always 100%)",
+            key="comb_eff_cooling_floor_main",
+        )
+        efficiency["turbulence_efficiency_floor"] = col_floor3.number_input(
+            "Turbulence floor",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(efficiency.get("turbulence_efficiency_floor", 0.3)),
+            help="Minimum turbulence efficiency (0 = no floor, 1 = always 100%)",
+            key="comb_eff_turb_floor_main",
+        )
+
+        with st.expander("Advanced mixing & turbulence parameters"):
+            efficiency["target_smd_microns"] = st.number_input(
+                "Target SMD [μm]",
+                min_value=1.0,
+                max_value=200.0,
+                value=float(efficiency.get("target_smd_microns", 40.0)),
+                key="comb_eff_target_smd",
+            )
+            efficiency["smd_penalty_exponent"] = st.number_input(
+                "SMD penalty exponent",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(efficiency.get("smd_penalty_exponent", 1.5)),
+                key="comb_eff_smd_exp",
+            )
+            efficiency["xstar_limit_mm"] = st.number_input(
+                "Evaporation limit x* [mm]",
+                min_value=1.0,
+                max_value=200.0,
+                value=float(efficiency.get("xstar_limit_mm", 40.0)),
+                key="comb_eff_xstar_limit",
+            )
+            efficiency["xstar_penalty_exponent"] = st.number_input(
+                "x* penalty exponent",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(efficiency.get("xstar_penalty_exponent", 1.0)),
+                key="comb_eff_xstar_exp",
+            )
+            efficiency["we_reference"] = st.number_input(
+                "Reference Weber number",
+                min_value=1.0,
+                max_value=500.0,
+                value=float(efficiency.get("we_reference", 25.0)),
+                key="comb_eff_we_ref",
+            )
+            efficiency["we_penalty_exponent"] = st.number_input(
+                "Weber penalty exponent",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(efficiency.get("we_penalty_exponent", 1.0)),
+                key="comb_eff_we_exp",
+            )
+            efficiency["target_turbulence_intensity"] = st.number_input(
+                "Target turbulence intensity",
+                min_value=0.01,
+                max_value=0.5,
+                value=float(efficiency.get("target_turbulence_intensity", 0.08)),
+                key="comb_eff_turb_target",
+            )
+            efficiency["turbulence_penalty_exponent"] = st.number_input(
+                "Turbulence penalty exponent",
+                min_value=0.0,
+                max_value=5.0,
+                value=float(efficiency.get("turbulence_penalty_exponent", 1.0)),
+                key="comb_eff_turb_exp",
+            )
 
         submitted = st.form_submit_button("Apply configuration changes")
 

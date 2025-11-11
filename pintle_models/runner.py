@@ -2,11 +2,17 @@
 
 import numpy as np
 from typing import Dict, Any, Optional, Union
+import copy
 
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.cea_cache import CEACache
 from pintle_models.chamber_solver import ChamberSolver
 from pintle_models.nozzle import calculate_thrust
+from pintle_pipeline.ablative_geometry import (
+    update_chamber_geometry_from_ablation,
+    calculate_throat_recession_multiplier,
+    calculate_local_recession_rate,
+)
 
 
 class PintleEngineRunner:
@@ -182,6 +188,203 @@ class PintleEngineRunner:
                 
                 # Store diagnostics
                 results["diagnostics"].append(point_results["diagnostics"])
+                
+            except Exception as e:
+                # If solve fails, leave NaN values
+                results["diagnostics"].append({"error": str(e)})
+                continue
+        
+        return results
+    
+    def evaluate_arrays_with_time(
+        self,
+        times: Union[np.ndarray, list],
+        P_tank_O: Union[np.ndarray, list],
+        P_tank_F: Union[np.ndarray, list],
+        track_ablative_geometry: Optional[bool] = None,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Evaluate engine performance over time with ablative geometry evolution.
+        
+        This method tracks cumulative ablative recession and updates chamber
+        geometry (V_chamber, A_throat, L*) at each time step, providing
+        accurate performance predictions for ablative engines.
+        
+        Parameters:
+        -----------
+        times : array-like
+            Time points [s]
+        P_tank_O : array-like
+            Array of oxidizer tank pressures [Pa]
+        P_tank_F : array-like
+            Array of fuel tank pressures [Pa]
+        track_ablative_geometry : bool, optional
+            Override config setting for geometry tracking
+        
+        Returns:
+        --------
+        results : dict
+            Dictionary with arrays of all performance metrics plus:
+            - Lstar: Time-varying characteristic length [m]
+            - V_chamber: Time-varying chamber volume [m³]
+            - A_throat: Time-varying throat area [m²]
+            - recession_chamber: Cumulative chamber recession [m]
+            - recession_throat: Cumulative throat recession [m]
+        """
+        times = np.asarray(times)
+        P_tank_O = np.asarray(P_tank_O)
+        P_tank_F = np.asarray(P_tank_F)
+        
+        if times.shape != P_tank_O.shape or times.shape != P_tank_F.shape:
+            raise ValueError("times, P_tank_O, and P_tank_F must have same shape")
+        
+        if len(times) < 2:
+            raise ValueError("Need at least 2 time points for time-varying analysis")
+        
+        # Check if ablative geometry tracking is enabled
+        ablative_cfg = self.config.ablative_cooling
+        if track_ablative_geometry is None:
+            track_ablative_geometry = (
+                ablative_cfg is not None 
+                and ablative_cfg.enabled 
+                and ablative_cfg.track_geometry_evolution
+            )
+        
+        # Initialize result arrays
+        n = len(times)
+        results = {
+            "Pc": np.full(n, np.nan),
+            "mdot_O": np.full(n, np.nan),
+            "mdot_F": np.full(n, np.nan),
+            "mdot_total": np.full(n, np.nan),
+            "MR": np.full(n, np.nan),
+            "F": np.full(n, np.nan),
+            "Isp": np.full(n, np.nan),
+            "v_exit": np.full(n, np.nan),
+            "P_exit": np.full(n, np.nan),
+            "cstar_actual": np.full(n, np.nan),
+            "cstar_ideal": np.full(n, np.nan),
+            "eta_cstar": np.full(n, np.nan),
+            "Tc": np.full(n, np.nan),
+            "gamma": np.full(n, np.nan),
+            "R": np.full(n, np.nan),
+            "Lstar": np.full(n, np.nan),
+            "V_chamber": np.full(n, np.nan),
+            "A_throat": np.full(n, np.nan),
+            "recession_chamber": np.full(n, 0.0),
+            "recession_throat": np.full(n, 0.0),
+            "throat_recession_multiplier": np.full(n, np.nan),
+            "diagnostics": [],
+        }
+        
+        # Initial geometry
+        V_chamber_initial = self.config.chamber.volume
+        A_throat_initial = self.config.chamber.A_throat
+        L_chamber = self.config.chamber.length if self.config.chamber.length else 0.18
+        D_chamber_initial = np.sqrt(4 * V_chamber_initial / (np.pi * L_chamber))
+        D_throat_initial = np.sqrt(4 * A_throat_initial / np.pi)
+        
+        # Track cumulative recession
+        cumulative_recession_chamber = 0.0
+        cumulative_recession_throat = 0.0
+        
+        # Create a mutable config copy for geometry updates
+        config_copy = copy.deepcopy(self.config)
+        
+        # Evaluate at each time point
+        for i in range(n):
+            dt = times[i] - times[i-1] if i > 0 else 0.0
+            
+            try:
+                # Update solver with current geometry
+                solver_temp = ChamberSolver(config_copy, self.cea_cache)
+                
+                # Evaluate performance
+                point_results = self.evaluate(
+                    float(P_tank_O[i]),
+                    float(P_tank_F[i])
+                )
+                
+                # Store scalar results
+                for key in ["Pc", "mdot_O", "mdot_F", "mdot_total", "MR", "F", "Isp",
+                           "v_exit", "P_exit", "cstar_actual", "cstar_ideal", "eta_cstar",
+                           "Tc", "gamma", "R"]:
+                    results[key][i] = point_results[key]
+                
+                # Store current geometry
+                results["Lstar"][i] = solver_temp.Lstar
+                results["V_chamber"][i] = config_copy.chamber.volume
+                results["A_throat"][i] = config_copy.chamber.A_throat
+                results["recession_chamber"][i] = cumulative_recession_chamber
+                results["recession_throat"][i] = cumulative_recession_throat
+                
+                # Store diagnostics
+                results["diagnostics"].append(point_results["diagnostics"])
+                
+                # Update geometry for next time step (if ablative tracking enabled)
+                if track_ablative_geometry and dt > 0 and i < n - 1:
+                    # Get ablative recession rate from diagnostics
+                    cooling_diag = point_results.get("diagnostics", {}).get("cooling", {})
+                    ablative_diag = cooling_diag.get("ablative", {})
+                    
+                    if ablative_diag.get("enabled", False):
+                        recession_rate = ablative_diag.get("recession_rate", 0.0)
+                        
+                        # Calculate throat recession multiplier from flow conditions
+                        if ablative_cfg.throat_recession_multiplier is not None:
+                            throat_mult = ablative_cfg.throat_recession_multiplier
+                        else:
+                            # Calculate from physics
+                            Pc = point_results["Pc"]
+                            mdot_total = point_results["mdot_total"]
+                            gamma = point_results["gamma"]
+                            R = point_results["R"]
+                            Tc = point_results["Tc"]
+                            
+                            # Chamber velocity
+                            rho_chamber = Pc / (R * Tc)
+                            A_chamber = np.pi * (D_chamber_initial ** 2) / 4.0
+                            v_chamber = mdot_total / (rho_chamber * A_chamber) if rho_chamber > 0 else 0.0
+                            
+                            # Throat velocity (sonic)
+                            v_throat = np.sqrt(gamma * R * Tc / (gamma + 1))
+                            
+                            # Heat flux (from cooling diagnostics)
+                            chamber_heat_flux = ablative_diag.get("incident_heat_flux", 1e6)
+                            
+                            throat_mult = calculate_throat_recession_multiplier(
+                                Pc, v_chamber, v_throat, chamber_heat_flux, gamma
+                            )
+                        
+                        results["throat_recession_multiplier"][i] = throat_mult
+                        
+                        # Update cumulative recession
+                        recession_increment_chamber = recession_rate * dt
+                        recession_increment_throat = recession_rate * throat_mult * dt
+                        
+                        cumulative_recession_chamber += recession_increment_chamber
+                        cumulative_recession_throat += recession_increment_throat
+                        
+                        # Update geometry
+                        V_new, A_throat_new, D_chamber_new, D_throat_new, geom_diag = update_chamber_geometry_from_ablation(
+                            V_chamber_initial,
+                            A_throat_initial,
+                            D_chamber_initial,
+                            D_throat_initial,
+                            L_chamber,
+                            cumulative_recession_chamber,
+                            cumulative_recession_throat,
+                            ablative_cfg.coverage_fraction,
+                            None,  # Don't use multiplier here, we already calculated throat recession
+                        )
+                        
+                        # Update config for next iteration
+                        config_copy.chamber.volume = V_new
+                        config_copy.chamber.A_throat = A_throat_new
+                        
+                        # Update L* if specified
+                        if config_copy.chamber.Lstar is not None:
+                            config_copy.chamber.Lstar = V_new / A_throat_new
                 
             except Exception as e:
                 # If solve fails, leave NaN values

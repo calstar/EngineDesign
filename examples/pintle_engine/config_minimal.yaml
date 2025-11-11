@@ -6,7 +6,7 @@
 #   SOLVE:  Pc (chamber pressure) from supply = demand
 #   OUTPUT: Thrust, mdot, MR, and all performance parameters
 #
-# Pc is NEVER an input - it's always solved from tank pressures!
+
 
 # Fluid Properties
 fluids:
@@ -159,19 +159,25 @@ film_cooling:
 
 ablative_cooling:
   enabled: false
-  material_density: 1600.0
-  heat_of_ablation: 2.5e6
-  thermal_conductivity: 0.35
-  specific_heat: 1500.0
-  initial_thickness: 0.01
-  surface_temperature_limit: 1200.0
-  coverage_fraction: 0.85
-  pyrolysis_temperature: 950.0
-  blowing_efficiency: 0.75
+  material_density: 1600.0  # kg/m³ - Phenolic ablator typical
+  heat_of_ablation: 2.5e6  # J/kg - Effective heat of ablation
+  thermal_conductivity: 0.35  # W/(m·K)
+  specific_heat: 1500.0  # J/(kg·K)
+  initial_thickness: 0.01  # m - 10mm ablative liner
+  surface_temperature_limit: 1200.0  # K
+  coverage_fraction: 0.85  # 85% of chamber surface protected
+  pyrolysis_temperature: 950.0  # K - Characteristic pyrolysis temp
+  blowing_efficiency: 0.75  # Effectiveness of pyrolysis gases blocking heat
   turbulence_reference_intensity: 0.08
   turbulence_sensitivity: 1.5
   turbulence_exponent: 1.0
   turbulence_max_multiplier: 3.0
+  # NEW: Geometry evolution parameters
+  throat_recession_multiplier: null  # null = calculate from physics (Bartz correlation)
+                                     # or specify 1.2-2.0 for fixed multiplier
+  char_layer_conductivity: 0.2  # W/(m·K) - Protective char layer
+  char_layer_thickness: 0.001  # m - 1mm char layer
+  track_geometry_evolution: true  # Enable time-varying L* tracking
 
 # Injector Discharge
 # Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]
@@ -224,9 +230,6 @@ spray:
     K: 3e5  # s/m²
     x_star_limit: 0.05  # m
     use_constraint: true
-  use_turbulence_corrections: true
-  turbulence_breakup_gain: 1.2
-  turbulence_penetration_gain: 0.8
 
 # Combustion
 combustion:
@@ -257,9 +260,11 @@ combustion:
     use_mixture_coupling: true
     use_cooling_coupling: true
     use_turbulence_coupling: true
+    mixture_efficiency_floor: 0.25
+    cooling_efficiency_floor: 0.25
+    turbulence_efficiency_floor: 0.3
     target_turbulence_intensity: 0.08
     turbulence_penalty_exponent: 1.0
-    turbulence_efficiency_floor: 0.5
 
 # Chamber Geometry
 # From engine specs:
