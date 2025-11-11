@@ -118,6 +118,9 @@ class PintleEngineRunner:
             "Isp": Isp,
             "v_exit": v_exit,
             "P_exit": P_exit,
+            "eps": eps_current,  # Expansion ratio (for 3D CEA cache)
+            "A_throat": self.config.chamber.A_throat,
+            "A_exit": self.config.nozzle.A_exit,
             "cstar_actual": cstar_actual,
             "cstar_ideal": diagnostics["cstar_ideal"],
             "eta_cstar": diagnostics["eta_cstar"],
@@ -168,6 +171,9 @@ class PintleEngineRunner:
             "Isp": np.full(n, np.nan),
             "v_exit": np.full(n, np.nan),
             "P_exit": np.full(n, np.nan),
+            "eps": np.full(n, np.nan),  # Expansion ratio
+            "A_throat": np.full(n, np.nan),
+            "A_exit": np.full(n, np.nan),
             "cstar_actual": np.full(n, np.nan),
             "cstar_ideal": np.full(n, np.nan),
             "eta_cstar": np.full(n, np.nan),
@@ -185,9 +191,10 @@ class PintleEngineRunner:
                     float(P_tank_F.flat[i])
                 )
                 
-                # Store scalar results
+                # Store scalar results (including eps for 3D CEA cache)
                 for key in ["Pc", "mdot_O", "mdot_F", "mdot_total", "MR", "F", "Isp",
-                           "v_exit", "P_exit", "cstar_actual", "cstar_ideal", "eta_cstar",
+                           "v_exit", "P_exit", "eps", "A_throat", "A_exit",
+                           "cstar_actual", "cstar_ideal", "eta_cstar",
                            "Tc", "gamma", "R"]:
                     results[key][i] = point_results[key]
                 
