@@ -73,9 +73,6 @@ class CEACache:
                     # Use current directory (will create new cache)
                     self.cache_file = os.path.abspath(config.cache_file)
         
-        # Determine if using 3D cache (Pc, MR, eps) or 2D cache (Pc, MR)
-        self.use_3d = config.eps_range is not None
-        
         # Grid parameters
         self.Pc_min, self.Pc_max = config.Pc_range
         self.MR_min, self.MR_max = config.MR_range
@@ -85,18 +82,7 @@ class CEACache:
         self.Pc_grid = np.linspace(self.Pc_min, self.Pc_max, self.n_points)
         self.MR_grid = np.linspace(self.MR_min, self.MR_max, self.n_points)
         
-        # 3D mode: add expansion ratio grid
-        if self.use_3d:
-            self.eps_min, self.eps_max = config.eps_range
-            self.eps_grid = np.linspace(self.eps_min, self.eps_max, self.n_points)
-            print(f"[INFO] Using 3D CEA cache: {self.n_points}³ = {self.n_points**3} points")
-        else:
-            self.eps_min = self.eps_max = config.expansion_ratio
-            self.eps_grid = None
-            print(f"[INFO] Using 2D CEA cache: {self.n_points}² = {self.n_points**2} points")
-        
         # Lookup tables (initialized as None, loaded from cache or computed)
-        # Shape: (n, n, n) for 3D or (n, n) for 2D
         self.cstar_table = None
         self.Cf_table = None
         self.Tc_table = None

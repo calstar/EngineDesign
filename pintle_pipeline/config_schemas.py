@@ -187,6 +187,7 @@ class AblativeCoolingConfig(BaseModel):
     char_layer_conductivity: float = Field(default=0.2, gt=0, description="Thermal conductivity of char layer [W/(m·K)]")
     char_layer_thickness: float = Field(default=0.001, gt=0, description="Thickness of protective char layer [m]")
     track_geometry_evolution: bool = Field(default=True, description="Enable time-varying geometry tracking (L* evolution)")
+    nozzle_ablative: bool = Field(default=False, description="If True, nozzle exit also recedes (A_exit grows). If False, only throat recedes (expansion ratio decreases)")
 
 
 class DischargeConfig(BaseModel):
@@ -244,7 +245,7 @@ class CEAConfig(BaseModel):
     """CEA (Chemical Equilibrium Analysis) configuration"""
     ox_name: str = Field(default="LOX", description="Oxidizer name")
     fuel_name: str = Field(default="RP-1", description="Fuel name")
-    expansion_ratio: float = Field(gt=1, description="Nozzle expansion ratio")
+    expansion_ratio: float = Field(gt=1, description="Nozzle expansion ratio (initial/default value)")
     cache_file: str = Field(default="cea_cache_LOX_RP1.npz", description="Cache filename")
     Pc_range: list[float] = Field(
         default=[2.0e6, 9.0e6],
@@ -254,7 +255,11 @@ class CEAConfig(BaseModel):
         default=[2.0, 2.8],
         description="Mixture ratio range"
     )
-    n_points: int = Field(default=200, gt=0, description="Number of grid points")
+    eps_range: Optional[list[float]] = Field(
+        default=None,
+        description="Expansion ratio range for 3D cache [min, max]. If None, uses 2D cache with fixed expansion_ratio"
+    )
+    n_points: int = Field(default=200, gt=0, description="Number of grid points per dimension")
 
 
 class CombustionEfficiencyConfig(BaseModel):
