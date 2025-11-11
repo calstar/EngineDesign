@@ -2901,36 +2901,43 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
                 "Throat area [m²]", 
                 min_value=1e-5, 
                 max_value=0.01, 
-                value=float(chamber["A_throat"]), 
+                value=float(chamber.get("A_throat", 1e-3)), 
                 format="%.6f",
                 key="chamber_athroat_input"
             )
             # Calculate and display L* (but don't store in config to avoid override)
             calculated_lstar = chamber["volume"] / chamber["A_throat"]
             chamber["Lstar"] = None  # Set to None so solver calculates from V/A
-            st.info(f"Calculated L* = {calculated_lstar:.4f} m ({calculated_lstar*1000:.2f} mm)")
+            st.info(f"✓ Calculated L* = **{calculated_lstar:.4f} m** ({calculated_lstar*1000:.2f} mm)")
         else:
             # User specifies L* and throat, volume is calculated
             chamber["A_throat"] = st.number_input(
                 "Throat area [m²]", 
                 min_value=1e-5, 
                 max_value=0.01, 
-                value=float(chamber["A_throat"]), 
+                value=float(chamber.get("A_throat", 1e-3)), 
                 format="%.6f",
                 key="chamber_athroat_lstar_mode"
             )
-            lstar_value = float(chamber.get("Lstar") or 1.0)
+            
+            # Get current L* value (calculate from volume if not set)
+            if chamber.get("Lstar") is not None:
+                default_lstar = float(chamber["Lstar"])
+            else:
+                # Calculate from volume and throat
+                default_lstar = float(chamber.get("volume", 1e-3)) / chamber["A_throat"]
+            
             chamber["Lstar"] = length_number_input(
                 "Characteristic length L*",
-                lstar_value,
+                default_lstar,
                 min_m=0.1,
                 max_m=5.0,
                 step_m=0.05,
-                key="chamber_lstar_input",
+                key="chamber_lstar_input"
             )
             # Calculate and store volume from L*
             chamber["volume"] = chamber["Lstar"] * chamber["A_throat"]
-            st.info(f"Calculated Volume = {chamber['volume']:.6f} m³ ({chamber['volume']*1e6:.2f} cm³)")
+            st.info(f"✓ Calculated Volume = **{chamber['volume']:.6f} m³** ({chamber['volume']*1e6:.2f} cm³)")
         
         chamber["length"] = length_number_input(
             "Chamber length",
