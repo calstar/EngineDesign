@@ -299,11 +299,47 @@ class PintleEngineRunner:
                 # Update solver with current geometry
                 solver_temp = ChamberSolver(config_copy, self.cea_cache)
                 
-                # Evaluate performance
-                point_results = self.evaluate(
+                # Evaluate performance using the updated solver
+                # (NOT self.evaluate which uses the original geometry!)
+                Pc, diagnostics = solver_temp.solve(
                     float(P_tank_O[i]),
-                    float(P_tank_F[i])
+                    float(P_tank_F[i]),
+                    Pc_guess=None
                 )
+                
+                # Calculate thrust and performance
+                Pa = 101325.0  # Ambient pressure
+                thrust_results = calculate_thrust(
+                    Pc,
+                    diagnostics["MR"],
+                    diagnostics["mdot_total"],
+                    self.cea_cache,
+                    config_copy.nozzle,
+                    Pa
+                )
+                thrust = thrust_results["F"]
+                v_exit = thrust_results["v_exit"]
+                P_exit = thrust_results["P_exit"]
+                
+                # Package results like evaluate() does
+                point_results = {
+                    "Pc": Pc,
+                    "mdot_O": diagnostics["mdot_O"],
+                    "mdot_F": diagnostics["mdot_F"],
+                    "mdot_total": diagnostics["mdot_total"],
+                    "MR": diagnostics["MR"],
+                    "F": thrust,
+                    "Isp": thrust / (diagnostics["mdot_total"] * 9.80665) if diagnostics["mdot_total"] > 0 else 0.0,
+                    "v_exit": v_exit,
+                    "P_exit": P_exit,
+                    "cstar_actual": diagnostics["cstar_actual"],
+                    "cstar_ideal": diagnostics["cstar_ideal"],
+                    "eta_cstar": diagnostics["eta_cstar"],
+                    "Tc": diagnostics["Tc"],
+                    "gamma": diagnostics["gamma"],
+                    "R": diagnostics["R"],
+                    "diagnostics": diagnostics,
+                }
                 
                 # Store scalar results
                 for key in ["Pc", "mdot_O", "mdot_F", "mdot_total", "MR", "F", "Isp",
@@ -388,6 +424,9 @@ class PintleEngineRunner:
                 
             except Exception as e:
                 # If solve fails, leave NaN values
+                print(f"[WARNING] Time step {i} (t={times[i]:.3f}s) failed: {e}")
+                import traceback
+                traceback.print_exc()
                 results["diagnostics"].append({"error": str(e)})
                 continue
         
