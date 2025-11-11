@@ -15,7 +15,6 @@ class FluidConfig(BaseModel):
     specific_heat: float = Field(default=2200.0, gt=0, description="Specific heat at constant pressure [J/(kg·K)]")
     thermal_conductivity: float = Field(default=0.15, gt=0, description="Thermal conductivity [W/(m·K)]")
     temperature: float = Field(default=293.15, gt=0, description="Bulk fluid temperature [K]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
 
 
 class PintleLOXConfig(BaseModel):
@@ -406,6 +405,7 @@ class LOXTankConfig(BaseModel):
     lox_h: float = Field(gt=0, description="LOX tank height [m]")
     lox_radius: float = Field(gt=0, description="LOX tank radius [m]")
     ox_tank_pos: float = Field(description="Oxidizer tank position [m]")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
 
 
 class FuelTankConfig(BaseModel):
@@ -413,6 +413,7 @@ class FuelTankConfig(BaseModel):
     rp1_h: float = Field(gt=0, description="RP-1 tank height [m]")
     rp1_radius: float = Field(gt=0, description="RP-1 tank radius [m]")
     fuel_tank_pos: float = Field(description="Fuel tank position [m]")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
 
 
 class PressTankConfig(BaseModel):
@@ -420,6 +421,7 @@ class PressTankConfig(BaseModel):
     press_h: float = Field(gt=0, description="Pressurant tank height [m]")
     press_radius: float = Field(gt=0, description="Pressurant tank radius [m]")
     pres_tank_pos: float = Field(description="Pressurant tank position [m]")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
 
 
 class FinsConfig(BaseModel):

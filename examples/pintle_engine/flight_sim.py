@@ -44,8 +44,8 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     rho_rp1 = config.fluids['fuel'].density
 
     # Initial masses from config
-    m_lox0 = config.fluids['oxidizer'].mass
-    m_rp10 = config.fluids['fuel'].mass
+    m_lox0 = config.lox_tank.mass
+    m_rp10 = config.fuel_tank.mass
 
     # Nozzle parameters from config
     eta_nozzle = config.nozzle.efficiency
@@ -202,8 +202,6 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         max_time_step=0.02,
         terminate_on_apogee=True,
     )
-
-    rocket.draw()
 
     apogee = float(flight.apogee)
     try:
