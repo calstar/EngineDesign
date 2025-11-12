@@ -1,0 +1,31 @@
+atmosphere: {rho: 1.225, g: 9.80665, v_air: [0,0,0]}
+
+bodies:
+  rocket:
+    m: 55
+    I_body: [[5,0,0],[0,5,0],[0,0,5]]
+    r0: [0,0,0]
+    v0: [0,0,-30]
+    q0: [1,0,0,0]
+    w0: [0,0,0]
+    anchors_B:
+      base: [0,0,0]
+
+canopies:
+  # Position canopies so initial line length is <= L0 (slack or just taut)
+  # L0 values: leg_drogue=3.0m, leg_pilot=3.0m, riser_main=4.0m
+  # Rocket at [0,0,0], so drogue should be at most 3.0m away (slack)
+  drogue: {A_inf: 2.0, CD_inf: 1.6, td: 0.0, tau_A: 0.4, tau_CD: 0.4, m_canopy: 0.3, Ca: 1.0, kappa: 4.0, p0: [0,0,2.5], v0: [0,0,-30]}
+  # Pilot connected to drogue: drogue at z=2.5, pilot should be at most 3.0m away = z=5.5
+  pilot:  {A_inf: 4.0, CD_inf: 1.5, td: 2.0, tau_A: 0.6, tau_CD: 0.6, m_canopy: 0.4, Ca: 1.0, kappa: 4.0, p0: [0,0,5.3], v0: [0,0,-30]}
+  # Main connected to pilot: pilot at z=5.3, main should be at most 4.0m away = z=9.3
+  main:   {A_inf: 16.0,CD_inf: 1.4, td: 6.0, tau_A: 0.8, tau_CD: 0.8, m_canopy: 1.0, Ca: 1.0, kappa: 4.0, p0: [0,0,9.0], v0: [0,0,-30]}
+
+edges:
+  # Realistic Kevlar shock cord properties:
+  # Stiffness: 10-50 kN/m for small extensions (using 20 kN/m = 20000 N/m)
+  # Damping: 100-500 N/(m/s) for energy dissipation
+  # Breaking strength: 2-5 kN typical (using 3000 N = ~675 lbs)
+  - {id: leg_drogue, n_minus: "rocket:base", n_plus: drogue, L0: 3.0, k0: 20000, k1: 0, alpha: 1, c: 200, T_pre: 0, T_max: 3000}
+  - {id: leg_pilot,  n_minus: drogue,        n_plus: pilot,  L0: 3.0, k0: 20000, k1: 0, alpha: 1, c: 200, T_pre: 0, T_max: 3000}
+  - {id: riser_main, n_minus: pilot,         n_plus: main,   L0: 4.0, k0: 20000, k1: 0, alpha: 1, c: 200, T_pre: 0, T_max: 3000}
