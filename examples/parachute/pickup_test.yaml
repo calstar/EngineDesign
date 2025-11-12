@@ -1,0 +1,45 @@
+atmosphere:
+  rho: 1.225
+  g: 9.80665
+  v_air: [0, 0, 0]
+
+bodies:
+  rocket:
+    m: 18.14  # kg
+    I_body:
+      - [2.0, 0, 0]
+      - [0, 2.0, 0]
+      - [0, 0, 0.5]
+    r0: [0, 0, 0]
+    v0: [0, 0, -30]  # m/s downward
+    q0: [1, 0, 0, 0]
+    w0: [0, 0, 0]
+    anchors_B:
+      base: [0, 0, 0]
+
+canopies:
+  main:
+    A_inf: 7.29
+    CD_inf: 2.0
+    td: 0.0
+    tau_A: 0.5
+    tau_CD: 0.5
+    m_canopy: 0.5
+    Ca: 1.0
+    kappa: 4.0
+    # Position canopy at L0 distance so it's initially taut
+    p0: [0, 0, 15.24]  # Exactly L0 above rocket
+    v0: [0, 0, -30]  # Same velocity initially
+
+edges:
+  - id: shockcord
+    n_minus: "rocket:base"
+    n_plus: main
+    L0: 15.24  # m
+    k0: 2000  # N/m
+    k1: 0
+    alpha: 1
+    c: 100  # N/(m/s)
+    T_pre: 0
+    T_max: 3000  # N
+
