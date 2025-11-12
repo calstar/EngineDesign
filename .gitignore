@@ -1,3 +1,4 @@
+# .gitignore for Engine Design Repository
 # Ignore everything by default
 *
 
@@ -5,13 +6,6 @@
 !pintle_models/
 !pintle_pipeline/
 !examples/pintle_engine/
-
-# Include parachute dynamics files
-!parachute/
-!examples/parachute/
-!README_PARACHUTE.md
-!BUGFIXES_SUMMARY.md
-!INFLATION_ISSUE_SUMMARY.md
 
 # Within pintle directories, ignore cache and compiled files
 **/__pycache__/
@@ -30,20 +24,12 @@
 !examples/pintle_engine/*.md
 !examples/pintle_engine/*.tex
 
-# Include parachute source files
-!parachute/*.py
-!examples/parachute/*.yaml
-
 # Include README in root
 !README.md
-!README_PARACHUTE.md
-
-# Include guide files
-!SETUP_REPOS.md
-!REPO_SEPARATION_GUIDE.md
-!.gitignore.engine
-!.gitignore.parachute
 
 # Include .gitignore itself
 !.gitignore
+
+# Include requirements
+!requirements.txt
 
