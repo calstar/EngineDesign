@@ -6,6 +6,13 @@
 !pintle_pipeline/
 !examples/pintle_engine/
 
+# Include parachute dynamics files
+!parachute/
+!examples/parachute/
+!README_PARACHUTE.md
+!BUGFIXES_SUMMARY.md
+!INFLATION_ISSUE_SUMMARY.md
+
 # Within pintle directories, ignore cache and compiled files
 **/__pycache__/
 **/*.pyc
@@ -23,8 +30,13 @@
 !examples/pintle_engine/*.md
 !examples/pintle_engine/*.tex
 
+# Include parachute source files
+!parachute/*.py
+!examples/parachute/*.yaml
+
 # Include README in root
 !README.md
+!README_PARACHUTE.md
 
 # Include .gitignore itself
 !.gitignore
