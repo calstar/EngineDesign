@@ -1,0 +1,113 @@
+k# Example: Multi-body rocket with separate components
+# Each component (nosecone, avionics bay, motor) is a separate body
+# They're connected with rigid/semi-rigid linkages (edges)
+
+atmosphere:
+  rho: 1.225
+  g: 9.80665
+  v_air: [0,0,0]
+
+bodies:
+  # Nosecone/payload (top section)
+  nosecone:
+    m: 5.0  # kg
+    I_body: [[0.5,0,0],[0,0.5,0],[0,0,0.1]]  # kg·m² (thin cylinder)
+    r0: [0,0,0]      # Position at deployment
+    v0: [0,0,-50]    # Velocity at deployment (m/s)
+    q0: [1,0,0,0]    # Orientation quaternion
+    w0: [0,0,0]      # Angular velocity (rad/s)
+    anchors_B:
+      base: [0,0,-0.3]  # Connection point to avionics bay (30cm from center)
+      drogue_attach: [0,0,-0.25]  # Drogue attachment point
+
+  # Avionics bay (middle section)
+  avionics:
+    m: 8.0  # kg
+    I_body: [[1.0,0,0],[0,1.0,0],[0,0,0.2]]  # kg·m²
+    r0: [0,0,-0.5]   # Positioned 50cm below nosecone
+    v0: [0,0,-50]    # Same velocity initially
+    q0: [1,0,0,0]
+    w0: [0,0,0]
+    anchors_B:
+      top: [0,0,0.3]     # Connection to nosecone
+      bottom: [0,0,-0.3]  # Connection to motor
+      pilot_attach: [0,0,-0.2]  # Pilot chute attachment
+
+  # Motor/booster (bottom section)
+  motor:
+    m: 42.0  # kg (heaviest component)
+    I_body: [[3.0,0,0],[0,3.0,0],[0,0,0.5]]  # kg·m²
+    r0: [0,0,-1.0]   # Positioned 1m below nosecone
+    v0: [0,0,-50]    # Same velocity initially
+    q0: [1,0,0,0]
+    w0: [0,0,0]
+    anchors_B:
+      top: [0,0,0.3]     # Connection to avionics bay
+      main_attach: [0,0,0.2]  # Main chute attachment point
+
+canopies:
+  drogue:
+    A_inf: 2.0      # m²
+    CD_inf: 1.6
+    td: 0.0         # Deploy immediately
+    tau_A: 0.4      # Inflation time constant
+    tau_CD: 0.4
+    m_canopy: 0.3   # kg
+    Ca: 1.0
+    kappa: 4.0
+    p0: [0,0,0.5]   # Position: 50cm above nosecone (slack with L0=3.0m)
+    v0: [0,0,-48]   # Slightly slower than rocket → creates separation
+
+  pilot:
+    A_inf: 4.0
+    CD_inf: 1.5
+    td: 2.0         # Deploy 2 seconds after drogue
+    tau_A: 0.6
+    tau_CD: 0.6
+    m_canopy: 0.4
+    Ca: 1.0
+    kappa: 4.0
+    p0: [0,0,-0.8]  # Position: below avionics bay (slack)
+    v0: [0,0,-48]
+
+  main:
+    A_inf: 16.0
+    CD_inf: 1.4
+    td: 6.0         # Deploy 6 seconds after drogue
+    tau_A: 0.8
+    tau_CD: 0.8
+    m_canopy: 1.0
+    Ca: 1.0
+    kappa: 4.0
+    p0: [0,0,-1.5]  # Position: below motor (slack)
+    v0: [0,0,-48]
+
+edges:
+  # Structural linkages between body components
+  # These are rigid/semi-rigid connections (can be removed for separation)
+  - {id: link_nosecone_avionics, n_minus: "nosecone:base", n_plus: "avionics:top", 
+     L0: 0.5, k0: 500000, k1: 0, alpha: 1, c: 5000, T_pre: 0, T_max: 50000}
+     # High stiffness (500 kN/m) for rigid connection
+     # High breaking strength (50 kN) for structural integrity
+  
+  - {id: link_avionics_motor, n_minus: "avionics:bottom", n_plus: "motor:top",
+     L0: 0.5, k0: 500000, k1: 0, alpha: 1, c: 5000, T_pre: 0, T_max: 50000}
+
+  # Parachute connections
+  - {id: leg_drogue, n_minus: "nosecone:drogue_attach", n_plus: drogue,
+     L0: 3.0, k0: 20000, k1: 0, alpha: 1, c: 200, T_pre: 0, T_max: 3000}
+  
+  - {id: leg_pilot, n_minus: "avionics:pilot_attach", n_plus: pilot,
+     L0: 3.0, k0: 20000, k1: 0, alpha: 1, c: 200, T_pre: 0, T_max: 3000}
+  
+  - {id: riser_main, n_minus: "motor:main_attach", n_plus: main,
+     L0: 4.0, k0: 20000, k1: 0, alpha: 1, c: 200, T_pre: 0, T_max: 3000}
+
+  # Optional: Body separation triggers
+  # Example: Avionics bay separates from motor when drogue line goes taut
+  # Uncomment and configure:
+  # avionics:
+  #   separate_on_pickup: leg_drogue
+  #   separation_v_mag: 3.0
+  #   separation_w_mag: 5.0
+

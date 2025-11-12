@@ -1,0 +1,47 @@
+atmosphere:
+  rho: 1.225  # kg/m³ (sea level)
+  g: 9.80665
+  v_air: [0, 0, 0]
+
+bodies:
+  rocket:
+    m: 18.14  # kg (40 lbs total)
+    I_body:
+      - [2.0, 0, 0]
+      - [0, 2.0, 0]
+      - [0, 0, 0.5]
+    r0: [0, 0, 0]
+    # Initial velocity downward
+    v0: [0, 0, -30]  # m/s downward
+    q0: [1, 0, 0, 0]  # No rotation
+    w0: [0, 0, 0]
+    anchors_B:
+      base: [0, 0, 0]
+
+canopies:
+  main:
+    A_inf: 7.29  # m²
+    CD_inf: 2.0
+    td: 0.0  # Can deploy immediately
+    tau_A: 0.5  # Inflation time constants
+    tau_CD: 0.5
+    m_canopy: 0.5  # kg
+    Ca: 1.0
+    kappa: 4.0
+    # Start canopy slightly separated but with same velocity
+    # They will separate due to different accelerations
+    p0: [0, 0, 3.0]  # 3m above rocket (less than L0, so slack)
+    v0: [0, 0, -30]  # Same initial velocity
+
+edges:
+  - id: shockcord
+    n_minus: "rocket:base"
+    n_plus: main
+    L0: 15.24  # m (50 ft)
+    k0: 2000  # N/m
+    k1: 0
+    alpha: 1
+    c: 100  # N/(m/s)
+    T_pre: 0
+    T_max: 3000  # N
+
