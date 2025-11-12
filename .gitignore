@@ -46,6 +46,12 @@ examples/pintle_engine/**/*.pyc
 !README.md
 !README_PARACHUTE.md
 
+# Include guide files
+!SETUP_REPOS.md
+!REPO_SEPARATION_GUIDE.md
+!.gitignore.engine
+!.gitignore.parachute
+
 # Include .gitignore itself
 !.gitignore
 
