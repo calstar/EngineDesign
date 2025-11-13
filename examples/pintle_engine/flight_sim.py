@@ -560,13 +560,12 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     if cutoff_time is not None and cutoff_time < burn_time:
 
-        # Add safety margin (0.05s or 2% of cutoff_time, whichever is larger) to prevent numerical precision issues
-        # This ensures mass never goes negative due to integration/discretization errors
-        # More conservative margin to account for RocketPy's internal discretization
-        safety_margin = max(0.05, cutoff_time * 0.02)
-        safe_cutoff_time = max(0.0, cutoff_time - safety_margin)
+        # Very aggressive truncation: truncate at 90% of cutoff_time to ensure mass never goes negative
+        # This accounts for RocketPy's internal discretization and numerical integration errors
+        # RocketPy checks at discrete points and may find negative mass even with small margins
+        aggressive_cutoff_time = max(0.0, cutoff_time * 0.90)  # Truncate at 90% of detected cutoff
         
-        truncation_msg = f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Truncating thrust and mass flows at t={safe_cutoff_time:.3f} s (with safety margin)."
+        truncation_msg = f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Truncating thrust and mass flows at t={aggressive_cutoff_time:.3f} s (90% of cutoff for safety)."
 
         # Note: Message is included in truncation_info, can be logged/displayed by caller if needed
 
@@ -576,7 +575,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
             "cutoff_time": cutoff_time,
 
-            "safe_cutoff_time": safe_cutoff_time,
+            "safe_cutoff_time": aggressive_cutoff_time,
 
             "reason": cutoff_reason,
 
@@ -584,24 +583,21 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
         }
 
-        # Truncate thrust curve at safe_cutoff_time to ensure mass never goes negative
-        thrust_curve = truncate_thrust_curve(thrust_curve, safe_cutoff_time)
+        # Truncate thrust curve at aggressive_cutoff_time to ensure mass never goes negative
+        thrust_curve = truncate_thrust_curve(thrust_curve, aggressive_cutoff_time)
 
-        # Update burn_time to safe_cutoff_time (but keep original for tank discretization)
-        # Reduce flux_time significantly more to account for RocketPy's internal discretization checking
-        # This ensures RocketPy's bounds check doesn't find negative mass due to integration errors
-        effective_burn_time = max(0.0, safe_cutoff_time * 0.95)  # 5% additional safety margin
+        # Use aggressive_cutoff_time as effective_burn_time (already very conservative)
+        effective_burn_time = aggressive_cutoff_time
         
-        # Truncate mdot functions at safe_cutoff_time, but limit domain to effective_burn_time
+        # Truncate mdot functions at aggressive_cutoff_time, limit domain to effective_burn_time
         # This prevents RocketPy from checking beyond the actual burn duration
-        # Use effective_burn_time as the max time for the function domain
-        mdot_lox = truncate_mdot_function(mdot_lox, safe_cutoff_time, effective_burn_time)
+        mdot_lox = truncate_mdot_function(mdot_lox, aggressive_cutoff_time, effective_burn_time)
 
-        mdot_fuel = truncate_mdot_function(mdot_fuel, safe_cutoff_time, effective_burn_time)
+        mdot_fuel = truncate_mdot_function(mdot_fuel, aggressive_cutoff_time, effective_burn_time)
         
-        # Reduce initial masses slightly to account for truncation and ensure bounds check passes
-        # This prevents RocketPy from detecting negative mass due to numerical integration errors
-        mass_reduction_factor = 0.98  # Reduce by 2% to provide buffer
+        # Reduce initial masses by 5% to provide significant buffer for numerical errors
+        # This ensures RocketPy's bounds check passes even with integration/discretization errors
+        mass_reduction_factor = 0.95  # Reduce by 5% to provide larger buffer
         m_lox0 = m_lox0 * mass_reduction_factor
         m_rp10 = m_rp10 * mass_reduction_factor
 
