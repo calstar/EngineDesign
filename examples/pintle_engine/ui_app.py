@@ -1574,6 +1574,12 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             thrust_vals_SI = thrust_vals_SI[order]
             mdot_O_vals = mdot_O_vals[order]
             mdot_F_vals = mdot_F_vals[order]
+            
+            # Store original arrays for later (before truncation)
+            t_vals_original = t_vals.copy()
+            thrust_vals_original = thrust_vals_SI.copy()
+            mdot_O_vals_original = mdot_O_vals.copy()
+            mdot_F_vals_original = mdot_F_vals.copy()
 
             # Deduce burn time from dataset
             if len(t_vals) < 2:
@@ -1583,6 +1589,129 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             if not np.isfinite(burn_time_ds) or burn_time_ds <= 0.0:
                 st.error("Dataset time axis must increase (duration must be > 0 s). Check the selected time column.")
                 return
+            
+            # Check for tank underfill and truncate dataset if needed
+            m_lox0 = float(m_lox)
+            m_fuel0 = float(m_fuel)
+            
+            # Normalize time to start at 0
+            t_min = float(np.min(t_vals))
+            t_vals_normalized = t_vals - t_min
+            
+            # Detect underfill by integrating mdot arrays
+            def detect_underfill_from_arrays(times, mdot_array, m_initial):
+                """Detect when tank would be depleted by integrating mdot array."""
+                if len(times) < 2:
+                    return None
+                # Use trapezoidal integration
+                cumulative_mass = np.zeros_like(times)
+                for i in range(1, len(times)):
+                    dt = times[i] - times[i-1]
+                    cumulative_mass[i] = cumulative_mass[i-1] + (mdot_array[i-1] + mdot_array[i]) * dt / 2.0
+                # Find where cumulative mass exceeds initial mass
+                depletion_idx = np.where(cumulative_mass >= m_initial)[0]
+                if len(depletion_idx) > 0:
+                    return float(times[depletion_idx[0]])
+                return None
+            
+            lox_cutoff = detect_underfill_from_arrays(t_vals_normalized, mdot_O_vals, m_lox0)
+            fuel_cutoff = detect_underfill_from_arrays(t_vals_normalized, mdot_F_vals, m_fuel0)
+            
+            # Find earliest cutoff time
+            cutoff_time = None
+            cutoff_reason = None
+            if lox_cutoff is not None and fuel_cutoff is not None:
+                if lox_cutoff <= fuel_cutoff:
+                    cutoff_time = lox_cutoff
+                    cutoff_reason = "LOX"
+                else:
+                    cutoff_time = fuel_cutoff
+                    cutoff_reason = "fuel"
+            elif lox_cutoff is not None:
+                cutoff_time = lox_cutoff
+                cutoff_reason = "LOX"
+            elif fuel_cutoff is not None:
+                cutoff_time = fuel_cutoff
+                cutoff_reason = "fuel"
+            
+            # Truncate arrays at cutoff time
+            if cutoff_time is not None:
+                # Find indices where time <= cutoff
+                valid_mask = t_vals_normalized <= cutoff_time
+                valid_indices = np.where(valid_mask)[0]
+                
+                if len(valid_indices) > 0:
+                    # Check if the last valid point is exactly at cutoff_time
+                    last_valid_idx = valid_indices[-1]
+                    last_valid_time = t_vals_normalized[last_valid_idx]
+                    
+                    if abs(last_valid_time - cutoff_time) < 1e-6:
+                        # Last point is already at cutoff, just set last values to 0
+                        t_vals_trunc = t_vals_normalized[:last_valid_idx+1].copy()
+                        thrust_vals_trunc = thrust_vals_SI[:last_valid_idx+1].copy()
+                        mdot_O_vals_trunc = mdot_O_vals[:last_valid_idx+1].copy()
+                        mdot_F_vals_trunc = mdot_F_vals[:last_valid_idx+1].copy()
+                        # Set last point to 0
+                        thrust_vals_trunc[-1] = 0.0
+                        mdot_O_vals_trunc[-1] = 0.0
+                        mdot_F_vals_trunc[-1] = 0.0
+                    else:
+                        # Need to add a point at cutoff_time with 0 values
+                        t_vals_trunc = np.concatenate([t_vals_normalized[:last_valid_idx+1], [cutoff_time]])
+                        thrust_vals_trunc = np.concatenate([thrust_vals_SI[:last_valid_idx+1], [0.0]])
+                        mdot_O_vals_trunc = np.concatenate([mdot_O_vals[:last_valid_idx+1], [0.0]])
+                        mdot_F_vals_trunc = np.concatenate([mdot_F_vals[:last_valid_idx+1], [0.0]])
+                    
+                    # Update arrays
+                    t_vals_normalized = t_vals_trunc
+                    thrust_vals_SI = thrust_vals_trunc
+                    mdot_O_vals = mdot_O_vals_trunc
+                    mdot_F_vals = mdot_F_vals_trunc
+                    
+                    # Show warning
+                    st.warning(f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Dataset truncated.")
+                    
+                    # Update burn time
+                    burn_time_ds = float(cutoff_time)
+            
+            # Restore original time offset for display
+            t_vals = t_vals_normalized + t_min
+            
+            # Always add truncated thrust column to original dataset
+            # (If no truncation occurred, it will just match the original thrust)
+            cutoff_time_original = (cutoff_time + t_min) if cutoff_time is not None else None
+            
+            # Create a function to interpolate truncated thrust at any time
+            def get_truncated_thrust(t_query):
+                """Get truncated thrust value at time t_query using interpolation."""
+                if cutoff_time_original is not None and t_query > cutoff_time_original:
+                    return 0.0
+                # Find the index in truncated data (or original if no truncation)
+                idx = np.searchsorted(t_vals, t_query, side='right') - 1
+                if idx < 0:
+                    return 0.0
+                if idx >= len(thrust_vals_SI) - 1:
+                    return thrust_vals_SI[-1] if len(thrust_vals_SI) > 0 else 0.0
+                # Linear interpolation
+                t1, t2 = t_vals[idx], t_vals[idx+1]
+                f1, f2 = thrust_vals_SI[idx], thrust_vals_SI[idx+1]
+                if abs(t2 - t1) > 1e-9:
+                    return f1 + (f2 - f1) * (t_query - t1) / (t2 - t1)
+                return f1
+            
+            # Add truncated thrust column to original dataset
+            ds_df_with_truncated = ds_df.copy()
+            # Apply truncated thrust function to each row's time value
+            ds_df_with_truncated["Thrust_truncated (N)"] = ds_df[time_col].apply(get_truncated_thrust)
+            
+            # Update the dataset in session state
+            datasets[dataset_name] = ds_df_with_truncated
+            st.session_state["custom_plot_datasets"] = datasets
+            if cutoff_time is not None:
+                st.info(f"Added 'Thrust_truncated (N)' column to dataset '{dataset_name}' (truncated at t={cutoff_time:.3f} s).")
+            else:
+                st.info(f"Added 'Thrust_truncated (N)' column to dataset '{dataset_name}' (no truncation needed).")
+            
             working["thrust"]["burn_time"] = burn_time_ds
             # Use user-defined propellant masses (set earlier in the form)
             try:
@@ -1591,12 +1720,13 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 st.error(f"Edited flight configuration is invalid: {exc}")
                 return
 
-            # Build RocketPy Functions
+            # Build RocketPy Functions from (potentially truncated) data
             thrust_func = build_rp_function(t_vals, thrust_vals_SI)
             mdot_O_func = build_rp_function(t_vals, mdot_O_vals)
             mdot_F_func = build_rp_function(t_vals, mdot_F_vals)
 
             # Run flight directly with dataset-driven inputs
+            # (Dataset is already truncated above if needed)
             try:
                 sim_result = setup_flight(config_for_flight, thrust_func, mdot_O_func, mdot_F_func, plot_results=False)
             except Exception as exc:
@@ -1618,6 +1748,74 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             try:
                 t_series, z_series, vz_series = extract_flight_series(flight)
                 plot_flight_results(t_series, z_series, vz_series, key_suffix="_ds")
+                
+                # Add flight simulation data to dataset
+                if len(t_series) > 0 and len(z_series) > 0 and len(vz_series) > 0:
+                    # Get the current dataset (should already have truncated thrust column)
+                    ds_df_current = datasets.get(dataset_name)
+                    if ds_df_current is None:
+                        # Fallback to original if somehow not in session state
+                        ds_df_current = ds_df_with_truncated if 'ds_df_with_truncated' in locals() else ds_df
+                    
+                    # Get launch elevation for cumulative altitude (altitude above sea level)
+                    launch_elevation = float(config_for_flight.environment.elevation) if config_for_flight.environment else 0.0
+                    
+                    # Create interpolation functions for flight data
+                    # Use numpy interpolation for better performance and accuracy
+                    from scipy.interpolate import interp1d
+                    
+                    # Ensure time series are sorted and unique
+                    t_series_sorted, sort_idx = np.unique(t_series, return_index=True)
+                    z_series_sorted = z_series[sort_idx]
+                    vz_series_sorted = vz_series[sort_idx]
+                    
+                    # Create interpolation functions (extrapolate to constant values outside range)
+                    if len(t_series_sorted) > 1:
+                        # Use linear interpolation, extrapolate to boundary values
+                        interp_z = interp1d(t_series_sorted, z_series_sorted, kind='linear', 
+                                           bounds_error=False, fill_value=(z_series_sorted[0], z_series_sorted[-1]))
+                        interp_vz = interp1d(t_series_sorted, vz_series_sorted, kind='linear',
+                                            bounds_error=False, fill_value=(0.0, 0.0))
+                    else:
+                        # Fallback if insufficient data
+                        interp_z = lambda t: z_series_sorted[0] if len(z_series_sorted) > 0 else 0.0
+                        interp_vz = lambda t: 0.0
+                    
+                    def get_altitude(t_query):
+                        """Get cumulative altitude (height above sea level) at time t_query using interpolation."""
+                        if len(t_series_sorted) == 0:
+                            return launch_elevation
+                        # Get interpolated altitude above launch
+                        z_above_launch = float(interp_z(t_query))
+                        # Return cumulative: launch elevation + altitude above launch
+                        return launch_elevation + max(0.0, z_above_launch)
+                    
+                    def get_vertical_velocity(t_query):
+                        """Get vertical velocity at time t_query using interpolation."""
+                        if len(t_series_sorted) == 0:
+                            return 0.0
+                        # Get interpolated velocity (already handles bounds)
+                        return float(interp_vz(t_query))
+                    
+                    # Add flight data columns to dataset
+                    # Ensure dataset is sorted by time to avoid interpolation issues
+                    ds_df_flight = ds_df_current.copy()
+                    ds_df_flight = ds_df_flight.sort_values(by=time_col).reset_index(drop=True)
+                    
+                    # Apply interpolation to sorted dataset
+                    ds_df_flight["Altitude above sea level (m)"] = ds_df_flight[time_col].apply(get_altitude)
+                    ds_df_flight["Vertical Velocity (m/s)"] = ds_df_flight[time_col].apply(get_vertical_velocity)
+                    
+                    # Add scalar metrics as constant columns (for reference)
+                    if isinstance(apogee, (int, float)):
+                        ds_df_flight["Apogee (m)"] = apogee
+                    if isinstance(max_v, (int, float)) and max_v is not None:
+                        ds_df_flight["Max Velocity (m/s)"] = max_v
+                    
+                    # Update the dataset in session state
+                    datasets[dataset_name] = ds_df_flight
+                    st.session_state["custom_plot_datasets"] = datasets
+                    st.info(f"Added flight simulation data (altitude, velocity) to dataset '{dataset_name}'.")
             except Exception as exc:
                 st.warning(f"Could not extract time series: {exc}")
                 return
@@ -1653,6 +1851,11 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         except Exception as exc:
             st.error(f"Flight simulation failed: {exc}")
             return
+
+        # Display truncation info if tank underfill was detected
+        truncation_info = sim_result.get("truncation_info")
+        if truncation_info and truncation_info.get("truncated"):
+            st.warning(truncation_info.get("message", "Tank underfill detected and truncated."))
 
         apogee = sim_result.get("apogee")
         max_v = sim_result.get("max_velocity")
