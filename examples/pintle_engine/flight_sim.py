@@ -666,16 +666,6 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
 
 
-    print(m_lox0)
-
-    print(m_rp10)
-
-    print(mdot_lox)
-
-    print(mdot_fuel)
-
-
-
     # Tank geometries from config
 
     lox_geom = CylindricalTank(radius=config.lox_tank.lox_radius, height=config.lox_tank.lox_h, spherical_caps=False)
