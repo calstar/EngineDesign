@@ -250,6 +250,9 @@ def update_chamber_geometry_from_ablation(
     
     # Update chamber diameter and volume
     # For cylindrical chamber: V = π × r² × L
+    # This gives quadratic growth: V = π × (R_initial + ΔR)² × L
+    # = π × (R_initial² + 2×R_initial×ΔR + ΔR²) × L
+    # The ΔR² term ensures quadratic (not linear) volume growth with recession
     D_chamber_new = D_chamber_initial + 2.0 * effective_recession_chamber
     R_chamber_new = D_chamber_new / 2.0
     V_chamber_new = np.pi * (R_chamber_new ** 2) * L_chamber
