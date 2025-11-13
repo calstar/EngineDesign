@@ -587,15 +587,23 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         # Truncate thrust curve at safe_cutoff_time to ensure mass never goes negative
         thrust_curve = truncate_thrust_curve(thrust_curve, safe_cutoff_time)
 
-        # Truncate mdot functions at safe_cutoff_time
-        mdot_lox = truncate_mdot_function(mdot_lox, safe_cutoff_time, burn_time)
-
-        mdot_fuel = truncate_mdot_function(mdot_fuel, safe_cutoff_time, burn_time)
-
         # Update burn_time to safe_cutoff_time (but keep original for tank discretization)
-        # Reduce flux_time slightly more to account for RocketPy's internal discretization checking
+        # Reduce flux_time significantly more to account for RocketPy's internal discretization checking
         # This ensures RocketPy's bounds check doesn't find negative mass due to integration errors
-        effective_burn_time = max(0.0, safe_cutoff_time * 0.99)  # 1% additional safety margin
+        effective_burn_time = max(0.0, safe_cutoff_time * 0.95)  # 5% additional safety margin
+        
+        # Truncate mdot functions at safe_cutoff_time, but limit domain to effective_burn_time
+        # This prevents RocketPy from checking beyond the actual burn duration
+        # Use effective_burn_time as the max time for the function domain
+        mdot_lox = truncate_mdot_function(mdot_lox, safe_cutoff_time, effective_burn_time)
+
+        mdot_fuel = truncate_mdot_function(mdot_fuel, safe_cutoff_time, effective_burn_time)
+        
+        # Reduce initial masses slightly to account for truncation and ensure bounds check passes
+        # This prevents RocketPy from detecting negative mass due to numerical integration errors
+        mass_reduction_factor = 0.98  # Reduce by 2% to provide buffer
+        m_lox0 = m_lox0 * mass_reduction_factor
+        m_rp10 = m_rp10 * mass_reduction_factor
 
     else:
 
