@@ -3614,25 +3614,25 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     })
                     
                     # Extract flight data
-                    flight_series = extract_flight_series(flight_obj)
-                    if flight_series:
+                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj)
+                    if flight_time.size > 0:
                         truncated_df["Altitude above sea level (m)"] = np.interp(
                             t_vals_normalized, 
-                            flight_series["time"], 
-                            flight_series["z"]
+                            flight_time, 
+                            flight_z
                         )
                         truncated_df["Vertical Velocity (m/s)"] = np.interp(
                             t_vals_normalized,
-                            flight_series["time"],
-                            flight_series["vz"]
+                            flight_time,
+                            flight_vz
                         )
                     
                     st.subheader("Truncated Dataset")
                     st.dataframe(truncated_df)
                     
                     # Plot flight results
-                    if flight_series:
-                        plot_flight_results(flight_series)
+                    if flight_time.size > 0:
+                        plot_flight_results(flight_time, flight_z, flight_vz)
                         render_rocket_view(flight_obj)
                         plot_additional_rocket_plots(flight_obj)
                         
@@ -3707,9 +3707,9 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                         st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
                     
                     # Extract and plot flight data
-                    flight_series = extract_flight_series(flight_obj)
-                    if flight_series:
-                        plot_flight_results(flight_series)
+                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj)
+                    if flight_time.size > 0:
+                        plot_flight_results(flight_time, flight_z, flight_vz)
                         render_rocket_view(flight_obj)
                         plot_additional_rocket_plots(flight_obj)
                         
