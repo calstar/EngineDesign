@@ -556,9 +556,14 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     if cutoff_time is not None and cutoff_time < burn_time:
 
-        truncation_msg = f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Truncating thrust and mass flows."
+        # Add small safety margin (0.01s or 1% of cutoff_time, whichever is larger) to prevent numerical precision issues
+        # This ensures mass never goes negative due to integration/discretization errors
+        safety_margin = max(0.01, cutoff_time * 0.01)
+        safe_cutoff_time = max(0.0, cutoff_time - safety_margin)
+        
+        truncation_msg = f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Truncating thrust and mass flows at t={safe_cutoff_time:.3f} s (with safety margin)."
 
-        print(truncation_msg)  # Also print for console/logging
+        # Note: Message is included in truncation_info, can be logged/displayed by caller if needed
 
         truncation_info = {
 
@@ -566,25 +571,25 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
             "cutoff_time": cutoff_time,
 
+            "safe_cutoff_time": safe_cutoff_time,
+
             "reason": cutoff_reason,
 
             "message": truncation_msg
 
         }
 
-        # Truncate thrust curve
+        # Truncate thrust curve at safe_cutoff_time to ensure mass never goes negative
+        thrust_curve = truncate_thrust_curve(thrust_curve, safe_cutoff_time)
 
-        thrust_curve = truncate_thrust_curve(thrust_curve, cutoff_time)
+        # Truncate mdot functions at safe_cutoff_time
+        mdot_lox = truncate_mdot_function(mdot_lox, safe_cutoff_time, burn_time)
 
-        # Truncate mdot functions
+        mdot_fuel = truncate_mdot_function(mdot_fuel, safe_cutoff_time, burn_time)
 
-        mdot_lox = truncate_mdot_function(mdot_lox, cutoff_time, burn_time)
+        # Update burn_time to safe_cutoff_time (but keep original for tank discretization)
 
-        mdot_fuel = truncate_mdot_function(mdot_fuel, cutoff_time, burn_time)
-
-        # Update burn_time to cutoff_time (but keep original for tank discretization)
-
-        effective_burn_time = cutoff_time
+        effective_burn_time = safe_cutoff_time
 
     else:
 
