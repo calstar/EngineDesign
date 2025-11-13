@@ -3634,7 +3634,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     if flight_time.size > 0:
                         plot_flight_results(flight_time, flight_z, flight_vz)
                         render_rocket_view(flight_obj)
-                        plot_additional_rocket_plots(flight_obj)
+                        plot_additional_rocket_plots(flight_obj, flight_time)
                         
                 except Exception as exc:
                     st.error(f"Flight simulation failed: {exc}")
@@ -3711,7 +3711,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     if flight_time.size > 0:
                         plot_flight_results(flight_time, flight_z, flight_vz)
                         render_rocket_view(flight_obj)
-                        plot_additional_rocket_plots(flight_obj)
+                        plot_additional_rocket_plots(flight_obj, flight_time)
                         
                 except Exception as exc:
                     st.error(f"Flight simulation failed: {exc}")
