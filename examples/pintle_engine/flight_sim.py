@@ -393,10 +393,10 @@ def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
     if isinstance(mdot_func, Function):
 
         # Create a piecewise function
-
+        # Use strict < to ensure mdot is 0 at cutoff_time itself (more conservative)
         def truncated_mdot(t):
 
-            if t <= cutoff_time:
+            if t < cutoff_time:
 
                 return mdot_func(t)
 
@@ -405,9 +405,13 @@ def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
                 return 0.0
 
         # Convert to RocketPy Function by sampling
-
+        # Ensure we sample at cutoff_time with value 0 explicitly
         times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
-
+        # Add cutoff_time explicitly if not already close to a sample point
+        if not np.any(np.abs(times - cutoff_time) < 1e-6):
+            times = np.append(times, cutoff_time)
+            times = np.sort(times)
+        
         values = np.array([truncated_mdot(t) for t in times])
 
         # Ensure sorted (times should already be sorted, but just to be safe)
@@ -427,10 +431,10 @@ def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
     else:
 
         # It's a constant - create a function that's constant until cutoff, then 0
-
+        # Use strict < to ensure mdot is 0 at cutoff_time itself (more conservative)
         times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
 
-        values = np.array([float(mdot_func) if t <= cutoff_time else 0.0 for t in times])
+        values = np.array([float(mdot_func) if t < cutoff_time else 0.0 for t in times])
 
         # Ensure sorted (times should already be sorted, but just to be safe)
 
@@ -556,9 +560,10 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     if cutoff_time is not None and cutoff_time < burn_time:
 
-        # Add small safety margin (0.01s or 1% of cutoff_time, whichever is larger) to prevent numerical precision issues
+        # Add safety margin (0.05s or 2% of cutoff_time, whichever is larger) to prevent numerical precision issues
         # This ensures mass never goes negative due to integration/discretization errors
-        safety_margin = max(0.01, cutoff_time * 0.01)
+        # More conservative margin to account for RocketPy's internal discretization
+        safety_margin = max(0.05, cutoff_time * 0.02)
         safe_cutoff_time = max(0.0, cutoff_time - safety_margin)
         
         truncation_msg = f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Truncating thrust and mass flows at t={safe_cutoff_time:.3f} s (with safety margin)."
@@ -588,8 +593,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         mdot_fuel = truncate_mdot_function(mdot_fuel, safe_cutoff_time, burn_time)
 
         # Update burn_time to safe_cutoff_time (but keep original for tank discretization)
-
-        effective_burn_time = safe_cutoff_time
+        # Reduce flux_time slightly more to account for RocketPy's internal discretization checking
+        # This ensures RocketPy's bounds check doesn't find negative mass due to integration errors
+        effective_burn_time = max(0.0, safe_cutoff_time * 0.99)  # 1% additional safety margin
 
     else:
 
