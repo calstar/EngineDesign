@@ -738,7 +738,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
         geometry=lox_geom,
 
-        flux_time=burn_time,
+        flux_time=effective_burn_time,  # Use effective_burn_time after truncation
 
         liquid=lox,
 
@@ -750,7 +750,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
         liquid_mass_flow_rate_in=0.0,
 
-        liquid_mass_flow_rate_out=mdot_lox,
+        liquid_mass_flow_rate_out=mdot_lox,  # Already truncated if underfill detected
 
         gas_mass_flow_rate_in=0.0,
 
@@ -768,7 +768,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
         geometry=rp1_geom,
 
-        flux_time=burn_time,
+        flux_time=effective_burn_time,  # Use effective_burn_time after truncation
 
         liquid=rp1,
 
@@ -780,7 +780,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
         liquid_mass_flow_rate_in=0.0,
 
-        liquid_mass_flow_rate_out=mdot_fuel,
+        liquid_mass_flow_rate_out=mdot_fuel,  # Already truncated if underfill detected
 
         gas_mass_flow_rate_in=0.0,
 
