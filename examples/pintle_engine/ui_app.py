@@ -31,9 +31,20 @@ from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight
+<<<<<<< HEAD
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
 )
+=======
+
+# RocketPy imports (optional, only needed for flight sim)
+try:
+    from rocketpy import Function
+    ROCKETPY_AVAILABLE = True
+except ImportError:
+    ROCKETPY_AVAILABLE = False
+    Function = None
+>>>>>>> 329fd2f (INTEGRATE: Flight simulation with RocketPy)
 
 PSI_TO_PA = 6894.76
 PA_TO_PSI = 1.0 / PSI_TO_PA
@@ -170,6 +181,10 @@ def format_value(value: float, unit_type: str, unit_label: str) -> str:
     return fmt % (value * factor)
 
 
+# ============================================================================
+# Flight Simulation Helper Functions
+# ============================================================================
+
 def to_elapsed_seconds(time_series: pd.Series) -> np.ndarray:
     """Convert a time column to elapsed seconds from the first value.
     Supports numeric, numeric-like strings, and datetimes (ISO, etc.)."""
@@ -190,8 +205,10 @@ def to_elapsed_seconds(time_series: pd.Series) -> np.ndarray:
     return (dt_series - t0).dt.total_seconds().to_numpy(dtype=float)
 
 
-def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: str = "linear") -> Function:
+def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: str = "linear"):
     """Build RocketPy Function from time/value arrays with sorting and stacking."""
+    if not ROCKETPY_AVAILABLE or Function is None:
+        raise ImportError("RocketPy not available. Install with: pip install rocketpy")
     order = np.argsort(times_s)
     t_sorted = np.asarray(times_s, dtype=float)[order]
     v_sorted = np.asarray(values, dtype=float)[order]
@@ -262,6 +279,7 @@ def plot_additional_rocket_plots(flight, t_series: np.ndarray, *, key_suffix: st
     plots: list[tuple[str, str]] = []
     # Candidate attributes and labels
     candidates = [
+<<<<<<< HEAD
         ("az", "Acceleration (m/s²)"),
         ("M", "Mach"),
         ("q", "Dynamic Pressure (Pa)"),
@@ -285,6 +303,37 @@ def plot_additional_rocket_plots(flight, t_series: np.ndarray, *, key_suffix: st
             )
         except Exception:
             continue
+=======
+        ("ax", "Axial Acceleration"),
+        ("ay", "Lateral Acceleration Y"),
+        ("az", "Lateral Acceleration Z"),
+        ("alpha", "Angle of Attack"),
+        ("beta", "Sideslip Angle"),
+        ("mach_number", "Mach Number"),
+    ]
+    for attr, label in candidates:
+        series_obj = getattr(flight, attr, None)
+        if series_obj is not None:
+            try:
+                vals = _to_1d(_series_to_np(series_obj))
+                if vals.size > 0:
+                    plots.append((label, vals))
+            except Exception:
+                pass
+    if not plots:
+        st.info("No additional flight plots available.")
+        return
+    for label, vals in plots:
+        n = min(len(t_series), len(vals))
+        if n > 0:
+            df = pd.DataFrame({"time": t_series[:n], label: vals[:n]})
+            st.plotly_chart(px.line(df, x="time", y=label, title=label), use_container_width=True, key=f"flight_{label.replace(' ', '_').lower()}{key_suffix}")
+
+
+# ============================================================================
+# End Flight Simulation Helper Functions
+# ============================================================================
+>>>>>>> 329fd2f (INTEGRATE: Flight simulation with RocketPy)
 
 
 def length_number_input(
@@ -3120,11 +3169,16 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
 
 
 def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, config_label: str) -> None:
+<<<<<<< HEAD
+=======
+    """Flight simulation tab - integrate engine performance with RocketPy trajectory simulation."""
+>>>>>>> 329fd2f (INTEGRATE: Flight simulation with RocketPy)
     if not ROCKETPY_AVAILABLE:
         st.error("RocketPy is not installed. Install it with: `pip install rocketpy`")
         st.info("Flight simulation requires RocketPy for trajectory propagation.")
         return
     
+<<<<<<< HEAD
     if isinstance(runner, PintleEngineConfig):
         runner = PintleEngineRunner(runner)
     st.header("Flight Simulation")
@@ -3694,6 +3748,114 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     st.error(f"Flight simulation failed: {exc}")
                     import traceback
                     st.code(traceback.format_exc())
+=======
+    st.header("Flight Simulation")
+    st.write("Simulate rocket flight using engine performance data with RocketPy.")
+    
+    st.info("⚠️ Flight simulation integration is under development. Full UI coming soon!")
+    
+    st.markdown("""
+    ### What's Available
+    
+    The flight simulation module (`flight_sim.py`) is ready and can:
+    - Accept thrust curves from engine performance
+    - Model tank geometries and propellant consumption
+    - Simulate 6-DOF flight trajectories
+    - Calculate apogee and max velocity
+    - Generate flight plots (altitude, velocity, acceleration, etc.)
+    
+    ### How to Use (Python API)
+    
+    ```python
+    from examples.pintle_engine.flight_sim import setup_flight
+    from pintle_pipeline.io import load_config
+    from pintle_models.runner import PintleEngineRunner
+    
+    # Load config and run engine
+    config = load_config("config_minimal.yaml")
+    runner = PintleEngineRunner(config)
+    results = runner.evaluate(P_tank_O=1305*6894.76, P_tank_F=974*6894.76)
+    
+    # Create thrust curve
+    burn_time = 5.0
+    thrust_curve = [(0.0, results["F"]), (burn_time, results["F"])]
+    
+    # Run flight sim
+    sim_result = setup_flight(
+        config=config,
+        thrust_curve=thrust_curve,
+        mdot_lox=results["mdot_O"],
+        mdot_fuel=results["mdot_F"]
+    )
+    
+    print(f"Apogee: {sim_result['apogee']:.1f} m")
+    print(f"Max velocity: {sim_result['max_velocity']:.1f} m/s")
+    ```
+    
+    ### Configuration Requirements
+    
+    Flight simulation requires these additional config sections:
+    - `environment`: Launch site (lat/lon/elevation), date
+    - `rocket`: Mass, inertia, radius, fins
+    - `lox_tank` / `fuel_tank`: Geometry (height, radius), position
+    - `thrust`: Burn time
+    
+    See `examples/multi_body_rocket.yaml` for a complete example.
+    """)
+    
+    # Simple test interface
+    with st.expander("Quick Test (Constant Thrust)", expanded=False):
+        col1, col2 = st.columns(2)
+        with col1:
+            P_O_psi = st.number_input("LOX Tank Pressure [psi]", value=1305.0, min_value=100.0, max_value=3000.0)
+            burn_time = st.number_input("Burn Time [s]", value=5.0, min_value=0.5, max_value=30.0)
+        with col2:
+            P_F_psi = st.number_input("Fuel Tank Pressure [psi]", value=974.0, min_value=100.0, max_value=3000.0)
+            m_prop = st.number_input("Total Propellant Mass [kg]", value=24.0, min_value=1.0, max_value=100.0)
+        
+        if st.button("Run Quick Flight Sim", type="primary"):
+            try:
+                # Evaluate engine
+                results = runner.evaluate(P_O_psi * PSI_TO_PA, P_F_psi * PSI_TO_PA)
+                F = results["F"]
+                mdot_O = results["mdot_O"]
+                mdot_F = results["mdot_F"]
+                
+                st.success(f"Engine: {F/1000:.2f} kN thrust, {mdot_O+mdot_F:.3f} kg/s total flow")
+                
+                # Check if config has required fields
+                if not hasattr(config_obj, "environment") or config_obj.environment is None:
+                    st.error("Config missing 'environment' section. Cannot run flight sim.")
+                    return
+                if not hasattr(config_obj, "rocket") or config_obj.rocket is None:
+                    st.error("Config missing 'rocket' section. Cannot run flight sim.")
+                    return
+                
+                # Create thrust curve
+                thrust_curve = [(0.0, F), (burn_time, F)]
+                
+                # Run flight sim
+                sim_result = setup_flight(config_obj, thrust_curve, mdot_O, mdot_F, plot_results=False)
+                
+                # Display results
+                col_a, col_b = st.columns(2)
+                col_a.metric("Apogee", f"{sim_result['apogee']:.1f} m")
+                if sim_result['max_velocity'] is not None:
+                    col_b.metric("Max Velocity", f"{sim_result['max_velocity']:.1f} m/s")
+                
+                # Extract and plot
+                flight = sim_result['flight']
+                t_series, z_series, vz_series = extract_flight_series(flight)
+                plot_flight_results(t_series, z_series, vz_series)
+                
+                with st.expander("Rocket View"):
+                    render_rocket_view(flight)
+                    
+            except Exception as exc:
+                st.error(f"Flight simulation failed: {exc}")
+                import traceback
+                st.code(traceback.format_exc())
+>>>>>>> 329fd2f (INTEGRATE: Flight simulation with RocketPy)
 
 
 def main():
@@ -3736,7 +3898,11 @@ def main():
 
     runner = PintleEngineRunner(config_obj)
 
+<<<<<<< HEAD
     tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+=======
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+>>>>>>> 329fd2f (INTEGRATE: Flight simulation with RocketPy)
         "Forward Mode",
         "Inverse Mode",
         "Time-Series Analysis",
@@ -3757,7 +3923,11 @@ def main():
         plots_analysis_view(runner)
     with tab6:
         custom_plot_builder()
+<<<<<<< HEAD
     with tab7:
+=======
+    with tab6:
+>>>>>>> 329fd2f (INTEGRATE: Flight simulation with RocketPy)
         flight_sim_view(runner, config_obj, config_label)
 
 
