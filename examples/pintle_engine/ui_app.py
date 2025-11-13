@@ -19,7 +19,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 import yaml
-from rocketpy import Function
 
 project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
@@ -34,7 +33,6 @@ from examples.pintle_engine.flight_sim import setup_flight
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
 )
-from examples.pintle_engine.flight_sim import setup_flight
 
 # RocketPy imports (optional, only needed for flight sim)
 try:
