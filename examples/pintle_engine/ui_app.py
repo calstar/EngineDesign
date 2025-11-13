@@ -3266,22 +3266,31 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
     try:
         working = copy.deepcopy(config_obj).model_dump()
         if source == "Tank pressures (constant thrust)":
-            # ensure optional sections exist
-            working.setdefault("thrust", {"burn_time": burn_time})
+            # ensure optional sections exist (handle None values)
+            if working.get("thrust") is None:
+                working["thrust"] = {}
             working["thrust"]["burn_time"] = float(burn_time)
             # update masses from user inputs (tanks now hold masses)
-            lox_tank_work = working.setdefault("lox_tank", {})
-            fuel_tank_work = working.setdefault("fuel_tank", {})
+            if working.get("lox_tank") is None:
+                working["lox_tank"] = {}
+            if working.get("fuel_tank") is None:
+                working["fuel_tank"] = {}
+            lox_tank_work = working["lox_tank"]
+            fuel_tank_work = working["fuel_tank"]
             lox_tank_work["mass"] = float(m_lox)
             fuel_tank_work["mass"] = float(m_fuel)
             # update environment date
-            if "environment" not in working or working["environment"] is None:
+            if working.get("environment") is None:
                 working["environment"] = {}
             working["environment"]["date"] = [int(sel_date.year), int(sel_date.month), int(sel_date.day), int(sel_hour)]
         else:
             # dataset mode: always use user-defined masses; burn time set later from dataset
-            lox_tank_work = working.setdefault("lox_tank", {})
-            fuel_tank_work = working.setdefault("fuel_tank", {})
+            if working.get("lox_tank") is None:
+                working["lox_tank"] = {}
+            if working.get("fuel_tank") is None:
+                working["fuel_tank"] = {}
+            lox_tank_work = working["lox_tank"]
+            fuel_tank_work = working["fuel_tank"]
             lox_tank_work["mass"] = float(m_lox)
             fuel_tank_work["mass"] = float(m_fuel)
     except Exception as exc:
@@ -3291,7 +3300,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
     # Collapsible configuration editor
     st.subheader("Flight configuration")
     with st.expander("Environment", expanded=False):
-        env = working.get("environment", {}) or {}
+        env = working.get("environment") if working.get("environment") is not None else {}
         env.setdefault("latitude", 35.0)
         env.setdefault("longitude", -117.0)
         env.setdefault("elevation", 0.0)
@@ -3310,7 +3319,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         working["environment"] = env
 
     with st.expander("Rocket", expanded=False):
-        rocket = working.get("rocket") or {}
+        rocket = working.get("rocket") if working.get("rocket") is not None else {}
         rocket.setdefault("mass", 90.72)
         rocket.setdefault("inertia", [8.0, 8.0, 0.5])
         rocket.setdefault("radius", 0.1)
@@ -3338,7 +3347,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         rocket["motor_inertia"] = [float(mi_x), float(mi_y), float(mi_z)]
 
         # Fins
-        fins = (rocket.get("fins") or {})
+        fins = rocket.get("fins") if rocket.get("fins") is not None else {}
         fins.setdefault("no_fins", 3)
         fins.setdefault("root_chord", 0.2)
         fins.setdefault("tip_chord", 0.1)
@@ -3357,9 +3366,9 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         working["rocket"] = rocket
 
     with st.expander("Tanks", expanded=False):
-        lox_tank = (working.get("lox_tank") or {})
-        fuel_tank = (working.get("fuel_tank") or {})
-        press_tank = (working.get("press_tank") or {})
+        lox_tank = working.get("lox_tank") if working.get("lox_tank") is not None else {}
+        fuel_tank = working.get("fuel_tank") if working.get("fuel_tank") is not None else {}
+        press_tank = working.get("press_tank") if working.get("press_tank") is not None else {}
         # LOX
         lox_tank.setdefault("lox_h", 1.14)
         lox_tank.setdefault("lox_radius", 0.0762)
@@ -3400,7 +3409,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         working["press_tank"] = press_tank
 
     with st.expander("Nozzle", expanded=False):
-        nozzle = working.get("nozzle") or {}
+        nozzle = working.get("nozzle") if working.get("nozzle") is not None else {}
         nozzle.setdefault("A_throat", 0.00156235266901)
         nozzle.setdefault("A_exit", 0.00831498636119)
         nozzle.setdefault("expansion_ratio", 6.54)
@@ -3415,9 +3424,9 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         working["nozzle"] = nozzle
 
     with st.expander("Fluids (properties)", expanded=False):
-        fluids = working.get("fluids") or {}
-        ox = fluids.get("oxidizer") or {}
-        fu = fluids.get("fuel") or {}
+        fluids = working.get("fluids") if working.get("fluids") is not None else {}
+        ox = fluids.get("oxidizer") if fluids.get("oxidizer") is not None else {}
+        fu = fluids.get("fuel") if fluids.get("fuel") is not None else {}
         ox.setdefault("name", "LOX")
         ox.setdefault("density", 1140.0)
         ox.setdefault("temperature", 90.0)
