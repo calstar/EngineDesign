@@ -2527,6 +2527,12 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             fuel_tank_work = working["fuel_tank"]
             lox_tank_work["mass"] = float(m_lox)
             fuel_tank_work["mass"] = float(m_fuel)
+            # Initialize environment with default date if not set (will be editable in expander)
+            if working.get("environment") is None:
+                working["environment"] = {}
+            if working["environment"].get("date") is None:
+                now = datetime.now()
+                working["environment"]["date"] = [int(now.year), int(now.month), int(now.day), 12]
     except Exception as exc:
         st.error(f"Invalid flight configuration: {exc}")
         return
@@ -2539,17 +2545,36 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         env.setdefault("longitude", -117.0)
         env.setdefault("elevation", 0.0)
         env.setdefault("p_amb", 101325.0)
+        
+        # Handle date - get from existing or use default
+        env_date = None
+        env_hour = 12
+        if env.get("date") is not None:
+            try:
+                y, m, d, h = list(env["date"])
+                env_date = datetime(y, m, d).date()
+                env_hour = int(h)
+            except Exception:
+                env_date = datetime.now().date()
+                env_hour = 12
+        else:
+            env_date = datetime.now().date()
+            env_hour = 12
+        
         colE1, colE2 = st.columns(2)
         with colE1:
             env_lat = st.number_input("Latitude [deg]", value=float(env.get("latitude", 35.0)), key="flight_env_lat")
             env_elev = st.number_input("Elevation [m]", value=float(env.get("elevation", 0.0)), key="flight_env_elev")
+            env_date_input = st.date_input("Launch date", value=env_date, key="flight_env_date_expander")
         with colE2:
             env_lon = st.number_input("Longitude [deg]", value=float(env.get("longitude", -117.0)), key="flight_env_lon")
             env_pamb = st.number_input("Ambient pressure [Pa]", value=float(env.get("p_amb", 101325.0)), key="flight_env_pamb")
+            env_hour_input = st.number_input("Launch hour [0-23]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour_expander")
         env["latitude"] = float(env_lat)
         env["longitude"] = float(env_lon)
         env["elevation"] = float(env_elev)
         env["p_amb"] = float(env_pamb)
+        env["date"] = [int(env_date_input.year), int(env_date_input.month), int(env_date_input.day), int(env_hour_input)]
         working["environment"] = env
 
     with st.expander("Rocket", expanded=False):
