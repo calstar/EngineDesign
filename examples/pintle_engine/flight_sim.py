@@ -660,9 +660,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     )
 
-    # Use StandardAtmosphere instead of Forecast to avoid forecast data availability issues
-    # StandardAtmosphere works for any date/time and doesn't require internet/forecast files
-    env.set_atmospheric_model(type='StandardAtmosphere')
+    # Use standard_atmosphere instead of Forecast to avoid forecast data availability issues
+    # standard_atmosphere works for any date/time and doesn't require internet/forecast files
+    env.set_atmospheric_model(type='standard_atmosphere')
 
 
 
