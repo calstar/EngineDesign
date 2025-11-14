@@ -1,6 +1,6 @@
 """Pydantic schemas for YAML/JSON configuration validation"""
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, ConfigDict
 from typing import Literal, Optional, Union
 import numpy as np
 
@@ -504,6 +504,7 @@ class PintleEngineConfig(BaseModel):
             raise ValueError("Must specify both 'oxidizer' and 'fuel' branches")
         return v
 
+<<<<<<< HEAD
     class Config:
         extra = "allow"  # Reject unknown fields
 
