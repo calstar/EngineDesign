@@ -10,7 +10,10 @@ from pintle_models.chamber_solver import ChamberSolver
 from pintle_models.nozzle import calculate_thrust
 from pintle_pipeline.ablative_geometry import (
     update_chamber_geometry_from_ablation,
+<<<<<<< HEAD
     update_nozzle_exit_from_ablation,
+=======
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
     calculate_throat_recession_multiplier,
     calculate_local_recession_rate,
 )
@@ -283,11 +286,16 @@ class PintleEngineRunner:
             "Lstar": np.full(n, np.nan),
             "V_chamber": np.full(n, np.nan),
             "A_throat": np.full(n, np.nan),
+<<<<<<< HEAD
             "A_exit": np.full(n, np.nan),
             "eps": np.full(n, np.nan),  # Expansion ratio
             "recession_chamber": np.full(n, 0.0),
             "recession_throat": np.full(n, 0.0),
             "recession_exit": np.full(n, 0.0),
+=======
+            "recession_chamber": np.full(n, 0.0),
+            "recession_throat": np.full(n, 0.0),
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
             "throat_recession_multiplier": np.full(n, np.nan),
             "diagnostics": [],
         }
@@ -295,16 +303,25 @@ class PintleEngineRunner:
         # Initial geometry
         V_chamber_initial = self.config.chamber.volume
         A_throat_initial = self.config.chamber.A_throat
+<<<<<<< HEAD
         A_exit_initial = self.config.nozzle.A_exit
         L_chamber = self.config.chamber.length if self.config.chamber.length else 0.18
         D_chamber_initial = np.sqrt(4 * V_chamber_initial / (np.pi * L_chamber))
         D_throat_initial = np.sqrt(4 * A_throat_initial / np.pi)
         D_exit_initial = np.sqrt(4 * A_exit_initial / np.pi)
+=======
+        L_chamber = self.config.chamber.length if self.config.chamber.length else 0.18
+        D_chamber_initial = np.sqrt(4 * V_chamber_initial / (np.pi * L_chamber))
+        D_throat_initial = np.sqrt(4 * A_throat_initial / np.pi)
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
         
         # Track cumulative recession
         cumulative_recession_chamber = 0.0
         cumulative_recession_throat = 0.0
+<<<<<<< HEAD
         cumulative_recession_exit = 0.0
+=======
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
         
         # Create a mutable config copy for geometry updates
         config_copy = copy.deepcopy(self.config)
@@ -317,6 +334,7 @@ class PintleEngineRunner:
                 # Update solver with current geometry
                 solver_temp = ChamberSolver(config_copy, self.cea_cache)
                 
+<<<<<<< HEAD
                 # Evaluate performance using the updated solver
                 # (NOT self.evaluate which uses the original geometry!)
                 Pc, diagnostics = solver_temp.solve(
@@ -364,6 +382,14 @@ class PintleEngineRunner:
                     "diagnostics": diagnostics,
                 }
                 
+=======
+                # Evaluate performance
+                point_results = self.evaluate(
+                    float(P_tank_O[i]),
+                    float(P_tank_F[i])
+                )
+                
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
                 # Store scalar results
                 for key in ["Pc", "mdot_O", "mdot_F", "mdot_total", "MR", "F", "Isp",
                            "v_exit", "P_exit", "cstar_actual", "cstar_ideal", "eta_cstar",
@@ -374,11 +400,16 @@ class PintleEngineRunner:
                 results["Lstar"][i] = solver_temp.Lstar
                 results["V_chamber"][i] = config_copy.chamber.volume
                 results["A_throat"][i] = config_copy.chamber.A_throat
+<<<<<<< HEAD
                 results["A_exit"][i] = config_copy.nozzle.A_exit
                 results["eps"][i] = eps_current  # Store expansion ratio
                 results["recession_chamber"][i] = cumulative_recession_chamber
                 results["recession_throat"][i] = cumulative_recession_throat
                 results["recession_exit"][i] = cumulative_recession_exit
+=======
+                results["recession_chamber"][i] = cumulative_recession_chamber
+                results["recession_throat"][i] = cumulative_recession_throat
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
                 
                 # Store diagnostics
                 results["diagnostics"].append(point_results["diagnostics"])
@@ -447,6 +478,7 @@ class PintleEngineRunner:
                         # Update L* if specified
                         if config_copy.chamber.Lstar is not None:
                             config_copy.chamber.Lstar = V_new / A_throat_new
+<<<<<<< HEAD
                         
                         # Update nozzle exit geometry if nozzle is ablative
                         if ablative_cfg.nozzle_ablative:
@@ -472,6 +504,11 @@ class PintleEngineRunner:
                 print(f"[WARNING] Time step {i} (t={times[i]:.3f}s) failed: {e}")
                 import traceback
                 traceback.print_exc()
+=======
+                
+            except Exception as e:
+                # If solve fails, leave NaN values
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
                 results["diagnostics"].append({"error": str(e)})
                 continue
         

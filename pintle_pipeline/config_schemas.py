@@ -187,7 +187,10 @@ class AblativeCoolingConfig(BaseModel):
     char_layer_conductivity: float = Field(default=0.2, gt=0, description="Thermal conductivity of char layer [W/(m·K)]")
     char_layer_thickness: float = Field(default=0.001, gt=0, description="Thickness of protective char layer [m]")
     track_geometry_evolution: bool = Field(default=True, description="Enable time-varying geometry tracking (L* evolution)")
+<<<<<<< HEAD
     nozzle_ablative: bool = Field(default=False, description="If True, nozzle exit also recedes (A_exit grows). If False, only throat recedes (expansion ratio decreases)")
+=======
+>>>>>>> 80ccf2c (UI: Ablative geometry evolution and L* override fix)
 
 
 class DischargeConfig(BaseModel):

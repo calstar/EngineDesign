@@ -2,14 +2,21 @@
 # Ignore everything by default
 *
 
+# Allow git to traverse directories
+!*/
+
 # But include pintle engine files
 !pintle_models/
 !pintle_pipeline/
 !examples/pintle_engine/
 
 # Within pintle directories, ignore cache and compiled files
-**/__pycache__/
-**/*.pyc
+pintle_models/**/__pycache__/
+pintle_models/**/*.pyc
+pintle_pipeline/**/__pycache__/
+pintle_pipeline/**/*.pyc
+examples/pintle_engine/**/__pycache__/
+examples/pintle_engine/**/*.pyc
 **/*.npz
 **/*.png
 **/*.jpg
