@@ -5,5 +5,6 @@ matplotlib
 pydantic
 PyYAML
 rocketcea
+rocketpy
 streamlit
 plotly
