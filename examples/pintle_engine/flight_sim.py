@@ -16,6 +16,9 @@ from pathlib import Path
 
 g0 = 9.80665
 
+
+
+>>>>>>> de8723e (FIX: More conservative truncation to prevent negative tank mass - Increased safety margin from 0.01s/1% to 0.05s/2% of cutoff_time - Changed truncation to use strict < instead of <= so mdot is 0 at cutoff_time - Added explicit sampling at cutoff_time to ensure it's included in function - Reduced flux_time by additional 1% to account for RocketPy internal discretization - Multiple layers of safety to prevent numerical integration errors causing negative mass)
 def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     """
     Build and simulate a RocketPy flight with configuration from config_minimal.yaml.
@@ -47,6 +50,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     m_lox0 = config.lox_tank.mass
     m_rp10 = config.fuel_tank.mass
 
+
+
+>>>>>>> de8723e (FIX: More conservative truncation to prevent negative tank mass - Increased safety margin from 0.01s/1% to 0.05s/2% of cutoff_time - Changed truncation to use strict < instead of <= so mdot is 0 at cutoff_time - Added explicit sampling at cutoff_time to ensure it's included in function - Reduced flux_time by additional 1% to account for RocketPy internal discretization - Multiple layers of safety to prevent numerical integration errors causing negative mass)
     # Nozzle parameters from config
     eta_nozzle = config.nozzle.efficiency
     eps = config.nozzle.expansion_ratio
@@ -82,6 +88,18 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     )
     env.set_atmospheric_model(type='Forecast', file='GFS')
 
+    env.set_atmospheric_model(type='Forecast', file='GFS')
+
+
+
+    print(m_lox0)
+
+    print(m_rp10)
+
+    print(mdot_lox)
+
+    print(mdot_fuel)
+
     print(m_lox0)
     print(m_rp10)
     print(mdot_lox)
@@ -96,16 +114,26 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     rp1 = Fluid(name="RP-1", density=rho_rp1)
     pressurant = Fluid(name="LN2", density=807)  # kg/m³ at 1 atm, 300 K
 
+    pressurant = Fluid(name="LN2", density=807)  # kg/m,%% at 1 atm, 300 K
+
+
+
     oxidizer_tank = MassFlowRateBasedTank(
         name="LOX Tank",
         geometry=lox_geom,
         flux_time=burn_time,
+
+        flux_time=burn_time,
+
         liquid=lox,
         gas=pressurant,
         initial_liquid_mass=m_lox0,
         initial_gas_mass=0.05,
         liquid_mass_flow_rate_in=0.0,
         liquid_mass_flow_rate_out=mdot_lox,
+
+        liquid_mass_flow_rate_out=mdot_lox,
+
         gas_mass_flow_rate_in=0.0,
         gas_mass_flow_rate_out=0.0,
         discretize=100,
@@ -115,12 +143,18 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         name="RP-1 Tank",
         geometry=rp1_geom,
         flux_time=burn_time,
+
+        flux_time=burn_time,
+
         liquid=rp1,
         gas=pressurant,
         initial_liquid_mass=m_rp10,
         initial_gas_mass=0.05,
         liquid_mass_flow_rate_in=0.0,
         liquid_mass_flow_rate_out=mdot_fuel,
+
+        liquid_mass_flow_rate_out=mdot_fuel,
+
         gas_mass_flow_rate_in=0.0,
         gas_mass_flow_rate_out=0.0,
         discretize=100,
@@ -131,12 +165,22 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     thrust_curve = thrust_curve
 
     # Liquid motor
+
+    thrust_curve = thrust_curve
+
+
+
+    # Liquid motor
+
     liquid_motor = LiquidMotor(
         thrust_source=thrust_curve,
         center_of_dry_mass_position=0.0,
         dry_inertia=motor_inertia,
         dry_mass=motor_dry_mass,
         burn_time=(0.0, burn_time),
+
+        burn_time=(0.0, burn_time),
+
         nozzle_radius=math.sqrt(A_e / math.pi),
         nozzle_position=-0.6,
         coordinate_system_orientation="nozzle_to_combustion_chamber",
@@ -219,4 +263,5 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         "thrust_curve": thrust_curve,
         "flight": flight,
         "params": config,
+
     }
