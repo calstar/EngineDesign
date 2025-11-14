@@ -28,11 +28,19 @@ from pintle_pipeline.io import load_config
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
-from examples.pintle_engine.interactive_pipeline import solve_for_thrust, ThrustSolveError
+from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
 )
+
+# RocketPy imports (optional, only needed for flight sim)
+try:
+    from rocketpy import Function
+    ROCKETPY_AVAILABLE = True
+except ImportError:
+    ROCKETPY_AVAILABLE = False
+    Function = None
 
 # RocketPy imports (optional, only needed for flight sim)
 try:
@@ -177,6 +185,10 @@ def format_value(value: float, unit_type: str, unit_label: str) -> str:
     return fmt % (value * factor)
 
 
+# ============================================================================
+# Flight Simulation Helper Functions
+# ============================================================================
+
 def to_elapsed_seconds(time_series: pd.Series) -> np.ndarray:
     """Convert a time column to elapsed seconds from the first value.
     Supports numeric, numeric-like strings, and datetimes (ISO, etc.)."""
@@ -197,8 +209,10 @@ def to_elapsed_seconds(time_series: pd.Series) -> np.ndarray:
     return (dt_series - t0).dt.total_seconds().to_numpy(dtype=float)
 
 
-def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: str = "linear") -> Function:
+def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: str = "linear"):
     """Build RocketPy Function from time/value arrays with sorting and stacking."""
+    if not ROCKETPY_AVAILABLE or Function is None:
+        raise ImportError("RocketPy not available. Install with: pip install rocketpy")
     order = np.argsort(times_s)
     t_sorted = np.asarray(times_s, dtype=float)[order]
     v_sorted = np.asarray(values, dtype=float)[order]
@@ -277,21 +291,26 @@ def plot_additional_rocket_plots(flight, t_series: np.ndarray, *, key_suffix: st
     ]
     for attr, label in candidates:
         series_obj = getattr(flight, attr, None)
-        if series_obj is None:
-            continue
-        try:
-            y = _to_1d(_series_to_np(series_obj))
-            n = int(min(len(t_series), len(y)))
-            if n <= 1:
-                continue
-            df = pd.DataFrame({"time": t_series[:n], label: y[:n]})
-            st.plotly_chart(
-                px.line(df, x="time", y=label, title=f"{label} vs Time"),
-                use_container_width=True,
-                key=f"flight_extra_{attr}{key_suffix}",
-            )
-        except Exception:
-            continue
+        if series_obj is not None:
+            try:
+                vals = _to_1d(_series_to_np(series_obj))
+                if vals.size > 0:
+                    plots.append((label, vals))
+            except Exception:
+                pass
+    if not plots:
+        st.info("No additional flight plots available.")
+        return
+    for label, vals in plots:
+        n = min(len(t_series), len(vals))
+        if n > 0:
+            df = pd.DataFrame({"time": t_series[:n], label: vals[:n]})
+            st.plotly_chart(px.line(df, x="time", y=label, title=label), use_container_width=True, key=f"flight_{label.replace(' ', '_').lower()}{key_suffix}")
+
+
+# ============================================================================
+# End Flight Simulation Helper Functions
+# ============================================================================
 
 
 def length_number_input(
@@ -640,6 +659,16 @@ def compute_timeseries_dataframe(
         df_dict["Throat Area (mm²)"] = np.asarray(results["A_throat"], dtype=float) * 1e6
         df_dict["Cumulative Chamber Recession (µm)"] = np.asarray(results["recession_chamber"], dtype=float) * 1e6
         df_dict["Cumulative Throat Recession (µm)"] = np.asarray(results["recession_throat"], dtype=float) * 1e6
+        if "throat_recession_multiplier" in results:
+            df_dict["Throat Recession Multiplier"] = np.asarray(results["throat_recession_multiplier"], dtype=float)
+
+    # Add ablative geometry evolution data if available
+    if "Lstar" in results:
+        df_dict["L* (mm)"] = np.asarray(results["Lstar"], dtype=float) * 1000.0
+        df_dict["Chamber Volume (cm┬│)"] = np.asarray(results["V_chamber"], dtype=float) * 1e6
+        df_dict["Throat Area (mm┬▓)"] = np.asarray(results["A_throat"], dtype=float) * 1e6
+        df_dict["Cumulative Chamber Recession (┬╡m)"] = np.asarray(results["recession_chamber"], dtype=float) * 1e6
+        df_dict["Cumulative Throat Recession (┬╡m)"] = np.asarray(results["recession_throat"], dtype=float) * 1e6
         if "throat_recession_multiplier" in results:
             df_dict["Throat Recession Multiplier"] = np.asarray(results["throat_recession_multiplier"], dtype=float)
 
@@ -1859,9 +1888,6 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
 
             display_time_series_summary(df)
             plot_time_series_results(df)
-
-            if errors:
-                st.warning("Some time steps did not converge. Affected rows contain NaNs in the output dataset.")
 
             with st.expander("Data table"):
                 st.dataframe(df)
