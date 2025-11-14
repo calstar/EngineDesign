@@ -3544,7 +3544,181 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             t_min = float(np.min(t_vals))
             t_vals_normalized = t_vals - t_min
             
+            # Build temporary Functions for underfill detection
+            mdot_lox_temp = build_rp_function(t_vals_normalized, mdot_O_vals)
+            mdot_fuel_temp = build_rp_function(t_vals_normalized, mdot_F_vals)
+            
             # Detect underfill by integrating mdot arrays
+            lox_cutoff = detect_tank_underfill_time(mdot_lox_temp, m_lox0, burn_time_ds)
+            fuel_cutoff = detect_tank_underfill_time(mdot_fuel_temp, m_fuel0, burn_time_ds)
+            
+            # Find earliest cutoff
+            cutoff_time = None
+            if lox_cutoff is not None and fuel_cutoff is not None:
+                cutoff_time = min(lox_cutoff, fuel_cutoff)
+            elif lox_cutoff is not None:
+                cutoff_time = lox_cutoff
+            elif fuel_cutoff is not None:
+                cutoff_time = fuel_cutoff
+            
+            # Truncate arrays if needed
+            if cutoff_time is not None and cutoff_time < burn_time_ds:
+                # Find index where time exceeds cutoff
+                trunc_idx = np.searchsorted(t_vals_normalized, cutoff_time, side='right')
+                if trunc_idx < len(t_vals_normalized):
+                    t_vals_normalized = t_vals_normalized[:trunc_idx+1]
+                    thrust_vals_SI = thrust_vals_SI[:trunc_idx+1]
+                    mdot_O_vals = mdot_O_vals[:trunc_idx+1]
+                    mdot_F_vals = mdot_F_vals[:trunc_idx+1]
+                    burn_time_ds = float(t_vals_normalized[-1])
+                    st.info(f"Truncated burn at {cutoff_time:.2f} s due to propellant depletion")
+            
+            # Build RocketPy Functions
+            thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
+            mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
+            mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
+            
+            # Update config with dataset-derived burn time and masses
+            if working.get("thrust") is None:
+                working["thrust"] = {}
+            working["thrust"]["burn_time"] = float(burn_time_ds)
+            
+            # Re-validate config
+            try:
+                config_for_flight = PintleEngineConfig(**working)
+            except Exception as exc:
+                st.error(f"Invalid flight configuration after dataset processing: {exc}")
+                return
+            
+            # Run flight simulation
+            with st.spinner("Running flight simulation..."):
+                try:
+                    result = setup_flight(config_for_flight, thrust_func, mdot_lox_func, mdot_fuel_func, plot_results=False)
+                    apogee = result["apogee"]
+                    max_velocity = result["max_velocity"]
+                    flight_obj = result["flight"]
+                    
+                    st.success("Flight simulation completed!")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Apogee", f"{apogee:.1f} m")
+                    with col2:
+                        st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
+                    
+                    # Add truncated data to dataset
+                    truncated_df = pd.DataFrame({
+                        "Time (s)": t_vals_normalized,
+                        "Thrust_truncated (N)": thrust_vals_SI,
+                        "mdot_O (kg/s)": mdot_O_vals,
+                        "mdot_F (kg/s)": mdot_F_vals,
+                    })
+                    
+                    # Extract flight data
+                    flight_series = extract_flight_series(flight_obj)
+                    if flight_series:
+                        truncated_df["Altitude above sea level (m)"] = np.interp(
+                            t_vals_normalized, 
+                            flight_series["time"], 
+                            flight_series["z"]
+                        )
+                        truncated_df["Vertical Velocity (m/s)"] = np.interp(
+                            t_vals_normalized,
+                            flight_series["time"],
+                            flight_series["vz"]
+                        )
+                    
+                    st.subheader("Truncated Dataset")
+                    st.dataframe(truncated_df)
+                    
+                    # Plot flight results
+                    if flight_series:
+                        plot_flight_results(flight_series)
+                        render_rocket_view(flight_obj)
+                        plot_additional_rocket_plots(flight_obj)
+                        
+                except Exception as exc:
+                    st.error(f"Flight simulation failed: {exc}")
+                    import traceback
+                    st.code(traceback.format_exc())
+        else:
+            # Tank pressures mode: constant thrust
+            # Evaluate engine once to get actual mdot values
+            default_thrust = float(getattr(getattr(config_obj, "thrust", None), "thrust", None)) if getattr(getattr(config_obj, "thrust", None), "thrust", None) is not None else 1000.0
+            thrust_val = default_thrust
+            if hasattr(config_obj, "thrust") and config_obj.thrust:
+                thrust_val = float(config_obj.thrust.thrust)
+            
+            # Evaluate engine to get mdot values
+            try:
+                eval_result = runner.evaluate(
+                    P_tank_O=config_obj.P_tank_O,
+                    P_tank_F=config_obj.P_tank_F,
+                    F_target=thrust_val
+                )
+                mdot_lox_actual = float(eval_result["mdot_O"])
+                mdot_fuel_actual = float(eval_result["mdot_F"])
+            except Exception as exc:
+                st.warning(f"Could not evaluate engine for mdot values: {exc}. Using estimates.")
+                # Fallback to estimates based on mass and burn time
+                mdot_lox_actual = float(m_lox) / float(burn_time) * 0.8
+                mdot_fuel_actual = float(m_fuel) / float(burn_time) * 0.2
+            
+            # Build constant functions
+            times_const = np.array([0.0, float(burn_time)])
+            thrust_const = np.array([thrust_val, thrust_val])
+            mdot_lox_const = np.array([mdot_lox_actual, mdot_lox_actual])
+            mdot_fuel_const = np.array([mdot_fuel_actual, mdot_fuel_actual])
+            
+            thrust_func = build_rp_function(times_const, thrust_const)
+            mdot_lox_func = build_rp_function(times_const, mdot_lox_const)
+            mdot_fuel_func = build_rp_function(times_const, mdot_fuel_const)
+            
+            # Update config
+            if working.get("thrust") is None:
+                working["thrust"] = {}
+            working["thrust"]["burn_time"] = float(burn_time)
+            if working.get("lox_tank") is None:
+                working["lox_tank"] = {}
+            if working.get("fuel_tank") is None:
+                working["fuel_tank"] = {}
+            working["lox_tank"]["mass"] = float(m_lox)
+            working["fuel_tank"]["mass"] = float(m_fuel)
+            
+            # Re-validate config
+            try:
+                config_for_flight = PintleEngineConfig(**working)
+            except Exception as exc:
+                st.error(f"Invalid flight configuration: {exc}")
+                return
+            
+            # Run flight simulation
+            with st.spinner("Running flight simulation..."):
+                try:
+                    result = setup_flight(config_for_flight, thrust_func, mdot_lox_func, mdot_fuel_func, plot_results=False)
+                    apogee = result["apogee"]
+                    max_velocity = result["max_velocity"]
+                    flight_obj = result["flight"]
+                    
+                    st.success("Flight simulation completed!")
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Apogee", f"{apogee:.1f} m")
+                    with col2:
+                        st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
+                    
+                    # Extract and plot flight data
+                    flight_series = extract_flight_series(flight_obj)
+                    if flight_series:
+                        plot_flight_results(flight_series)
+                        render_rocket_view(flight_obj)
+                        plot_additional_rocket_plots(flight_obj)
+                        
+                except Exception as exc:
+                    st.error(f"Flight simulation failed: {exc}")
+                    import traceback
+                    st.code(traceback.format_exc())
+
+
 def main():
     st.set_page_config(page_title="Pintle Injector Engine Pipeline", layout="wide")
     st.title("Pintle Injector Engine Pipeline")
