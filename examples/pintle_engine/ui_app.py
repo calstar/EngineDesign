@@ -30,20 +30,12 @@ from pintle_pipeline.io import load_config
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
-from examples.pintle_engine.interactive_pipeline import solve_for_thrust, ThrustSolveError
+from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
 )
 
-
-# RocketPy imports (optional, only needed for flight sim)
-try:
-    from rocketpy import Function
-    ROCKETPY_AVAILABLE = True
-except ImportError:
-    ROCKETPY_AVAILABLE = False
-    Function = None
 
 # RocketPy imports (optional, only needed for flight sim)
 try:
@@ -2898,6 +2890,13 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             step_m=0.0001,
             key="ablative_char_thickness",
         )
+        
+        ablative_cfg["nozzle_ablative"] = st.checkbox(
+            "Enable nozzle exit ablation",
+            value=bool(ablative_cfg.get("nozzle_ablative", False)),
+            help="If enabled, nozzle exit also recedes (A_exit grows). If disabled, only throat recedes (expansion ratio decreases)",
+            key="ablative_nozzle_ablative"
+        )
 
         st.markdown("### Chamber & Nozzle")
         chamber = working_copy["chamber"]
@@ -2985,7 +2984,7 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         
         chamber["length"] = length_number_input(
             "Chamber length",
-            float(chamber.get("length", 0.5)),
+            float(chamber.get("length") or 0.5),
             min_m=0.01,
             max_m=3.0,
             step_m=0.01,
