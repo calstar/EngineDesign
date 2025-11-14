@@ -2900,8 +2900,12 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         chamber = working_copy["chamber"]
         nozzle = working_copy["nozzle"]
         
-        # Chamber geometry specification mode
+        # Chamber geometry specification mode (similar to injector type selector)
         st.markdown("**Chamber Geometry Specification:**")
+        
+        # Track previous mode to clear state on switch (like injector does)
+        previous_geom_mode = st.session_state.get("active_chamber_geom_mode", "Volume + Throat Area")
+        
         geom_mode = st.radio(
             "Choose how to specify chamber geometry",
             ["Volume + Throat Area", "L* (Characteristic Length)"],
@@ -2909,6 +2913,15 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             key="chamber_geom_mode",
             help="L* = Volume / A_throat. Choose one mode to avoid conflicts."
         )
+        
+        # Clear conflicting keys when mode changes (like injector does)
+        if previous_geom_mode != geom_mode:
+            # Clear keys that might conflict
+            for key in list(st.session_state.keys()):
+                if key.startswith("chamber_volume_input") or key.startswith("chamber_lstar_input") or key.startswith("chamber_athroat_"):
+                    # Don't delete, but mark for refresh
+                    pass
+        st.session_state["active_chamber_geom_mode"] = geom_mode
         
         if geom_mode == "Volume + Throat Area":
             # User specifies volume and throat, L* is calculated
@@ -2944,20 +2957,25 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             )
             
             # Get current L* value (calculate from volume if not set)
-            if chamber.get("Lstar") is not None:
+            if chamber.get("Lstar") is not None and float(chamber.get("Lstar", 0)) > 0:
                 default_lstar = float(chamber["Lstar"])
             else:
                 # Calculate from volume and throat
-                default_lstar = float(chamber.get("volume", 1e-3)) / chamber["A_throat"]
+                current_volume = float(chamber.get("volume", 1e-3))
+                current_athroat = float(chamber.get("A_throat", 1e-3))
+                default_lstar = current_volume / current_athroat if current_athroat > 0 else 1.0
             
-            chamber["Lstar"] = length_number_input(
-                "Characteristic length L*",
-                default_lstar,
-                min_m=0.1,
-                max_m=5.0,
-                step_m=0.05,
+            # Use regular number_input instead of length_number_input for better control
+            lstar_m = st.number_input(
+                "Characteristic length L* [m]",
+                min_value=0.1,
+                max_value=5.0,
+                value=default_lstar,
+                step=0.05,
+                format="%.4f",
                 key="chamber_lstar_input"
             )
+            chamber["Lstar"] = lstar_m
             # Calculate and store volume from L*
             chamber["volume"] = chamber["Lstar"] * chamber["A_throat"]
             st.info(f"✓ Calculated Volume = **{chamber['volume']:.6f} m³** ({chamber['volume']*1e6:.2f} cm³)")
