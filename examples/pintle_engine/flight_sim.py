@@ -1,12 +1,7 @@
-# -*- coding: utf-8 -*-
-
 """
 flight_sim.py
-
 --------------
-
 Reusable RocketPy-based liquid engine flight simulation module.
-
 """
 
 import numpy as np
@@ -19,236 +14,8 @@ from rocketpy.motors import LiquidMotor, CylindricalTank
 from rocketpy.motors.tank import MassBasedTank, MassFlowRateBasedTank
 from pathlib import Path
 
-
 g0 = 9.80665
 
-
-def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=1000):
-    """
-    Detect when a tank would get underfilled by integrating mdot over time.
-
-    Parameters:
-    -----------
-    mdot : float or Function
-        Mass flow rate. Can be a constant float or a RocketPy Function.
-    m_initial : float
-        Initial tank mass [kg]
-    burn_time : float
-        Total burn time [s]
-    n_samples : int
-        Number of time samples for integration (default: 1000)
-
-    Returns:
-    --------
-    cutoff_time : float or None
-        Time at which tank would be depleted (None if it never depletes)
-    """
-    # Create time array for sampling
-    times = np.linspace(0, burn_time, n_samples)
-    dt = burn_time / (n_samples - 1) if n_samples > 1 else burn_time
-
-    # Sample mdot values
-    if isinstance(mdot, Function):
-        # It's a RocketPy Function - evaluate at each time
-        mdot_values = np.array([mdot(t) for t in times])
-    else:
-        # It's a constant float
-        mdot_values = np.full_like(times, float(mdot))
-
-    # Integrate mdot to get cumulative mass consumed
-    # Use trapezoidal integration
-    cumulative_mass = np.zeros_like(times)
-    for i in range(1, len(times)):
-        # Trapezoidal integration: mdot dt (mdot[i-1] + mdot[i]) * dt / 2
-        cumulative_mass[i] = cumulative_mass[i-1] + (mdot_values[i-1] + mdot_values[i]) * dt / 2.0
-
-    # Find where cumulative mass exceeds initial tank mass
-    # Find the first index where cumulative_mass >= m_initial
-    depletion_idx = np.where(cumulative_mass >= m_initial)[0]
-
-    if len(depletion_idx) > 0:
-        # Tank would be depleted at this time
-        cutoff_time = times[depletion_idx[0]]
-        return float(cutoff_time)
-    else:
-        # Tank never depletes during the burn
-        return None
-
-
-def detect_lox_underfill_time(mdot_lox, m_lox0, burn_time, n_samples=1000):
-    """
-    Detect when LOX tank would get underfilled by integrating mdot_lox over time.
-
-    Parameters:
-    -----------
-    mdot_lox : float or Function
-        LOX mass flow rate. Can be a constant float or a RocketPy Function.
-    m_lox0 : float
-        Initial LOX mass [kg]
-    burn_time : float
-        Total burn time [s]
-    n_samples : int
-        Number of time samples for integration (default: 1000)
-
-    Returns:
-    --------
-    cutoff_time : float or None
-        Time at which LOX would be depleted (None if it never depletes)
-    """
-    return detect_tank_underfill_time(mdot_lox, m_lox0, burn_time, n_samples)
-
-
-def detect_fuel_underfill_time(mdot_fuel, m_fuel0, burn_time, n_samples=1000):
-    """
-    Detect when fuel tank would get underfilled by integrating mdot_fuel over time.
-
-    Parameters:
-    -----------
-    mdot_fuel : float or Function
-        Fuel mass flow rate. Can be a constant float or a RocketPy Function.
-    m_fuel0 : float
-        Initial fuel mass [kg]
-    burn_time : float
-        Total burn time [s]
-    n_samples : int
-        Number of time samples for integration (default: 1000)
-
-    Returns:
-    --------
-    cutoff_time : float or None
-        Time at which fuel would be depleted (None if it never depletes)
-    """
-    return detect_tank_underfill_time(mdot_fuel, m_fuel0, burn_time, n_samples)
-
-
-def truncate_thrust_curve(thrust_curve, cutoff_time):
-    """
-    Truncate thrust curve at cutoff_time, setting thrust to 0 after that point.
-
-    Parameters:
-    -----------
-    thrust_curve : list of (t, F) tuples or Function
-        Original thrust curve
-    cutoff_time : float
-        Time at which to cut off thrust
-
-    Returns:
-    --------
-    truncated_curve : list of (t, F) tuples
-        Thrust curve with thrust=0 after cutoff_time
-    """
-    if isinstance(thrust_curve, Function):
-        # Convert Function to list of tuples by sampling
-        # Sample up to cutoff_time, then add a point at cutoff_time with 0 thrust
-        times = np.linspace(0, cutoff_time, 100)
-        curve = [(float(t), float(thrust_curve(t))) for t in times]
-        # Add cutoff point with 0 thrust
-        curve.append((cutoff_time, 0.0))
-        return curve
-
-    elif isinstance(thrust_curve, list):
-        # It's already a list of (t, F) tuples
-        truncated = []
-        for t, F in thrust_curve:
-            if t < cutoff_time:
-                truncated.append((t, F))
-            elif t == cutoff_time:
-                # If we hit cutoff_time exactly, use that value then add 0
-                truncated.append((t, F))
-                break
-            else:
-                # We've passed cutoff_time - interpolate and add cutoff point
-                if len(truncated) > 0:
-                    prev_t, prev_F = truncated[-1]
-                    # Linear interpolation to cutoff_time
-                    if t > prev_t:
-                        F_cutoff = prev_F + (F - prev_F) * (cutoff_time - prev_t) / (t - prev_t)
-                    else:
-                        F_cutoff = prev_F
-                    truncated.append((cutoff_time, F_cutoff))
-                else:
-                    # No previous points, just add cutoff with 0
-                    truncated.append((cutoff_time, 0.0))
-                break
-
-        # Ensure we end with 0 thrust at cutoff_time
-        if len(truncated) == 0:
-            truncated.append((cutoff_time, 0.0))
-        elif truncated[-1][0] < cutoff_time:
-            # Add cutoff point if we haven't reached it yet
-            if len(truncated) > 0:
-                prev_t, prev_F = truncated[-1]
-                truncated.append((cutoff_time, prev_F))
-            truncated.append((cutoff_time, 0.0))
-        elif truncated[-1][0] == cutoff_time and truncated[-1][1] != 0.0:
-            # We're at cutoff_time but thrust isn't 0, add a 0 point
-            truncated.append((cutoff_time, 0.0))
-        return truncated
-
-    else:
-        raise TypeError(f"Unsupported thrust_curve type: {type(thrust_curve)}")
-
-
-def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
-    """
-    Create a new mdot function that is 0 after cutoff_time.
-
-    Parameters:
-    -----------
-    mdot_func : float or Function
-        Original mass flow rate
-    cutoff_time : float
-        Time at which to cut off mass flow
-    burn_time : float
-        Total burn time (for creating the function domain)
-
-    Returns:
-    --------
-    truncated_func : Function
-        Function that returns mdot_func(t) for t <= cutoff_time, 0 otherwise
-    """
-    if isinstance(mdot_func, Function):
-        # Create a piecewise function
-        # Use strict < to ensure mdot is 0 at cutoff_time itself (more conservative)
-        def truncated_mdot(t):
-            if t < cutoff_time:
-                return mdot_func(t)
-            else:
-                return 0.0
-
-        # Convert to RocketPy Function by sampling
-        # Ensure we sample at cutoff_time with value 0 explicitly
-        times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
-        # Add cutoff_time explicitly if not already close to a sample point
-        if not np.any(np.abs(times - cutoff_time) < 1e-6):
-            times = np.append(times, cutoff_time)
-            times = np.sort(times)
-
-        values = np.array([truncated_mdot(t) for t in times])
-
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times)
-        times_sorted = times[order]
-        values_sorted = values[order]
-
-        # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, values_sorted))
-        return Function(source)
-
-    else:
-        # It's a constant - create a function that's constant until cutoff, then 0
-        # Use strict < to ensure mdot is 0 at cutoff_time itself (more conservative)
-        times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
-        values = np.array([float(mdot_func) if t < cutoff_time else 0.0 for t in times])
-
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times)
-        times_sorted = times[order]
-        values_sorted = values[order]
-
-        # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, values_sorted))
-        return Function(source)
 
 
 def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
@@ -268,6 +35,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
             "params": configuration data
         }
     """
+
+
+
     # Extract parameters from config directly
     burn_time = config.thrust.burn_time
 
@@ -279,71 +49,13 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     m_lox0 = config.lox_tank.mass
     m_rp10 = config.fuel_tank.mass
 
-    # Check for both LOX and fuel underfill and truncate at whichever happens first
-    lox_cutoff_time = detect_lox_underfill_time(mdot_lox, m_lox0, burn_time)
-    fuel_cutoff_time = detect_fuel_underfill_time(mdot_fuel, m_rp10, burn_time)
-
-    # Find the earliest cutoff time (or None if neither depletes)
-    cutoff_time = None
-    cutoff_reason = None
-    if lox_cutoff_time is not None and fuel_cutoff_time is not None:
-        if lox_cutoff_time <= fuel_cutoff_time:
-            cutoff_time = lox_cutoff_time
-            cutoff_reason = "LOX"
-        else:
-            cutoff_time = fuel_cutoff_time
-            cutoff_reason = "fuel"
-    elif lox_cutoff_time is not None:
-        cutoff_time = lox_cutoff_time
-        cutoff_reason = "LOX"
-    elif fuel_cutoff_time is not None:
-        cutoff_time = fuel_cutoff_time
-        cutoff_reason = "fuel"
-
-    truncation_info = None
-    if cutoff_time is not None and cutoff_time < burn_time:
-        # Very aggressive truncation: truncate at 90% of cutoff_time to ensure mass never goes negative
-        # This accounts for RocketPy's internal discretization and numerical integration errors
-        # RocketPy checks at discrete points and may find negative mass even with small margins
-        aggressive_cutoff_time = max(0.0, cutoff_time * 0.90)  # Truncate at 90% of detected cutoff
-
-        truncation_msg = f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Truncating thrust and mass flows at t={aggressive_cutoff_time:.3f} s (90% of cutoff for safety)."
-
-        # Note: Message is included in truncation_info, can be logged/displayed by caller if needed
-        truncation_info = {
-            "truncated": True,
-            "cutoff_time": cutoff_time,
-            "safe_cutoff_time": aggressive_cutoff_time,
-            "reason": cutoff_reason,
-            "message": truncation_msg
-        }
-
-        # Truncate thrust curve at aggressive_cutoff_time to ensure mass never goes negative
-        thrust_curve = truncate_thrust_curve(thrust_curve, aggressive_cutoff_time)
-
-        # Use aggressive_cutoff_time as effective_burn_time (already very conservative)
-        effective_burn_time = aggressive_cutoff_time
-
-        # Truncate mdot functions at aggressive_cutoff_time, limit domain to effective_burn_time
-        # This prevents RocketPy from checking beyond the actual burn duration
-        mdot_lox = truncate_mdot_function(mdot_lox, aggressive_cutoff_time, effective_burn_time)
-        mdot_fuel = truncate_mdot_function(mdot_fuel, aggressive_cutoff_time, effective_burn_time)
-
-        # Reduce initial masses by 5% to provide significant buffer for numerical errors
-        # This ensures RocketPy's bounds check passes even with integration/discretization errors
-        mass_reduction_factor = 0.95  # Reduce by 5% to provide larger buffer
-        m_lox0 = m_lox0 * mass_reduction_factor
-        m_rp10 = m_rp10 * mass_reduction_factor
-    else:
-        effective_burn_time = burn_time
-        truncation_info = {"truncated": False}
 
     # Nozzle parameters from config
     eta_nozzle = config.nozzle.efficiency
     eps = config.nozzle.expansion_ratio
     A_t = config.nozzle.A_throat
     A_e = config.nozzle.A_exit
-
+    
     # Check for required flight simulation config fields
     if not config.environment:
         raise ValueError("Flight simulation requires 'environment' configuration")
@@ -353,7 +65,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         raise ValueError("Flight simulation requires 'lox_tank' configuration")
     if not config.fuel_tank:
         raise ValueError("Flight simulation requires 'fuel_tank' configuration")
-
+    
     p_amb = config.environment.p_amb
 
     # Rocket parameters from config
@@ -371,9 +83,14 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         longitude=config.environment.longitude,
         elevation=config.environment.elevation,
     )
-    # Use standard_atmosphere instead of Forecast to avoid forecast data availability issues
-    # standard_atmosphere works for any date/time and doesn't require internet/forecast files
-    env.set_atmospheric_model(type='standard_atmosphere')
+    env.set_atmospheric_model(type='Forecast', file='GFS')
+
+    env.set_atmospheric_model(type='Forecast', file='GFS')
+
+    print(m_lox0)
+    print(m_rp10)
+    print(mdot_lox)
+    print(mdot_fuel)
 
     # Tank geometries from config
     lox_geom = CylindricalTank(radius=config.lox_tank.lox_radius, height=config.lox_tank.lox_h, spherical_caps=False)
@@ -478,7 +195,6 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         power_off_drag=0.45,
         power_on_drag=0.45,
     )
-
     # Fins at bottom (tail) - position 0.0
     rocket.add_trapezoidal_fins(
         n=config.rocket.fins.no_fins,
@@ -496,12 +212,10 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     # LOX tank extends from motor_position + ox_tank_pos - lox_h/2 to motor_position + ox_tank_pos + lox_h/2
     lox_top = motor_position + config.lox_tank.ox_tank_pos + config.lox_tank.lox_h/2
     fuel_top = motor_position + config.fuel_tank.fuel_tank_pos + config.fuel_tank.rp1_h/2 if config.fuel_tank.fuel_tank_pos > 0 else 0
-
     # If pressurant tank is configured, include it
     press_top = 0
     if config.press_tank:
         press_top = motor_position + config.press_tank.pres_tank_pos + config.press_tank.press_h/2
-
     # Nose at top - above highest component
     max_height = max(lox_top, fuel_top, press_top, motor_position)
     nose_position = max_height + 4  # Small gap, then nose

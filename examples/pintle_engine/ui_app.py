@@ -17,8 +17,10 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 import yaml
+from rocketpy import Function
 
 project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
@@ -28,8 +30,20 @@ from pintle_pipeline.io import load_config
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
-from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
-from examples.pintle_engine.flight_sim import setup_flight, detect_tank_underfill_time, detect_lox_underfill_time, detect_fuel_underfill_time, truncate_thrust_curve, truncate_mdot_function
+from examples.pintle_engine.interactive_pipeline import solve_for_thrust, ThrustSolveError
+from examples.pintle_engine.flight_sim import setup_flight
+from examples.pintle_engine.copv_pressure.copv_solve_both import (
+    size_or_check_copv_for_polytropic_N2,
+)
+
+
+# RocketPy imports (optional, only needed for flight sim)
+try:
+    from rocketpy import Function
+    ROCKETPY_AVAILABLE = True
+except ImportError:
+    ROCKETPY_AVAILABLE = False
+    Function = None
 
 # RocketPy imports (optional, only needed for flight sim)
 try:
@@ -173,10 +187,6 @@ def format_value(value: float, unit_type: str, unit_label: str) -> str:
     factor, fmt = SENSOR_UNITS[unit_type][unit_label]
     return fmt % (value * factor)
 
-
-# ============================================================================
-# Flight Simulation Helper Functions
-# ============================================================================
 
 def to_elapsed_seconds(time_series: pd.Series) -> np.ndarray:
     """Convert a time column to elapsed seconds from the first value.
@@ -465,6 +475,42 @@ def store_dataset(label: str, df: pd.DataFrame) -> None:
         suffix += 1
     datasets[label] = df.copy()
     st.session_state["last_custom_dataset"] = label
+
+
+def estimate_pressurant_volume(config: PintleEngineConfig) -> Optional[float]:
+    press = getattr(config, "press_tank", None)
+    if press is None:
+        return None
+    for attr in ("press_volume", "volume_m3", "tank_volume_m3"):
+        val = getattr(press, attr, None)
+        if val is not None:
+            return float(val)
+    radius = getattr(press, "press_radius", None)
+    height = getattr(press, "press_h", None)
+    if radius is not None and height is not None:
+        return float(math.pi * float(radius) ** 2 * float(height))
+    return None
+
+
+def infer_pressurant_R(config: PintleEngineConfig, default: float = 296.803) -> float:
+    fluids = getattr(config, "fluids", None) or {}
+    press_cfg = None
+    if isinstance(fluids, dict):
+        press_cfg = fluids.get("pressurant")
+    else:
+        try:
+            press_cfg = fluids.get("pressurant")
+        except Exception:
+            press_cfg = None
+    if press_cfg is not None:
+        for attr in ("R", "R_specific"):
+            val = getattr(press_cfg, attr, None)
+            if val is not None:
+                return float(val)
+        molar_mass = getattr(press_cfg, "molar_mass", None)
+        if molar_mass not in (None, 0):
+            return float(8.31446261815324 / float(molar_mass))
+    return float(default)
 
 
 def create_single_run_dataframe(results: Dict[str, Any], context: str) -> pd.DataFrame:
@@ -997,6 +1043,283 @@ def custom_plot_builder() -> None:
             file_name=f"{dataset_name.replace(' ', '_').lower()}_data.csv",
             mime="text/csv",
         )
+
+
+def copv_view(config_obj: PintleEngineConfig) -> None:
+    st.header("COPV Sizing & Verification (Shared N₂ Tank)")
+    st.write(
+        "Select a time-series dataset with mass-flow and tank-pressure traces, then size or check a shared "
+        "pressurant COPV that feeds both oxidizer and fuel tanks."
+    )
+
+    datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
+    required_cols = {"time", "mdot_O (kg/s)", "mdot_F (kg/s)", "P_tank_O (psi)", "P_tank_F (psi)"}
+    eligible = {name: df for name, df in datasets.items() if required_cols.issubset(df.columns)}
+    if not eligible:
+        st.info(
+            "No eligible datasets found. Run a time-series evaluation (generated or uploaded) so the "
+            "resulting dataframe includes time, mdot_O, mdot_F, and tank pressure columns."
+        )
+        return
+
+    dataset_names = list(eligible.keys())
+    default_dataset = st.session_state.get("last_custom_dataset")
+    default_index = dataset_names.index(default_dataset) if default_dataset in dataset_names else 0
+
+    default_volume_m3 = estimate_pressurant_volume(config_obj) or 0.02
+    default_volume_l = max(default_volume_m3 * 1000.0, 0.1)
+    default_R = infer_pressurant_R(config_obj)
+
+    fluids_cfg = getattr(config_obj, "fluids", None) or {}
+
+    def _fluid_temp(name: str, fallback: float) -> float:
+        fluid = None
+        if isinstance(fluids_cfg, dict):
+            fluid = fluids_cfg.get(name)
+        else:
+            try:
+                fluid = fluids_cfg.get(name)
+            except Exception:
+                fluid = None
+        temp_val = getattr(fluid, "temperature", None) if fluid is not None else None
+        return float(temp_val) if temp_val is not None else float(fallback)
+
+    ox_temp_default = _fluid_temp("oxidizer", 300.0)
+    fuel_temp_default = _fluid_temp("fuel", 300.0)
+
+    df_selected: Optional[pd.DataFrame] = None
+    dataset_name = dataset_names[default_index]
+    with st.form("copv_sizing_form"):
+        dataset_name = st.selectbox(
+            "Dataset (must include time, mdot, and tank pressure columns)",
+            dataset_names,
+            index=default_index,
+        )
+        df_selected = eligible[dataset_name].copy().sort_values("time").reset_index(drop=True)
+        if df_selected.empty:
+            st.warning("Selected dataset is empty. Choose a different dataset.")
+        else:
+            duration = float(df_selected["time"].iloc[-1] - df_selected["time"].iloc[0])
+            st.caption(f"{len(df_selected)} samples | duration ≈ {duration:.2f} s")
+
+        sizing_mode = st.radio(
+            "Sizing mode",
+            ["Known COPV volume → solve for initial pressure", "Known initial pressure → solve for COPV volume"],
+            horizontal=False,
+        )
+
+        copv_volume_m3: Optional[float]
+        copv_P0_Pa: Optional[float]
+
+        if sizing_mode.startswith("Known COPV volume"):
+            copv_volume_l = st.number_input(
+                "COPV free volume [L]",
+                min_value=0.01,
+                value=float(default_volume_l),
+                step=0.1,
+            )
+            copv_volume_m3 = copv_volume_l / 1000.0
+            copv_P0_Pa = None
+        else:
+            tank_pressures = df_selected[["P_tank_O (psi)", "P_tank_F (psi)"]].to_numpy(dtype=float)
+            finite_pressures = tank_pressures[np.isfinite(tank_pressures)]
+            if finite_pressures.size == 0:
+                max_required_psi = 1000.0
+            else:
+                max_required_psi = float(finite_pressures.max())
+            default_P0_psi = max(50.0, max_required_psi * 1.15)
+            copv_P0_psi = st.number_input(
+                "Initial COPV pressure [psi]",
+                min_value=50.0,
+                value=float(default_P0_psi),
+                step=10.0,
+            )
+            copv_P0_Pa = copv_P0_psi * PSI_TO_PA
+            copv_volume_m3 = None
+
+        col_params = st.columns(3)
+        with col_params[0]:
+            n = st.number_input("Polytropic exponent n", min_value=1.0, max_value=1.5, value=1.2, step=0.01)
+        with col_params[1]:
+            T0_K = st.number_input("Initial COPV temperature [K]", min_value=50.0, value=300.0, step=1.0)
+        with col_params[2]:
+            R_pressurant = st.number_input(
+                "Pressurant gas constant [J/(kg·K)]",
+                min_value=10.0,
+                value=float(default_R),
+                step=1.0,
+            )
+
+        branch_temp_cols = st.columns(2)
+        with branch_temp_cols[0]:
+            ox_temp_K = st.number_input(
+                "Oxidizer tank gas temperature [K]",
+                min_value=30.0,
+                value=float(ox_temp_default),
+                step=1.0,
+            )
+        with branch_temp_cols[1]:
+            fuel_temp_K = st.number_input(
+                "Fuel tank gas temperature [K]",
+                min_value=30.0,
+                value=float(fuel_temp_default),
+                step=1.0,
+            )
+        Tp_K = 0.5 * (ox_temp_K + fuel_temp_K)
+
+        use_real_gas = st.checkbox("Use real-gas Z lookup for N₂", value=True)
+        default_z_table = Path(__file__).parent / "copv_pressure" / "n2_Z_lookup.csv"
+        z_lookup_path = st.text_input("N₂ Z-table CSV", value=str(default_z_table))
+
+        run_btn = st.form_submit_button("Run COPV sizing/check")
+
+    if not run_btn:
+        return
+
+    if df_selected is None or df_selected.empty:
+        st.error("Cannot run COPV sizing without a populated dataset.")
+        return
+
+    try:
+        solver_results = size_or_check_copv_for_polytropic_N2(
+            df=df_selected,
+            config=config_obj,
+            n=n,
+            T0_K=T0_K,
+            Tp_K=Tp_K,
+            use_real_gas=use_real_gas,
+            n2_Z_csv=z_lookup_path,
+            pressurant_R=R_pressurant,
+            branch_temperatures_K={
+                "oxidizer": ox_temp_K,
+                "fuel": fuel_temp_K,
+            },
+            copv_volume_m3=copv_volume_m3,
+            copv_P0_Pa=copv_P0_Pa,
+        )
+    except Exception as exc:
+        st.error(f"Failed to run COPV sizing: {exc}")
+        return
+
+    st.success("COPV computation complete.")
+
+    metrics_cols = st.columns(4)
+    with metrics_cols[0]:
+        st.metric("Initial COPV pressure", f"{solver_results['P0_Pa'] * PA_TO_PSI:.1f} psi")
+    with metrics_cols[1]:
+        st.metric("COPV free volume", f"{solver_results['copv_volume_m3'] * 1000.0:.2f} L")
+    with metrics_cols[2]:
+        st.metric("Initial N₂ mass", f"{solver_results['m0_kg']:.3f} kg")
+    with metrics_cols[3]:
+        st.metric("Total delivered N₂", f"{solver_results['total_delivered_mass_kg']:.3f} kg")
+    st.metric(
+        "Minimum pressure margin (all tanks)",
+        f"{solver_results['min_margin_Pa'] * PA_TO_PSI:.1f} psi",
+    )
+
+    branch_margins = solver_results.get("branch_min_margins_Pa", {})
+    if branch_margins:
+        st.subheader("Per-branch minimum margins")
+        cols = st.columns(len(branch_margins))
+        for col, (name, margin_Pa) in zip(cols, branch_margins.items()):
+            col.metric(f"{name.capitalize()} margin", f"{margin_Pa * PA_TO_PSI:.1f} psi")
+
+    time_vals = np.asarray(solver_results["time_s"], dtype=float)
+    copv_pressure = np.asarray(solver_results["PH_trace_Pa"], dtype=float) * PA_TO_PSI
+    pressure_fig = make_subplots(specs=[[{"secondary_y": True}]])
+    pressure_fig.add_trace(
+        go.Scatter(
+            x=time_vals,
+            y=copv_pressure,
+            name="COPV pressure",
+            line=dict(color="green"),
+        ),
+        secondary_y=False,
+    )
+    for name, branch in solver_results["branches"].items():
+        branch_pressure = np.asarray(branch["P_tank_Pa"], dtype=float) * PA_TO_PSI
+        pressure_fig.add_trace(
+            go.Scatter(
+                x=time_vals,
+                y=branch_pressure,
+                name=f"{name.capitalize()} tank",
+                line=dict(dash="dot"),
+            ),
+            secondary_y=True,
+        )
+    pressure_fig.update_yaxes(title_text="COPV pressure [psi]", secondary_y=False)
+    pressure_fig.update_yaxes(title_text="Tank pressure [psi]", secondary_y=True, showgrid=False)
+    pressure_fig.update_layout(xaxis_title="Time [s]")
+    st.plotly_chart(pressure_fig, use_container_width=True)
+
+    mass_fig = go.Figure()
+    mass_fig.add_trace(
+        go.Scatter(
+            x=time_vals,
+            y=np.asarray(solver_results["combined_M_delivered_kg"], dtype=float),
+            name="Combined delivered mass",
+        )
+    )
+    for name, branch in solver_results["branches"].items():
+        mass_fig.add_trace(
+            go.Scatter(
+                x=time_vals,
+                y=np.asarray(branch["M_delivered_kg"], dtype=float),
+                name=f"{name.capitalize()} delivered mass",
+                line=dict(dash="dash"),
+            )
+        )
+    mass_fig.update_layout(xaxis_title="Time [s]", yaxis_title="Delivered gas mass [kg]")
+    st.plotly_chart(mass_fig, use_container_width=True)
+
+    branch_rows = []
+    for name, branch in solver_results["branches"].items():
+        branch_rows.append(
+            {
+                "Branch": name.capitalize(),
+                "Tank volume [L]": branch["tank_volume_m3"] * 1000.0,
+                "Initial ullage [L]": branch["Vg0_m3"] * 1000.0,
+                "Initial propellant mass [kg]": branch["initial_mass_kg"],
+                "Gas temperature [K]": branch.get("gas_temperature_K", np.nan),
+                "Peak tank pressure [psi]": np.max(branch["P_tank_Pa"]) * PA_TO_PSI,
+                "Delivered gas mass [kg]": branch["M_delivered_kg"][-1],
+            }
+        )
+    if branch_rows:
+        summary_df = pd.DataFrame(branch_rows).set_index("Branch")
+        st.subheader("Branch summary")
+        st.dataframe(summary_df)
+
+    augmented_df = df_selected.copy()
+    augmented_df["COPV_pressure_Pa"] = np.asarray(solver_results["PH_trace_Pa"], dtype=float)
+    augmented_df["COPV_pressure_psi"] = copv_pressure
+    augmented_df["COPV_mass_delivered_kg"] = np.asarray(solver_results["combined_M_delivered_kg"], dtype=float)
+    dataset_store: Dict[str, pd.DataFrame] = st.session_state.setdefault("custom_plot_datasets", {})
+    dataset_store[dataset_name] = augmented_df
+    st.session_state["last_custom_dataset"] = dataset_name
+
+    export_df = pd.DataFrame(
+        {
+            "time_s": time_vals,
+            "COPV_pressure_Pa": np.asarray(solver_results["PH_trace_Pa"], dtype=float),
+            "COPV_pressure_psi": copv_pressure,
+            "combined_gas_mass_kg": np.asarray(solver_results["combined_M_delivered_kg"], dtype=float),
+        }
+    )
+    for name, branch in solver_results["branches"].items():
+        export_df[f"P_tank_{name}_Pa"] = np.asarray(branch["P_tank_Pa"], dtype=float)
+        export_df[f"P_tank_{name}_psi"] = export_df[f"P_tank_{name}_Pa"] * PA_TO_PSI
+        export_df[f"M_delivered_{name}_kg"] = np.asarray(branch["M_delivered_kg"], dtype=float)
+        export_df[f"m_g_required_{name}_kg"] = np.asarray(branch["m_g_req_kg"], dtype=float)
+
+    csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download COPV traces (CSV)",
+        data=csv_bytes,
+        file_name="copv_sizing_results.csv",
+        mime="text/csv",
+    )
+
 
 
 def plots_analysis_view(runner: PintleEngineRunner) -> None:
@@ -1567,6 +1890,452 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
 
             st.success("Time-series evaluation complete.")
 
+
+def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, config_label: str) -> None:
+    if isinstance(runner, PintleEngineConfig):
+        runner = PintleEngineRunner(runner)
+    st.header("Flight Simulation")
+    st.write("Use engine performance to simulate a basic rocket flight and report apogee and velocity.")
+
+    source = st.radio("Performance source", ["Tank pressures (constant thrust)", "Dataset (time-varying)"], horizontal=True, key="flight_perf_source")
+
+    # Tank pressures inputs shown only for constant source
+    if source == "Tank pressures (constant thrust)":
+        col1, col2 = st.columns(2)
+        with col1:
+            P_tank_O_psi = st.number_input(
+                "LOX Tank Pressure [psi]",
+                min_value=50.0,
+                max_value=3000.0,
+                value=1305.0,
+                step=5.0,
+                key="flight_lox_tank_psi",
+            )
+        with col2:
+            P_tank_F_psi = st.number_input(
+                "Fuel Tank Pressure [psi]",
+                min_value=50.0,
+                max_value=3000.0,
+                value=974.0,
+                step=5.0,
+                key="flight_fuel_tank_psi",
+            )
+    else:
+        # Dataset selection and column mapping
+        datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
+        if not datasets:
+            st.warning("No datasets available. Run a time-series or forward analysis first to populate datasets.")
+            return
+        ds_names = list(datasets.keys())
+        default_ds = st.session_state.get("last_custom_dataset") or ds_names[0]
+        dataset_name = st.selectbox("Dataset for thrust and O/F", ds_names, index=ds_names.index(default_ds) if default_ds in ds_names else 0, key="flight_ds_select")
+        ds_df = datasets[dataset_name]
+        num_cols = ds_df.select_dtypes(include=[np.number]).columns.tolist()
+        # sensible defaults
+        time_col = "time" if "time" in ds_df.columns else num_cols[0]
+        thrust_candidates = [c for c in ds_df.columns if "Thrust" in c]
+        thrust_col = thrust_candidates[0] if thrust_candidates else num_cols[1 if len(num_cols) > 1 else 0]
+        mdot_o_col = "mdot_O (kg/s)" if "mdot_O (kg/s)" in ds_df.columns else None
+        mdot_f_col = "mdot_F (kg/s)" if "mdot_F (kg/s)" in ds_df.columns else None
+        mr_col = "MR" if "MR" in ds_df.columns else None
+        mdot_total_col = "mdot_total (kg/s)" if "mdot_total (kg/s)" in ds_df.columns else None
+
+        st.markdown("#### Map dataset columns")
+        colm = st.columns(4)
+        with colm[0]:
+            time_col = st.selectbox("Time column [s]", ds_df.columns.tolist(), index=ds_df.columns.tolist().index(time_col) if time_col in ds_df.columns else 0, key="flight_ds_time_col")
+        with colm[1]:
+            thrust_col = st.selectbox("Thrust column", ds_df.columns.tolist(), index=ds_df.columns.tolist().index(thrust_col) if thrust_col in ds_df.columns else 0, key="flight_ds_thrust_col")
+        with colm[2]:
+            mr_col = st.selectbox("MR (O/F) column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mr_col is None else ds_df.columns.tolist().index(mr_col)+1), key="flight_ds_mr_col")
+        with colm[3]:
+            mdot_total_col = st.selectbox("Total mdot column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mdot_total_col is None else ds_df.columns.tolist().index(mdot_total_col)+1), key="flight_ds_mdtot_col")
+        colm2 = st.columns(2)
+        with colm2[0]:
+            mdot_o_col = st.selectbox("mdot_O column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mdot_o_col is None else ds_df.columns.tolist().index(mdot_o_col)+1), key="flight_ds_mdot_o_col")
+        with colm2[1]:
+            mdot_f_col = st.selectbox("mdot_F column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mdot_f_col is None else ds_df.columns.tolist().index(mdot_f_col)+1), key="flight_ds_mdot_f_col")
+
+    with st.form("flight_sim_form"):
+        if source == "Tank pressures (constant thrust)":
+            col3, col4, col5 = st.columns(3)
+            with col3:
+                default_burn = float(config_obj.thrust.burn_time) if getattr(config_obj, "thrust", None) and config_obj.thrust else 5.0
+                burn_time = st.number_input("Burn time [s]", min_value=0.5, value=default_burn, step=0.5, key="flight_burn_time")
+            with col4:
+                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
+                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox")
+            with col5:
+                default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
+                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel")
+
+            st.markdown("### Environment")
+            env_date = None
+            env_hour = 12
+            if getattr(config_obj, "environment", None) and config_obj.environment:
+                try:
+                    y, m, d, h = list(config_obj.environment.date)
+                    env_date = datetime(y, m, d).date()
+                    env_hour = int(h)
+                except Exception:
+                    env_date = datetime.now().date()
+                    env_hour = 12
+            else:
+                env_date = datetime.now().date()
+                env_hour = 12
+
+            cold1, cold2 = st.columns(2)
+            with cold1:
+                sel_date = st.date_input("Launch date", value=env_date, key="flight_env_date")
+            with cold2:
+                sel_hour = st.number_input("Launch hour [0-23]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour")
+        else:
+            # Dataset mode: user defines propellant fill; burn time comes from dataset
+            burn_time = None
+            colpf1, colpf2 = st.columns(2)
+            with colpf1:
+                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
+                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox_ds")
+            with colpf2:
+                default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
+                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel_ds")
+            sel_date = None
+            sel_hour = None
+
+        run_btn = st.form_submit_button("Run Flight Simulation", type="primary")
+
+    # Show editors regardless of whether the form is submitted; simulation will run only if run_btn is True.
+
+    # Create a working copy of config with overrides for flight-related fields
+    try:
+        working = copy.deepcopy(config_obj).model_dump()
+        if source == "Tank pressures (constant thrust)":
+            # ensure optional sections exist
+            working.setdefault("thrust", {"burn_time": burn_time})
+            working["thrust"]["burn_time"] = float(burn_time)
+            # update masses from user inputs (tanks now hold masses)
+            lox_tank_work = working.setdefault("lox_tank", {})
+            fuel_tank_work = working.setdefault("fuel_tank", {})
+            lox_tank_work["mass"] = float(m_lox)
+            fuel_tank_work["mass"] = float(m_fuel)
+            # update environment date
+            if "environment" not in working or working["environment"] is None:
+                working["environment"] = {}
+            working["environment"]["date"] = [int(sel_date.year), int(sel_date.month), int(sel_date.day), int(sel_hour)]
+        else:
+            # dataset mode: always use user-defined masses; burn time set later from dataset
+            lox_tank_work = working.setdefault("lox_tank", {})
+            fuel_tank_work = working.setdefault("fuel_tank", {})
+            lox_tank_work["mass"] = float(m_lox)
+            fuel_tank_work["mass"] = float(m_fuel)
+    except Exception as exc:
+        st.error(f"Invalid flight configuration: {exc}")
+        return
+
+    # Collapsible configuration editor
+    st.subheader("Flight configuration")
+    with st.expander("Environment", expanded=False):
+        env = working.get("environment", {}) or {}
+        env.setdefault("latitude", 35.0)
+        env.setdefault("longitude", -117.0)
+        env.setdefault("elevation", 0.0)
+        env.setdefault("p_amb", 101325.0)
+        colE1, colE2 = st.columns(2)
+        with colE1:
+            env_lat = st.number_input("Latitude [deg]", value=float(env.get("latitude", 35.0)), key="flight_env_lat")
+            env_elev = st.number_input("Elevation [m]", value=float(env.get("elevation", 0.0)), key="flight_env_elev")
+        with colE2:
+            env_lon = st.number_input("Longitude [deg]", value=float(env.get("longitude", -117.0)), key="flight_env_lon")
+            env_pamb = st.number_input("Ambient pressure [Pa]", value=float(env.get("p_amb", 101325.0)), key="flight_env_pamb")
+        env["latitude"] = float(env_lat)
+        env["longitude"] = float(env_lon)
+        env["elevation"] = float(env_elev)
+        env["p_amb"] = float(env_pamb)
+        working["environment"] = env
+
+    with st.expander("Rocket", expanded=False):
+        rocket = working.get("rocket") or {}
+        rocket.setdefault("mass", 90.72)
+        rocket.setdefault("inertia", [8.0, 8.0, 0.5])
+        rocket.setdefault("radius", 0.1)
+        rocket.setdefault("cm_wo_motor", 1.0)
+        rocket.setdefault("dry_mass", 12.0)
+        rocket.setdefault("motor_inertia", [0.1, 0.1, 0.1])
+        colR1, colR2, colR3 = st.columns(3)
+        with colR1:
+            r_mass = st.number_input("Rocket mass [kg]", value=float(rocket.get("mass", 90.72)), key="flight_rocket_mass")
+            r_radius = st.number_input("Rocket radius [m]", value=float(rocket.get("radius", 0.1)), key="flight_rocket_radius")
+        with colR2:
+            r_cm = st.number_input("CM without motor [m]", value=float(rocket.get("cm_wo_motor", 1.0)), key="flight_rocket_cm")
+            r_dry = st.number_input("Rocket dry mass [kg]", value=float(rocket.get("dry_mass", 12.0)), key="flight_rocket_dry")
+        with colR3:
+            mi_x = st.number_input("Motor inertia X", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[0]), key="flight_motor_inertia_x")
+            mi_y = st.number_input("Motor inertia Y", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[1]), key="flight_motor_inertia_y")
+            mi_z = st.number_input("Motor inertia Z", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[2]), key="flight_motor_inertia_z")
+        rocket["mass"] = float(r_mass)
+        rocket["radius"] = float(r_radius)
+        rocket["cm_wo_motor"] = float(r_cm)
+        rocket["dry_mass"] = float(r_dry)
+        rocket["motor_inertia"] = [float(mi_x), float(mi_y), float(mi_z)]
+
+        # Fins
+        fins = (rocket.get("fins") or {})
+        fins.setdefault("no_fins", 3)
+        fins.setdefault("root_chord", 0.2)
+        fins.setdefault("tip_chord", 0.1)
+        fins.setdefault("fin_span", 0.3)
+        fins.setdefault("fin_position", 0.0)
+        colF1, colF2, colF3 = st.columns(3)
+        with colF1:
+            fins["no_fins"] = int(st.number_input("Fin count", value=int(fins["no_fins"]), min_value=1, step=1, key="flight_fins_count"))
+            fins["root_chord"] = float(st.number_input("Root chord [m]", value=float(fins["root_chord"]), key="flight_fins_root"))
+        with colF2:
+            fins["tip_chord"] = float(st.number_input("Tip chord [m]", value=float(fins["tip_chord"]), key="flight_fins_tip"))
+            fins["fin_span"] = float(st.number_input("Fin span [m]", value=float(fins["fin_span"]), key="flight_fins_span"))
+        with colF3:
+            fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fins["fin_position"]), key="flight_fins_pos"))
+        rocket["fins"] = fins
+        working["rocket"] = rocket
+
+    with st.expander("Tanks", expanded=False):
+        lox_tank = (working.get("lox_tank") or {})
+        fuel_tank = (working.get("fuel_tank") or {})
+        press_tank = (working.get("press_tank") or {})
+        # LOX
+        lox_tank.setdefault("lox_h", 1.14)
+        lox_tank.setdefault("lox_radius", 0.0762)
+        lox_tank.setdefault("ox_tank_pos", 0.6)
+        colL1, colL2, colL3 = st.columns(3)
+        with colL1:
+            lox_tank["lox_h"] = float(st.number_input("LOX tank height [m]", value=float(lox_tank["lox_h"]), key="flight_lox_h"))
+        with colL2:
+            lox_tank["lox_radius"] = float(st.number_input("LOX tank radius [m]", value=float(lox_tank["lox_radius"]), key="flight_lox_radius"))
+        with colL3:
+            lox_tank["ox_tank_pos"] = float(st.number_input("LOX tank position [m]", value=float(lox_tank["ox_tank_pos"]), key="flight_lox_pos"))
+        # Fuel
+        fuel_tank.setdefault("rp1_h", 0.609)
+        fuel_tank.setdefault("rp1_radius", 0.0762)
+        fuel_tank.setdefault("fuel_tank_pos", -0.2)
+        colFu1, colFu2, colFu3 = st.columns(3)
+        with colFu1:
+            fuel_tank["rp1_h"] = float(st.number_input("Fuel tank height [m]", value=float(fuel_tank["rp1_h"]), key="flight_rp1_h"))
+        with colFu2:
+            fuel_tank["rp1_radius"] = float(st.number_input("Fuel tank radius [m]", value=float(fuel_tank["rp1_radius"]), key="flight_rp1_radius"))
+        with colFu3:
+            fuel_tank["fuel_tank_pos"] = float(st.number_input("Fuel tank position [m]", value=float(fuel_tank["fuel_tank_pos"]), key="flight_rp1_pos"))
+        # Pressurant (optional)
+        if press_tank is None:
+            press_tank = {}
+        press_tank.setdefault("press_h", 0.457)
+        press_tank.setdefault("press_radius", 0.0762)
+        press_tank.setdefault("pres_tank_pos", 1.2)
+        colP1, colP2, colP3 = st.columns(3)
+        with colP1:
+            press_tank["press_h"] = float(st.number_input("Pressurant tank height [m]", value=float(press_tank["press_h"]), key="flight_press_h"))
+        with colP2:
+            press_tank["press_radius"] = float(st.number_input("Pressurant tank radius [m]", value=float(press_tank["press_radius"]), key="flight_press_radius"))
+        with colP3:
+            press_tank["pres_tank_pos"] = float(st.number_input("Pressurant tank position [m]", value=float(press_tank["pres_tank_pos"]), key="flight_press_pos"))
+        working["lox_tank"] = lox_tank
+        working["fuel_tank"] = fuel_tank
+        working["press_tank"] = press_tank
+
+    with st.expander("Nozzle", expanded=False):
+        nozzle = working.get("nozzle") or {}
+        nozzle.setdefault("A_throat", 0.00156235266901)
+        nozzle.setdefault("A_exit", 0.00831498636119)
+        nozzle.setdefault("expansion_ratio", 6.54)
+        nozzle.setdefault("efficiency", 0.98)
+        colN1, colN2 = st.columns(2)
+        with colN1:
+            nozzle["A_throat"] = float(st.number_input("Throat area [m²]", value=float(nozzle["A_throat"]), key="flight_noz_at"))
+            nozzle["expansion_ratio"] = float(st.number_input("Expansion ratio (Ae/At)", value=float(nozzle["expansion_ratio"]), key="flight_noz_er"))
+        with colN2:
+            nozzle["A_exit"] = float(st.number_input("Exit area [m²]", value=float(nozzle["A_exit"]), key="flight_noz_ae"))
+            nozzle["efficiency"] = float(st.number_input("Nozzle efficiency", value=float(nozzle["efficiency"]), key="flight_noz_eta"))
+        working["nozzle"] = nozzle
+
+    with st.expander("Fluids (properties)", expanded=False):
+        fluids = working.get("fluids") or {}
+        ox = fluids.get("oxidizer") or {}
+        fu = fluids.get("fuel") or {}
+        ox.setdefault("name", "LOX")
+        ox.setdefault("density", 1140.0)
+        ox.setdefault("temperature", 90.0)
+        fu.setdefault("name", "RP-1")
+        fu.setdefault("density", 780.0)
+        fu.setdefault("temperature", 293.0)
+        colOx1, colOx2, colOx3 = st.columns(3)
+        with colOx1:
+            ox["name"] = st.text_input("Oxidizer name", value=str(ox["name"]), key="flight_ox_name")
+        with colOx2:
+            ox["density"] = float(st.number_input("Oxidizer density [kg/m³]", value=float(ox["density"]), key="flight_ox_density"))
+        with colOx3:
+            ox["temperature"] = float(st.number_input("Oxidizer temperature [K]", value=float(ox["temperature"]), key="flight_ox_temp"))
+        colFu1, colFu2, colFu3 = st.columns(3)
+        with colFu1:
+            fu["name"] = st.text_input("Fuel name", value=str(fu["name"]), key="flight_fu_name")
+        with colFu2:
+            fu["density"] = float(st.number_input("Fuel density [kg/m³]", value=float(fu["density"]), key="flight_fu_density"))
+        with colFu3:
+            fu["temperature"] = float(st.number_input("Fuel temperature [K]", value=float(fu["temperature"]), key="flight_fu_temp"))
+        fluids["oxidizer"] = ox
+        fluids["fuel"] = fu
+        working["fluids"] = fluids
+
+    # Validate edited working config
+    try:
+        config_for_flight = PintleEngineConfig(**working)
+    except Exception as exc:
+        st.error(f"Edited flight configuration is invalid: {exc}")
+        return
+
+    if run_btn:
+        # If dataset-driven, build Functions and override burn time
+        if source == "Dataset (time-varying)":
+            try:
+                # Convert time column and thrust values
+                t_vals = to_elapsed_seconds(ds_df[time_col])
+                thrust_vals = np.asarray(ds_df[thrust_col], dtype=float)
+            except Exception as exc:
+                st.error(f"Invalid dataset columns: {exc}")
+                return
+            # Unit handling for thrust
+            if "(kN)" in thrust_col:
+                thrust_vals_SI = thrust_vals * 1000.0
+            elif "(N)" in thrust_col:
+                thrust_vals_SI = thrust_vals
+            else:
+                # Assume N if unitless; provide a toggle?
+                thrust_vals_SI = thrust_vals
+            # mdot handling
+            if mdot_o_col != "None" and mdot_f_col != "None":
+                mdot_O_vals = np.asarray(ds_df[mdot_o_col], dtype=float)
+                mdot_F_vals = np.asarray(ds_df[mdot_f_col], dtype=float)
+            elif mr_col != "None" and mdot_total_col != "None":
+                MR_vals = np.asarray(ds_df[mr_col], dtype=float)
+                mdot_total_vals = np.asarray(ds_df[mdot_total_col], dtype=float)
+                mdot_O_vals = mdot_total_vals * (MR_vals / (1.0 + MR_vals))
+                mdot_F_vals = mdot_total_vals * (1.0 / (1.0 + MR_vals))
+            else:
+                st.error("Provide either mdot_O and mdot_F columns, or MR and total mdot.")
+                return
+
+            # Sort by time and drop duplicates if needed
+            order = np.argsort(t_vals)
+            t_vals = t_vals[order]
+            thrust_vals_SI = thrust_vals_SI[order]
+            mdot_O_vals = mdot_O_vals[order]
+            mdot_F_vals = mdot_F_vals[order]
+
+            # Deduce burn time from dataset
+            if len(t_vals) < 2:
+                st.error("Dataset must contain at least two time samples to define a burn duration.")
+                return
+            burn_time_ds = float(np.max(t_vals) - np.min(t_vals))
+            if not np.isfinite(burn_time_ds) or burn_time_ds <= 0.0:
+                st.error("Dataset time axis must increase (duration must be > 0 s). Check the selected time column.")
+                return
+            working["thrust"]["burn_time"] = burn_time_ds
+            # Use user-defined propellant masses (set earlier in the form)
+            try:
+                config_for_flight = PintleEngineConfig(**working)
+            except Exception as exc:
+                st.error(f"Edited flight configuration is invalid: {exc}")
+                return
+
+            # Build RocketPy Functions
+            thrust_func = build_rp_function(t_vals, thrust_vals_SI)
+            mdot_O_func = build_rp_function(t_vals, mdot_O_vals)
+            mdot_F_func = build_rp_function(t_vals, mdot_F_vals)
+
+            # Run flight directly with dataset-driven inputs
+            try:
+                sim_result = setup_flight(config_for_flight, thrust_func, mdot_O_func, mdot_F_func, plot_results=False)
+            except Exception as exc:
+                st.error(f"Flight simulation failed: {exc}")
+                return
+
+            apogee = sim_result.get("apogee")
+            max_v = sim_result.get("max_velocity")
+            flight = sim_result.get("flight")
+
+            colm1, colm2 = st.columns(2)
+            colm1.metric("Apogee", f"{apogee:.1f} m" if isinstance(apogee, (int, float)) else "N/A")
+            if isinstance(max_v, (int, float)) and max_v is not None:
+                colm2.metric("Max Velocity", f"{max_v:.1f} m/s")
+            else:
+                colm2.metric("Max Velocity", "N/A")
+
+            # Plot altitude/velocity
+            try:
+                t_series, z_series, vz_series = extract_flight_series(flight)
+                plot_flight_results(t_series, z_series, vz_series, key_suffix="_ds")
+            except Exception as exc:
+                st.warning(f"Could not extract time series: {exc}")
+                return
+            with st.expander("Rocket view (render)"):
+                render_rocket_view(flight)
+            with st.expander("Additional rocket plots"):
+                plot_additional_rocket_plots(flight, t_series, key_suffix="_ds")
+            with st.expander("Thrust curve"):
+                thrust_df = pd.DataFrame({"time": t_vals, "Thrust (N)": thrust_vals_SI})
+                st.plotly_chart(px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (dataset)"), use_container_width=True, key="flight_thrust_plot_ds")
+            return
+
+        # Evaluate engine performance at specified tank pressures
+        try:
+            results = runner.evaluate(P_tank_O_psi * PSI_TO_PA, P_tank_F_psi * PSI_TO_PA)
+        except Exception as exc:
+            st.error(f"Engine performance evaluation failed: {exc}")
+            return
+
+        F = float(results.get("F", 0.0))
+        mdot_O = float(results.get("mdot_O", 0.0))
+        mdot_F = float(results.get("mdot_F", 0.0))
+
+        if F <= 0 or mdot_O <= 0 or mdot_F <= 0:
+            st.error("Non-physical engine outputs (thrust or mass flows <= 0). Check inputs.")
+            return
+
+        # Build constant thrust curve [(t, F)]
+        thrust_curve = [(0.0, F), (float(burn_time), F)]
+
+        try:
+            sim_result = setup_flight(config_for_flight, thrust_curve, mdot_O, mdot_F, plot_results=False)
+        except Exception as exc:
+            st.error(f"Flight simulation failed: {exc}")
+            return
+
+        apogee = sim_result.get("apogee")
+        max_v = sim_result.get("max_velocity")
+        flight = sim_result.get("flight")
+
+        colm1, colm2 = st.columns(2)
+        colm1.metric("Apogee", f"{apogee:.1f} m" if isinstance(apogee, (int, float)) else "N/A")
+        if isinstance(max_v, (int, float)) and max_v is not None:
+            colm2.metric("Max Velocity", f"{max_v:.1f} m/s")
+        else:
+            colm2.metric("Max Velocity", "N/A")
+
+        # Extract and plot time series
+        try:
+            t_series, z_series, vz_series = extract_flight_series(flight)
+            plot_flight_results(t_series, z_series, vz_series)
+        except Exception as exc:
+            st.warning(f"Could not extract time series: {exc}")
+            return
+
+        with st.expander("Thrust curve"):
+            thrust_df = pd.DataFrame({"time": [0.0, float(burn_time)], "Thrust (N)": [F, F]})
+            thrust_fig = px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (assumed constant)")
+            st.plotly_chart(thrust_fig, use_container_width=True, key="flight_thrust_plot")
+        with st.expander("Rocket view (render)"):
+            render_rocket_view(flight)
+        with st.expander("Additional rocket plots"):
+            plot_additional_rocket_plots(flight, t_series)
+    else:
+        st.info("Edit configuration above, then click Run Flight Simulation.")
 
 def detect_fluid_choice(fluid: Dict[str, Any]) -> str:
     name = fluid.get("name")
@@ -2993,10 +3762,11 @@ def main():
 
     runner = PintleEngineRunner(config_obj)
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
         "Forward Mode",
         "Inverse Mode",
         "Time-Series Analysis",
+        "COPV Sizing",
         "Plots & Analysis",
         "Custom Plot Builder",
         "Flight Simulation",
@@ -3008,10 +3778,12 @@ def main():
     with tab3:
         timeseries_view(runner, config_label)
     with tab4:
-        plots_analysis_view(runner)
+        copv_view(config_obj)
     with tab5:
-        custom_plot_builder()
+        plots_analysis_view(runner)
     with tab6:
+        custom_plot_builder()
+    with tab7:
         flight_sim_view(runner, config_obj, config_label)
 
 
