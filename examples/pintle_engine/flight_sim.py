@@ -51,7 +51,6 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
 
 
->>>>>>> de8723e (FIX: More conservative truncation to prevent negative tank mass - Increased safety margin from 0.01s/1% to 0.05s/2% of cutoff_time - Changed truncation to use strict < instead of <= so mdot is 0 at cutoff_time - Added explicit sampling at cutoff_time to ensure it's included in function - Reduced flux_time by additional 1% to account for RocketPy internal discretization - Multiple layers of safety to prevent numerical integration errors causing negative mass)
     # Nozzle parameters from config
     eta_nozzle = config.nozzle.efficiency
     eps = config.nozzle.expansion_ratio
@@ -84,8 +83,8 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         latitude=config.environment.latitude,
         longitude=config.environment.longitude,
         elevation=config.environment.elevation,
-
     )
+    env.set_atmospheric_model(type='Forecast', file='GFS')
 
     env.set_atmospheric_model(type='Forecast', file='GFS')
 
@@ -99,7 +98,10 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     print(mdot_fuel)
 
-
+    print(m_lox0)
+    print(m_rp10)
+    print(mdot_lox)
+    print(mdot_fuel)
 
     # Tank geometries from config
     lox_geom = CylindricalTank(radius=config.lox_tank.lox_radius, height=config.lox_tank.lox_h, spherical_caps=False)
