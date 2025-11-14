@@ -1862,6 +1862,9 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
             display_time_series_summary(df)
             plot_time_series_results(df)
 
+            if errors:
+                st.warning("Some time steps did not converge. Affected rows contain NaNs in the output dataset.")
+
             with st.expander("Data table"):
                 st.dataframe(df)
                 st.download_button(
