@@ -3315,15 +3315,17 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         rocket.setdefault("inertia", [8.0, 8.0, 0.5])
         rocket.setdefault("radius", 0.1)
         rocket.setdefault("cm_wo_motor", 1.0)
-        rocket.setdefault("dry_mass", 12.0)
         rocket.setdefault("motor_inertia", [0.1, 0.1, 0.1])
+        # Motor config (nested)
+        motor = rocket.setdefault("motor", {})
+        motor.setdefault("dry_mass", 12.0)
         colR1, colR2, colR3 = st.columns(3)
         with colR1:
             r_mass = st.number_input("Rocket mass [kg]", value=float(rocket.get("mass", 90.72)), key="flight_rocket_mass")
             r_radius = st.number_input("Rocket radius [m]", value=float(rocket.get("radius", 0.1)), key="flight_rocket_radius")
         with colR2:
             r_cm = st.number_input("CM without motor [m]", value=float(rocket.get("cm_wo_motor", 1.0)), key="flight_rocket_cm")
-            r_dry = st.number_input("Rocket dry mass [kg]", value=float(rocket.get("dry_mass", 12.0)), key="flight_rocket_dry")
+            r_dry = st.number_input("Rocket dry mass [kg]", value=float(motor.get("dry_mass", 12.0)), key="flight_rocket_dry")
         with colR3:
             mi_x = st.number_input("Motor inertia X", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[0]), key="flight_motor_inertia_x")
             mi_y = st.number_input("Motor inertia Y", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[1]), key="flight_motor_inertia_y")
@@ -3331,7 +3333,8 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         rocket["mass"] = float(r_mass)
         rocket["radius"] = float(r_radius)
         rocket["cm_wo_motor"] = float(r_cm)
-        rocket["dry_mass"] = float(r_dry)
+        motor["dry_mass"] = float(r_dry)
+        rocket["motor"] = motor
         rocket["motor_inertia"] = [float(mi_x), float(mi_y), float(mi_z)]
 
         # Fins
