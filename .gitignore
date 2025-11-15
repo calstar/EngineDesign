@@ -20,6 +20,7 @@ pintle_pipeline/**/*.pyc
 examples/pintle_engine/**/__pycache__/
 examples/pintle_engine/**/*.pyc
 **/*.npz
+!cea_cache_LOX_RP1_3D.npz
 **/*.png
 **/*.jpg
 **/*.pdf
