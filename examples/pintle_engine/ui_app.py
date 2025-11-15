@@ -258,8 +258,8 @@ def plot_flight_results(t: np.ndarray, z: np.ndarray, vz: np.ndarray, *, key_suf
         st.warning("Flight produced empty time series.")
         return
     df = pd.DataFrame({"time": t, "Altitude (m)": z, "Vertical Velocity (m/s)": vz})
-    st.plotly_chart(px.line(df, x="time", y="Altitude (m)", title="Altitude vs Time"), use_container_width=True, key=f"flight_alt_plot{key_suffix}")
-    st.plotly_chart(px.line(df, x="time", y="Vertical Velocity (m/s)", title="Vertical Velocity vs Time"), use_container_width=True, key=f"flight_vel_plot{key_suffix}")
+    st.plotly_chart(px.line(df, x="time", y="Altitude (m)", title="Altitude vs Time"), width='stretch', key=f"flight_alt_plot{key_suffix}")
+    st.plotly_chart(px.line(df, x="time", y="Vertical Velocity (m/s)", title="Vertical Velocity vs Time"), width='stretch', key=f"flight_vel_plot{key_suffix}")
 
 
 def render_rocket_view(flight) -> None:
@@ -274,7 +274,7 @@ def render_rocket_view(flight) -> None:
             return
         maybe_fig = result.draw()
         fig = maybe_fig if hasattr(maybe_fig, "savefig") else plt.gcf()
-        st.pyplot(fig, clear_figure=True, use_container_width=True)
+        st.pyplot(fig, clear_figure=True, width='stretch')
     except Exception as exc:
         st.info(f"Rocket view unavailable: {exc}")
 
@@ -309,7 +309,7 @@ def plot_additional_rocket_plots(flight, t_series: np.ndarray, *, key_suffix: st
         n = min(len(t_series), len(vals))
         if n > 0:
             df = pd.DataFrame({"time": t_series[:n], label: vals[:n]})
-            st.plotly_chart(px.line(df, x="time", y=label, title=label), use_container_width=True, key=f"flight_{label.replace(' ', '_').lower()}{key_suffix}")
+            st.plotly_chart(px.line(df, x="time", y=label, title=label), width='stretch', key=f"flight_{label.replace(' ', '_').lower()}{key_suffix}")
 
 
 # ============================================================================
@@ -437,7 +437,7 @@ def summarize_results(results: Dict[str, Any]) -> None:
                 yaxis_title="Pressure [psi]",
                 height=300
             )
-            st.plotly_chart(fig_pressure, use_container_width=True)
+            st.plotly_chart(fig_pressure, width='stretch')
             
             # Show key pressures
             P_inj = pressure_profile.get("P_injection", np.nan) * PA_TO_PSI
@@ -466,7 +466,7 @@ def summarize_results(results: Dict[str, Any]) -> None:
                 yaxis_title="Temperature [K]",
                 height=300
             )
-            st.plotly_chart(fig_temp, use_container_width=True)
+            st.plotly_chart(fig_temp, width='stretch')
             
             # Show key temperatures
             T_inj = temp_profile.get("T_injection", np.nan)
@@ -522,7 +522,7 @@ def summarize_results(results: Dict[str, Any]) -> None:
                     title="Pressure and Temperature Profiles Along Chamber",
                     height=400
                 )
-                st.plotly_chart(fig_combined, use_container_width=True)
+                st.plotly_chart(fig_combined, width='stretch')
     
     # Injector Pressure Drop
     injector_pressure = results.get("injector_pressure")
@@ -1122,7 +1122,7 @@ def display_time_series_summary(df: pd.DataFrame) -> None:
     pc_column = df["Pc (psi)"]
     avg_thrust = float(thrust_column.mean())
     max_thrust = float(thrust_column.max())
-    total_impulse = float(np.trapz(thrust_column * 1000.0, df["time"])) / 1000.0  # kN·s
+    total_impulse = float(np.trapezoid(thrust_column * 1000.0, df["time"])) / 1000.0  # kN·s
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Burn duration", f"{duration:.2f} s")
@@ -1320,7 +1320,7 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
                 title="Characteristic Length (L*) Evolution",
             )
             lstar_fig.update_layout(yaxis_title="L* [mm]", xaxis_title="Time [s]")
-            st.plotly_chart(lstar_fig, use_container_width=True, key="ts_lstar_evol")
+            st.plotly_chart(lstar_fig, width='stretch', key="ts_lstar_evol")
         
         with col2:
             recession_fig = go.Figure()
@@ -1344,7 +1344,7 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
                 yaxis_title="Recession [µm]",
                 legend=dict(x=0.02, y=0.98),
             )
-            st.plotly_chart(recession_fig, use_container_width=True, key="ts_recession_cumul")
+            st.plotly_chart(recession_fig, width='stretch', key="ts_recession_cumul")
         
         col3, col4 = st.columns(2)
         
@@ -1372,7 +1372,7 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
                 yaxis_title="Change [%]",
                 legend=dict(x=0.02, y=0.98),
             )
-            st.plotly_chart(geom_fig, use_container_width=True, key="ts_geom_growth_pct")
+            st.plotly_chart(geom_fig, width='stretch', key="ts_geom_growth_pct")
         
         with col4:
             if "Throat Recession Multiplier" in df.columns and not df["Throat Recession Multiplier"].isna().all():
@@ -1391,7 +1391,7 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
                     line_color="gray",
                     annotation_text=f"Mean: {mult_mean:.2f}",
                 )
-                st.plotly_chart(mult_fig, use_container_width=True, key="ts_throat_mult_phys")
+                st.plotly_chart(mult_fig, width='stretch', key="ts_throat_mult_phys")
         
         # Performance degradation summary
         if len(df) > 1:
@@ -1863,7 +1863,7 @@ def copv_view(config_obj: PintleEngineConfig) -> None:
     pressure_fig.update_yaxes(title_text="COPV pressure [psi]", secondary_y=False)
     pressure_fig.update_yaxes(title_text="Tank pressure [psi]", secondary_y=True, showgrid=False)
     pressure_fig.update_layout(xaxis_title="Time [s]")
-    st.plotly_chart(pressure_fig, use_container_width=True)
+    st.plotly_chart(pressure_fig, width='stretch')
 
     mass_fig = go.Figure()
     mass_fig.add_trace(
@@ -1883,7 +1883,7 @@ def copv_view(config_obj: PintleEngineConfig) -> None:
             )
         )
     mass_fig.update_layout(xaxis_title="Time [s]", yaxis_title="Delivered gas mass [kg]")
-    st.plotly_chart(mass_fig, use_container_width=True)
+    st.plotly_chart(mass_fig, width='stretch')
 
     branch_rows = []
     for name, branch in solver_results["branches"].items():
@@ -2224,7 +2224,7 @@ def inverse_view(runner: PintleEngineRunner, config_label: str) -> None:
                     yaxis_type="log",
                     height=400,
                 )
-                st.plotly_chart(fig, use_container_width=True, key="inverse_2d_convergence")
+                st.plotly_chart(fig, width='stretch', key="inverse_2d_convergence")
         
         return  # Exit early for 2D mode
     
@@ -2893,7 +2893,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 plot_additional_rocket_plots(flight, t_series, key_suffix="_ds")
             with st.expander("Thrust curve"):
                 thrust_df = pd.DataFrame({"time": t_vals, "Thrust (N)": thrust_vals_SI})
-                st.plotly_chart(px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (dataset)"), use_container_width=True, key="flight_thrust_plot_ds")
+                st.plotly_chart(px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (dataset)"), width='stretch', key="flight_thrust_plot_ds")
             return
 
         # Evaluate engine performance at specified tank pressures
@@ -2942,7 +2942,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         with st.expander("Thrust curve"):
             thrust_df = pd.DataFrame({"time": [0.0, float(burn_time)], "Thrust (N)": [F, F]})
             thrust_fig = px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (assumed constant)")
-            st.plotly_chart(thrust_fig, use_container_width=True, key="flight_thrust_plot")
+            st.plotly_chart(thrust_fig, width='stretch', key="flight_thrust_plot")
         with st.expander("Rocket view (render)"):
             render_rocket_view(flight)
         with st.expander("Additional rocket plots"):
@@ -2964,6 +2964,28 @@ def detect_fluid_choice(fluid: Dict[str, Any]) -> str:
     return "Custom"
 
 
+def _clear_chamber_design_form_state(config_label: str) -> None:
+    """Clear chamber design form input values from session state to force reset to config defaults."""
+    keys_to_clear = [
+        # Chamber design form keys
+        f"chamber_pc_design_{config_label}",
+        f"chamber_thrust_design_{config_label}",
+        f"chamber_force_coefficient_{config_label}",
+        f"chamber_diameter_inner_{config_label}",
+        f"chamber_diameter_exit_{config_label}",
+        f"chamber_l_star_{config_label}",
+        f"chamber_unit_system_{config_label}",
+        # Config editor form keys (chamber length and Lstar)
+        f"chamber_length_{config_label}",
+        f"chamber_lstar_{config_label}",
+        # Also clear old key without config_label for backward compatibility
+        "chamber_lstar",
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+
+
 def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
     if "config_dict" not in st.session_state:
         st.session_state["config_dict"] = get_default_config_dict()
@@ -2977,7 +2999,13 @@ def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
             PintleEngineConfig(**config_dict)
             # Store the raw YAML dict to preserve all fields including optional ones
             st.session_state["config_dict"] = config_dict
+            old_config_label = st.session_state.get("config_label", "default")
             st.session_state["config_label"] = uploaded_file.name
+            # Clear form state for both old and new config labels to ensure clean reset
+            _clear_chamber_design_form_state(old_config_label)
+            _clear_chamber_design_form_state(uploaded_file.name)
+            # Mark that config was just loaded so chamber design form can reset
+            st.session_state["config_just_loaded"] = True
         except Exception as exc:
             raise ValueError(f"Failed to load uploaded configuration: {exc}") from exc
 
@@ -3535,38 +3563,55 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         st.markdown("### Chamber & Nozzle")
         chamber = working_copy["chamber"]
         nozzle = working_copy["nozzle"]
-        chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber.get("volume", 1e-3)), format="%.6f")
-        chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber["A_throat"]), format="%.6f")
-        # Handle None values properly
+        config_label = st.session_state.get("config_label", "default")
+        
+        # Get values directly from config FIRST - ALWAYS pull from config, never calculate
+        chamber_volume = chamber.get("volume")
+        if chamber_volume is None:
+            chamber_volume = 1e-3
+        chamber_A_throat = chamber.get("A_throat")
+        if chamber_A_throat is None:
+            chamber_A_throat = 0.000857892  # Default throat area
         chamber_length = chamber.get("length")
         if chamber_length is None:
             chamber_length = 0.5
-        config_label = st.session_state.get("config_label", "default")
+        chamber_lstar = chamber.get("Lstar")
+        if chamber_lstar is None:
+            chamber_lstar = 0.5
+        
+        # Make keys include a hash of the config values so they change when config changes
+        # This makes length and Lstar work identically to volume and A_throat (which have no keys)
+        # When config changes, the hash changes, so Streamlit treats it as a new widget and uses the value parameter
+        import hashlib
+        # Hash the chamber section of config to create unique keys that change when config changes
+        chamber_str = str(sorted(chamber.items())) if chamber else ""
+        config_hash = hashlib.md5(f"{config_label}_{chamber_str}".encode()).hexdigest()[:8]
+        length_key = f"chamber_length_{config_label}_{config_hash}"
+        lstar_key = f"chamber_lstar_{config_label}_{config_hash}"
+        
+        # Now render inputs - they will use config values since keys are cleared if values don't match
+        chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber_volume), format="%.6f")
+        chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber_A_throat), format="%.6f")
         chamber["length"] = length_number_input(
             "Chamber length",
             float(chamber_length),
             min_m=0.01,
             max_m=3.0,
             step_m=0.01,
-            key=f"chamber_length_{config_label}",
+            key=length_key,
         )
-        # Handle None values for Lstar
-        chamber_lstar = chamber.get("Lstar")
-        if chamber_lstar is None:
-            # Calculate from volume and A_throat if available
-            if chamber.get("volume") and chamber.get("A_throat"):
-                chamber_lstar = chamber["volume"] / chamber["A_throat"]
-            else:
-                chamber_lstar = 0.5
         chamber["Lstar"] = length_number_input(
             "Characteristic length L*",
             float(chamber_lstar),
             min_m=0.1,
             max_m=5.0,
             step_m=0.05,
-            key="chamber_lstar",
+            key=lstar_key,
         )
-        nozzle["expansion_ratio"] = st.number_input("Expansion ratio (Ae/At)", min_value=1.0, max_value=200.0, value=float(nozzle["expansion_ratio"]), format="%.4f")
+        nozzle_expansion_ratio = nozzle.get("expansion_ratio")
+        if nozzle_expansion_ratio is None:
+            nozzle_expansion_ratio = 6.5  # Default expansion ratio
+        nozzle["expansion_ratio"] = st.number_input("Expansion ratio (Ae/At)", min_value=1.0, max_value=200.0, value=float(nozzle_expansion_ratio), format="%.4f")
 
         st.markdown("### Combustion & Efficiency")
         st.info(
@@ -3711,7 +3756,14 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             working_copy["combustion"]["cea"]["fuel_name"] = working_copy["fluids"]["fuel"].get("name", "Fuel")
             new_config = PintleEngineConfig(**working_copy)
             st.session_state["config_dict"] = working_copy
-            st.success("Configuration updated.")
+            # Clear form state to ensure inputs reset to new config values
+            config_label = st.session_state.get("config_label", "default")
+            _clear_chamber_design_form_state(config_label)
+            # Mark that config was updated from config_editor so chamber design form can reset
+            st.session_state["config_updated_from_editor"] = True
+            st.session_state["config_updated"] = True
+            st.success("Configuration updated. Chamber Design tab will refresh with new values.")
+            st.rerun()  # Force rerun to update chamber design tab
             return new_config
         except Exception as exc:
             st.error(f"Invalid configuration: {exc}")
@@ -3724,6 +3776,18 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
     """Chamber Design tab - calculates chamber geometry and updates config."""
     st.header("Chamber Design")
     st.markdown("Calculate chamber geometry from design parameters and update configuration.")
+    
+    # Get config label for unique form keys
+    config_label = st.session_state.get("config_label", "default")
+    
+    # Check if config was just updated or loaded - if so, clear form state to force reset to new defaults
+    if st.session_state.get("config_updated_from_editor", False) or st.session_state.get("config_just_loaded", False):
+        _clear_chamber_design_form_state(config_label)
+        # Clear the flags after clearing form state
+        if "config_just_loaded" in st.session_state:
+            del st.session_state["config_just_loaded"]
+        if "config_updated_from_editor" in st.session_state:
+            del st.session_state["config_updated_from_editor"]
     
     # Check if we have stored calculation results from a previous run
     has_stored_results = "chamber_calc_results" in st.session_state
@@ -3748,49 +3812,69 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
     diameter_exit_default_metric = 0.1016  # m (4 inches)
     l_star_default_metric = 1.27  # m
     
-    # Try to get values from config
-    if "chamber" in config_dict:
-        chamber = config_dict["chamber"]
-        if "Lstar" in chamber and chamber["Lstar"] is not None:
-            l_star_default_metric = float(chamber["Lstar"])
-        # Use design parameters from config if available
-        if "design_pressure" in chamber and chamber["design_pressure"] is not None:
-            pc_design_default_metric = float(chamber["design_pressure"])
-        if "design_thrust" in chamber and chamber["design_thrust"] is not None:
-            thrust_design_default_metric = float(chamber["design_thrust"])
-        if "design_force_coefficient" in chamber and chamber["design_force_coefficient"] is not None:
-            force_coefficient_default = float(chamber["design_force_coefficient"])
-        
-        # Get diameter_inner from regen_cooling or calculate from volume/length
-        if "regen_cooling" in config_dict and config_dict["regen_cooling"] is not None:
-            regen = config_dict["regen_cooling"]
-            if "chamber_inner_diameter" in regen and regen["chamber_inner_diameter"] is not None:
-                diameter_inner_default_metric = float(regen["chamber_inner_diameter"])
-        # If not in regen, try to calculate from volume and length
-        if diameter_inner_default_metric == 0.08636:  # Still using default
-            if "volume" in chamber and "length" in chamber:
-                volume = chamber.get("volume")
-                length = chamber.get("length")
-                if volume and length and float(volume) > 0 and float(length) > 0:
-                    area = float(volume) / float(length)
-                    diameter_inner_default_metric = np.sqrt(4.0 * area / np.pi)
-        
-        # Get diameter_exit from nozzle A_exit or calculate from expansion_ratio
-        if "nozzle" in config_dict:
-            nozzle = config_dict["nozzle"]
-            if "A_exit" in nozzle and nozzle["A_exit"] is not None:
-                A_exit = float(nozzle["A_exit"])
-                diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
-            elif "expansion_ratio" in nozzle and "A_throat" in chamber:
-                expansion_ratio = float(nozzle["expansion_ratio"])
-                A_throat = float(chamber["A_throat"])
-                A_exit = expansion_ratio * A_throat
-                diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
+    # Extract values from config
+    chamber = config_dict.get("chamber", {})
+    nozzle = config_dict.get("nozzle", {})
+    regen = config_dict.get("regen_cooling", {})
+    
+    # Get L* from config (or calculate from volume/A_throat if available)
+    if chamber.get("Lstar") is not None:
+        l_star_default_metric = float(chamber["Lstar"])
+    elif chamber.get("volume") is not None and chamber.get("A_throat") is not None:
+        volume = float(chamber["volume"])
+        A_throat = float(chamber["A_throat"])
+        if volume > 0 and A_throat > 0:
+            l_star_default_metric = volume / A_throat
+    
+    # Get design pressure from config
+    if chamber.get("design_pressure") is not None:
+        pc_design_default_metric = float(chamber["design_pressure"])
+    
+    # Get design thrust from config
+    if chamber.get("design_thrust") is not None:
+        thrust_design_default_metric = float(chamber["design_thrust"])
+    
+    # Get force coefficient from config
+    if chamber.get("design_force_coefficient") is not None:
+        force_coefficient_default = float(chamber["design_force_coefficient"])
+    
+    # Get chamber inner diameter from config - check chamber.chamber_inner_diameter first, then regen_cooling, then calculate
+    if chamber.get("chamber_inner_diameter") is not None:
+        diameter_inner_default_metric = float(chamber["chamber_inner_diameter"])
+    elif regen.get("chamber_inner_diameter") is not None:
+        diameter_inner_default_metric = float(regen["chamber_inner_diameter"])
+    elif chamber.get("volume") is not None and chamber.get("length") is not None:
+        volume = float(chamber["volume"])
+        length = float(chamber["length"])
+        if volume > 0 and length > 0:
+            area = volume / length
+            diameter_inner_default_metric = np.sqrt(4.0 * area / np.pi)
+    
+    # Get exit diameter from config - check nozzle.exit_diameter first, then A_exit, then calculate
+    if nozzle.get("exit_diameter") is not None:
+        diameter_exit_default_metric = float(nozzle["exit_diameter"])
+    elif nozzle.get("A_exit") is not None:
+        A_exit = float(nozzle["A_exit"])
+        diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
+    elif nozzle.get("expansion_ratio") is not None and chamber.get("A_throat") is not None:
+        expansion_ratio = float(nozzle["expansion_ratio"])
+        A_throat = float(chamber["A_throat"])
+        if expansion_ratio > 0 and A_throat > 0:
+            A_exit = expansion_ratio * A_throat
+            diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
     
     # Input section
     # Note: Streamlit forms submit on Enter by default - user must click button to calculate
     st.info("💡 **Tip:** Press Enter in any field to update values, but click the button below to calculate geometry.")
-    with st.form("chamber_design_form", clear_on_submit=False):
+    
+    # Create hash of config values to make form keys unique per config
+    # This ensures form inputs update when config changes (like length/Lstar in config_editor)
+    # Include all form input values in hash so keys change when any value changes
+    import hashlib
+    chamber_design_config_str = f"{pc_design_default_metric}_{thrust_design_default_metric}_{force_coefficient_default}_{diameter_inner_default_metric}_{diameter_exit_default_metric}_{l_star_default_metric}"
+    config_hash = hashlib.md5(f"{config_label}_{chamber_design_config_str}".encode()).hexdigest()[:8]
+    
+    with st.form(f"chamber_design_form_{config_label}_{config_hash}", clear_on_submit=False):
         st.subheader("Design Parameters")
         
         # Unit system toggle
@@ -3798,7 +3882,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             "Unit System",
             ["Metric", "Imperial"],
             horizontal=True,
-            key="chamber_unit_system"
+            key=f"chamber_unit_system_{config_label}_{config_hash}"
         )
         
         # Convert defaults based on unit system
@@ -3865,7 +3949,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 value=pc_design_default,
                 step=pc_step,
                 format="%.2f" if unit_system == "Imperial" else "%.0f",
-                key="chamber_pc_design"
+                key=f"chamber_pc_design_{config_label}_{config_hash}"
             )
             thrust_design = st.number_input(
                 f"Design Thrust [{thrust_unit}]",
@@ -3874,7 +3958,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 value=thrust_design_default,
                 step=thrust_step,
                 format="%.2f" if unit_system == "Imperial" else "%.1f",
-                key="chamber_thrust_design"
+                key=f"chamber_thrust_design_{config_label}_{config_hash}"
             )
             force_coefficient = st.number_input(
                 "Force Coefficient",
@@ -3883,7 +3967,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 value=force_coefficient_default,
                 step=0.1,
                 format="%.2f",
-                key="chamber_force_coefficient"
+                key=f"chamber_force_coefficient_{config_label}_{config_hash}"
             )
         
         with col2:
@@ -3894,7 +3978,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 value=diameter_inner_default,
                 step=length_step,
                 format="%.4f" if unit_system == "Imperial" else "%.6f",
-                key="chamber_diameter_inner"
+                key=f"chamber_diameter_inner_{config_label}_{config_hash}"
             )
             diameter_exit = st.number_input(
                 f"Exit Diameter [{length_unit}]",
@@ -3903,7 +3987,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 value=diameter_exit_default,
                 step=length_step,
                 format="%.4f" if unit_system == "Imperial" else "%.6f",
-                key="chamber_diameter_exit"
+                key=f"chamber_diameter_exit_{config_label}_{config_hash}"
             )
             l_star = st.number_input(
                 f"L* (Characteristic Length) [{length_unit}]",
@@ -3912,10 +3996,10 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 value=l_star_default,
                 step=l_star_step,
                 format="%.4f",
-                key="chamber_l_star"
+                key=f"chamber_l_star_{config_label}_{config_hash}"
             )
         
-        calculate_button = st.form_submit_button("Calculate Chamber Geometry", type="primary", use_container_width=False)
+        calculate_button = st.form_submit_button("Calculate Chamber Geometry", type="primary", width='stretch')
     
     if calculate_button:
         try:
@@ -3993,19 +4077,25 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             config_dict["chamber"]["design_pressure"] = pc_design_metric
             config_dict["chamber"]["design_thrust"] = thrust_design_metric
             config_dict["chamber"]["design_force_coefficient"] = force_coefficient
+            # Also update chamber_inner_diameter and exit_diameter from form inputs
+            config_dict["chamber"]["chamber_inner_diameter"] = diameter_inner_metric
             updated = True
             
-            # Update nozzle section
-            if "nozzle" in config_dict:
-                if "Throat Area" in calculated_values and "A_throat" in config_dict["nozzle"]:
-                    config_dict["nozzle"]["A_throat"] = calculated_values["Throat Area"]
-                    updated = True
-                if "Exit Area" in calculated_values and "A_exit" in config_dict["nozzle"]:
-                    config_dict["nozzle"]["A_exit"] = calculated_values["Exit Area"]
-                    updated = True
-                if "Expansion Ratio" in calculated_values and "expansion_ratio" in config_dict["nozzle"]:
-                    config_dict["nozzle"]["expansion_ratio"] = calculated_values["Expansion Ratio"]
-                    updated = True
+            # Update nozzle section - ALWAYS update these if calculated
+            if "nozzle" not in config_dict:
+                config_dict["nozzle"] = {}
+            if "Throat Area" in calculated_values:
+                config_dict["nozzle"]["A_throat"] = calculated_values["Throat Area"]
+                updated = True
+            if "Exit Area" in calculated_values:
+                config_dict["nozzle"]["A_exit"] = calculated_values["Exit Area"]
+                updated = True
+            if "Expansion Ratio" in calculated_values:
+                config_dict["nozzle"]["expansion_ratio"] = calculated_values["Expansion Ratio"]
+                updated = True
+            # Update exit_diameter from form input
+            config_dict["nozzle"]["exit_diameter"] = diameter_exit_metric
+            updated = True
             
             # Update combustion.cea.expansion_ratio if it exists
             if "combustion" in config_dict and "cea" in config_dict["combustion"]:
@@ -4082,12 +4172,18 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             if dxf_bytes:
                 st.session_state["chamber_dxf_bytes"] = dxf_bytes
             
-            # Update session state config_dict and mark as updated
+            # CRITICAL: Update session state config_dict IMMEDIATELY with ALL calculated values
+            # This is THE source of truth - download button and runner will use this
             st.session_state["config_dict"] = config_dict
             st.session_state["config_updated"] = True
+            # Mark that config was updated from chamber design so sidebar can refresh
+            st.session_state["config_updated_from_chamber_design"] = True
             
             # Display results immediately after calculation
             _display_chamber_results(results_for_display)
+            
+            # Show success message
+            st.success("✓ Chamber geometry calculated and config updated! Download button below has the updated config.")
             
         except Exception as e:
             st.error(f"Error calculating chamber geometry: {str(e)}")
@@ -4107,6 +4203,36 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
         # Display the results (they persist in session state after form submission)
         _display_chamber_results(display_results)
     
+    # Always show download config button (uses current config_dict from session state - THE SOURCE OF TRUTH)
+    st.markdown("---")
+    st.subheader("Download Configuration")
+    # ALWAYS use st.session_state["config_dict"] as it's the single source of truth
+    # This ensures the downloaded config matches what was calculated
+    if "config_dict" in st.session_state:
+        current_config_dict = st.session_state["config_dict"]
+    else:
+        # Fallback only if config_dict doesn't exist (shouldn't happen)
+        current_config_dict = config_obj.model_dump(exclude_none=False)
+        st.session_state["config_dict"] = current_config_dict
+    
+    config_yaml = yaml.dump(current_config_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    st.download_button(
+        label="📥 Download Current Config (YAML)",
+        data=config_yaml,
+        file_name=f"config_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml",
+        mime="application/x-yaml",
+        key="chamber_design_download_config_always",
+        use_container_width=True,
+        help="Download the current configuration (includes any changes from sidebar or chamber design)"
+    )
+    
+    # Return updated config object from session state
+    if "config_dict" in st.session_state:
+        try:
+            return PintleEngineConfig(**st.session_state["config_dict"])
+        except Exception:
+            # If validation fails, return the original
+            return config_obj
     return config_obj
 
 
@@ -4127,7 +4253,7 @@ def _display_chamber_results(results: dict) -> None:
         y=pts[:, 1],
         mode='lines',
         name='Chamber Contour',
-        line=dict(color='black', width=2)
+        line=dict(color='red', width=2)
     ))
     # Add mirror image for full contour
     fig_contour.add_trace(go.Scatter(
@@ -4135,7 +4261,7 @@ def _display_chamber_results(results: dict) -> None:
         y=-pts[:, 1],
         mode='lines',
         name='Lower Contour',
-        line=dict(color='black', width=2),
+        line=dict(color='red', width=2),
         showlegend=False
     ))
     # Add centerline
@@ -4156,17 +4282,18 @@ def _display_chamber_results(results: dict) -> None:
         height=500,
         showlegend=True
     )
-    st.plotly_chart(fig_contour, use_container_width=True)
+    st.plotly_chart(fig_contour, width='stretch')
     
     # Display geometry parameters table
     st.subheader("Chamber Geometry Parameters")
     if table_data:
         df = pd.DataFrame(table_data[1:], columns=table_data[0])
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width='stretch')
     
-    # Show update status
-    if updated:
-        st.success("✓ Configuration values have been updated. The page will reload to apply changes.")
+    # # Show update status
+    # if updated:
+    #     # st.success("✓ Configuration values have been updated. The page will reload to apply changes.")
+    #     None
     
     # DXF download button
     if "dxf_bytes" in results and results["dxf_bytes"] is not None:
@@ -4785,37 +4912,59 @@ def main():
         index=list(SENSOR_UNITS["length"].keys()).index(st.session_state.get("display_length_unit", "mm")),
     )
 
-    # Check if config was updated in session state (e.g., from chamber design tab)
+    # Check if config was updated in session state (e.g., from chamber design tab or config editor)
     # This can happen if the page reruns after a config update
     # Load the updated config BEFORE config_editor so it doesn't get overwritten
     if "config_dict" in st.session_state and st.session_state.get("config_updated", False):
         # Use the updated config from session state
         config_dict = st.session_state["config_dict"]
         config_obj = PintleEngineConfig(**config_dict)
-        # Clear the update flag
+        if st.session_state.get("config_updated_from_chamber_design", False):
+            st.sidebar.info("✓ Configuration updated from Chamber Design")
+            st.session_state["config_updated_from_chamber_design"] = False
+        elif st.session_state.get("config_updated_from_editor", False):
+            st.sidebar.info("✓ Configuration updated from sidebar")
+        # Clear the flag after using it
         st.session_state["config_updated"] = False
-        st.sidebar.info("✓ Configuration updated from Chamber Design")
 
     config_obj = config_editor(config_obj)
     # Use exclude_none=False to preserve all fields including None values
-    config_dict = config_obj.model_dump(exclude_none=False)
-    st.session_state["config_dict"] = config_dict
+    # BUT: Don't overwrite config_dict if it was just updated by chamber_design_view
+    # Only update if config wasn't just updated from chamber design
+    if not st.session_state.get("config_updated_from_chamber_design", False):
+        config_dict = config_obj.model_dump(exclude_none=False)
+        st.session_state["config_dict"] = config_dict
+    else:
+        # Use the updated config_dict from chamber design
+        config_dict = st.session_state.get("config_dict", config_obj.model_dump(exclude_none=False))
+        config_obj = PintleEngineConfig(**config_dict)
     
     st.session_state["config_label"] = config_label
 
-    # Cache runner to avoid recreating CEA cache on every rerun
-    # Only recreate if config actually changed
+    # Import json for config hashing
     import json
-    config_str = json.dumps(config_dict, sort_keys=True, default=str)
-    config_hash = hash(config_str)
+    
+    # Get cached runner info
     cached_runner = st.session_state.get("cached_runner")
     cached_config_hash = st.session_state.get("cached_config_hash")
     
-    if cached_runner is None or cached_config_hash != config_hash:
+    # Get config_dict BEFORE chamber design tab runs to compare later
+    config_dict_before = st.session_state.get("config_dict", config_dict)
+    config_str_before = json.dumps(config_dict_before, sort_keys=True, default=str)
+    config_hash_before = hash(config_str_before)
+    
+    # Create/update runner using config_dict from session state (source of truth)
+    runner_config_dict = st.session_state.get("config_dict", config_dict)
+    runner_config_str = json.dumps(runner_config_dict, sort_keys=True, default=str)
+    runner_config_hash = hash(runner_config_str)
+    
+    if cached_runner is None or cached_config_hash != runner_config_hash:
         # Config changed or no cached runner - create new one
-        runner = PintleEngineRunner(config_obj)
+        # Use config_dict from session state (source of truth) to create runner
+        runner_config_obj = PintleEngineConfig(**runner_config_dict)
+        runner = PintleEngineRunner(runner_config_obj)
         st.session_state["cached_runner"] = runner
-        st.session_state["cached_config_hash"] = config_hash
+        st.session_state["cached_config_hash"] = runner_config_hash
     else:
         # Reuse cached runner
         runner = cached_runner
@@ -4830,6 +4979,28 @@ def main():
         "Flight Simulation",
         "Chamber Design",
     ])
+    
+    # Run chamber design tab - it updates st.session_state["config_dict"] when Calculate is pressed
+    # The download button uses st.session_state["config_dict"] which is the source of truth
+    with tab8:
+        config_obj = chamber_design_view(config_obj)
+        # chamber_design_view updates st.session_state["config_dict"] with calculated values
+    
+    # CRITICAL: After chamber design tab runs, check if config was updated and recreate runner
+    # This ensures Forward Mode and other tabs use the updated geometry immediately
+    updated_config_dict = st.session_state.get("config_dict", config_dict)
+    updated_config_str = json.dumps(updated_config_dict, sort_keys=True, default=str)
+    updated_config_hash = hash(updated_config_str)
+    
+    # If config was updated by chamber design (hash changed), recreate runner with new config
+    if config_hash_before != updated_config_hash:
+        runner_config_obj = PintleEngineConfig(**updated_config_dict)
+        runner = PintleEngineRunner(runner_config_obj)
+        st.session_state["cached_runner"] = runner
+        st.session_state["cached_config_hash"] = updated_config_hash
+        # Show info message that runner was updated
+        st.sidebar.success("✓ Runner updated with new chamber geometry!")
+    
     with tab1:
         forward_view(runner)
     with tab2:
@@ -4844,11 +5015,6 @@ def main():
         custom_plot_builder()
     with tab7:
         flight_sim_view(runner, config_obj, config_label)
-    with tab8:
-        config_obj = chamber_design_view(config_obj)
-        # Note: If config was updated, chamber_design_view will call st.rerun()
-        # which will cause the entire script to rerun and the runner will be recreated
-        # with the updated config at the top of main()
 
 
 if __name__ == "__main__":

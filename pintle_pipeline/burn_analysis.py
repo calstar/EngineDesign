@@ -91,7 +91,7 @@ def analyze_burn_degradation(
     
     # Total impulse
     burn_time = float(time_history[-1] - time_history[0])
-    total_impulse = float(np.trapz(thrust_history, time_history))  # N·s
+    total_impulse = float(np.trapezoid(thrust_history, time_history))  # N·s
     
     # Average performance
     avg_thrust = float(np.mean(thrust_history))
@@ -217,10 +217,10 @@ def calculate_mission_performance(
     burn_time = float(time_history[-1] - time_history[0])
     
     # Total impulse
-    total_impulse = float(np.trapz(thrust_history, time_history))  # N·s
+    total_impulse = float(np.trapezoid(thrust_history, time_history))  # N·s
     
     # Total propellant consumed
-    total_propellant = float(np.trapz(mdot_history, time_history))  # kg
+    total_propellant = float(np.trapezoid(mdot_history, time_history))  # kg
     
     # Average thrust
     avg_thrust = float(np.mean(thrust_history))

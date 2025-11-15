@@ -344,6 +344,7 @@ class ChamberConfig(BaseModel):
         gt=0,
         description="Characteristic length [m] = V_chamber / A_throat. If not specified, calculated from volume and A_throat."
     )
+    chamber_inner_diameter: Optional[float] = Field(default=None, gt=0, description="Chamber inner diameter [m]")
     # Design parameters (optional, used for geometry generation)
     design_pressure: Optional[float] = Field(default=None, gt=0, description="Design chamber pressure [Pa] used for geometry calculation")
     design_thrust: Optional[float] = Field(default=None, gt=0, description="Design thrust [N] used for geometry calculation")
@@ -355,6 +356,7 @@ class NozzleConfig(BaseModel):
     A_throat: float = Field(gt=0, description="Throat area [m²]")
     A_exit: float = Field(gt=0, description="Exit area [m²]")
     expansion_ratio: float = Field(gt=1, description="Expansion ratio (A_exit/A_throat)")
+    exit_diameter: Optional[float] = Field(default=None, gt=0, description="Nozzle exit diameter [m]")
     efficiency: float = Field(default=0.98, ge=0, le=1, description="Nozzle efficiency")
 
 
