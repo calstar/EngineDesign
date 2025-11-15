@@ -326,52 +326,6 @@ class CombustionEfficiencyConfig(BaseModel):
         default=True,
         description="Use shifting equilibrium in nozzle (composition changes with expansion)"
     )
-    we_reference: float = Field(
-        default=20.0,
-        gt=0,
-        description="Reference Weber number for good atomization"
-    )
-    we_penalty_exponent: float = Field(
-        default=1.0,
-        gt=0,
-        description="Exponent for Weber-number-based penalty"
-    )
-    mixture_efficiency_floor: float = Field(
-        default=0.4,
-        ge=0,
-        le=1,
-        description="Minimum mixture efficiency multiplier"
-    )
-    use_cooling_coupling: bool = Field(
-        default=False,
-        description="Couple cooling heat removal to combustion efficiency"
-    )
-    cooling_efficiency_floor: float = Field(
-        default=0.4,
-        ge=0,
-        le=1,
-        description="Minimum cooling efficiency multiplier"
-    )
-    use_turbulence_coupling: bool = Field(
-        default=False,
-        description="Couple injector/chamber turbulence intensity to combustion efficiency"
-    )
-    target_turbulence_intensity: float = Field(
-        default=0.08,
-        gt=0,
-        description="Target turbulence intensity for full mixing efficiency"
-    )
-    turbulence_penalty_exponent: float = Field(
-        default=1.0,
-        ge=0,
-        description="Exponent for turbulence-based efficiency modifier"
-    )
-    turbulence_efficiency_floor: float = Field(
-        default=0.5,
-        ge=0,
-        le=1,
-        description="Minimum efficiency multiplier attributable to turbulence effects"
-    )
 
 
 class CombustionConfig(BaseModel):
@@ -471,6 +425,7 @@ class FinsConfig(BaseModel):
 class MotorConfig(BaseModel):
     """Motor configuration for flight simulation"""
     dry_mass: float = Field(gt=0, description="Motor dry mass [kg]")
+    inertia: list[float] = Field(description="Motor inertia [kg·m²]")
 
 
 class RocketConfig(BaseModel):
@@ -479,9 +434,10 @@ class RocketConfig(BaseModel):
     inertia: list[float] = Field(description="Rocket inertia [kg·m²]")
     radius: float = Field(gt=0, description="Rocket radius [m]")
     cm_wo_motor: float = Field(description="Center of mass without motor [m]")
+    dry_mass: float = Field(gt=0, description="Dry mass [kg]")
     motor_inertia: list[float] = Field(description="Motor inertia [kg·m²]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
-    motor: MotorConfig = Field(description="Motor configuration")
+    motor: Optional[MotorConfig] = Field(default=None, description="Motor configuration")
 
 
 class EnvironmentConfig(BaseModel):

@@ -10,8 +10,14 @@ from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
 
 import sys
+import warnings
 
 import copy
+
+# Suppress font warnings (corrupted font files on system)
+warnings.filterwarnings("ignore", message=".*stringOffset.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="matplotlib")
+warnings.filterwarnings("ignore", category=UserWarning, module="plotly")
 
 import numpy as np
 import pandas as pd
@@ -3531,17 +3537,30 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         nozzle = working_copy["nozzle"]
         chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber.get("volume", 1e-3)), format="%.6f")
         chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber["A_throat"]), format="%.6f")
+        # Handle None values properly
+        chamber_length = chamber.get("length")
+        if chamber_length is None:
+            chamber_length = 0.5
+        config_label = st.session_state.get("config_label", "default")
         chamber["length"] = length_number_input(
             "Chamber length",
-            float(chamber.get("length", 0.5)),
+            float(chamber_length),
             min_m=0.01,
             max_m=3.0,
             step_m=0.01,
             key=f"chamber_length_{config_label}",
         )
+        # Handle None values for Lstar
+        chamber_lstar = chamber.get("Lstar")
+        if chamber_lstar is None:
+            # Calculate from volume and A_throat if available
+            if chamber.get("volume") and chamber.get("A_throat"):
+                chamber_lstar = chamber["volume"] / chamber["A_throat"]
+            else:
+                chamber_lstar = 0.5
         chamber["Lstar"] = length_number_input(
             "Characteristic length L*",
-            float(chamber["Lstar"]),
+            float(chamber_lstar),
             min_m=0.1,
             max_m=5.0,
             step_m=0.05,
@@ -3699,6 +3718,465 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             return config
 
     return PintleEngineConfig(**st.session_state["config_dict"])
+
+
+def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
+    """Chamber Design tab - calculates chamber geometry and updates config."""
+    st.header("Chamber Design")
+    st.markdown("Calculate chamber geometry from design parameters and update configuration.")
+    
+    # Check if we have stored calculation results from a previous run
+    has_stored_results = "chamber_calc_results" in st.session_state
+    stored_results = None
+    if has_stored_results:
+        stored_results = st.session_state["chamber_calc_results"]
+    
+    # Get current config values for defaults
+    config_dict = config_obj.model_dump()
+    
+    # Conversion factors (use module-level PSI_TO_PA and PA_TO_PSI)
+    LBF_TO_N = 4.44822
+    N_TO_LBF = 1.0 / LBF_TO_N
+    IN_TO_M = 0.0254
+    M_TO_IN = 1.0 / IN_TO_M
+    
+    # Get default values from config if they exist (in metric)
+    pc_design_default_metric = 2.068e6  # Pa (300 psi default)
+    thrust_design_default_metric = 6000.0  # N
+    force_coefficient_default = 1.4
+    diameter_inner_default_metric = 0.08636  # m (3.4 inches)
+    diameter_exit_default_metric = 0.1016  # m (4 inches)
+    l_star_default_metric = 1.27  # m
+    
+    # Try to get values from config
+    if "chamber" in config_dict:
+        chamber = config_dict["chamber"]
+        if "Lstar" in chamber and chamber["Lstar"] is not None:
+            l_star_default_metric = float(chamber["Lstar"])
+        # Use design parameters from config if available
+        if "design_pressure" in chamber and chamber["design_pressure"] is not None:
+            pc_design_default_metric = float(chamber["design_pressure"])
+        if "design_thrust" in chamber and chamber["design_thrust"] is not None:
+            thrust_design_default_metric = float(chamber["design_thrust"])
+        if "design_force_coefficient" in chamber and chamber["design_force_coefficient"] is not None:
+            force_coefficient_default = float(chamber["design_force_coefficient"])
+        
+        # Get diameter_inner from regen_cooling or calculate from volume/length
+        if "regen_cooling" in config_dict and config_dict["regen_cooling"] is not None:
+            regen = config_dict["regen_cooling"]
+            if "chamber_inner_diameter" in regen and regen["chamber_inner_diameter"] is not None:
+                diameter_inner_default_metric = float(regen["chamber_inner_diameter"])
+        # If not in regen, try to calculate from volume and length
+        if diameter_inner_default_metric == 0.08636:  # Still using default
+            if "volume" in chamber and "length" in chamber:
+                volume = chamber.get("volume")
+                length = chamber.get("length")
+                if volume and length and float(volume) > 0 and float(length) > 0:
+                    area = float(volume) / float(length)
+                    diameter_inner_default_metric = np.sqrt(4.0 * area / np.pi)
+        
+        # Get diameter_exit from nozzle A_exit or calculate from expansion_ratio
+        if "nozzle" in config_dict:
+            nozzle = config_dict["nozzle"]
+            if "A_exit" in nozzle and nozzle["A_exit"] is not None:
+                A_exit = float(nozzle["A_exit"])
+                diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
+            elif "expansion_ratio" in nozzle and "A_throat" in chamber:
+                expansion_ratio = float(nozzle["expansion_ratio"])
+                A_throat = float(chamber["A_throat"])
+                A_exit = expansion_ratio * A_throat
+                diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
+    
+    # Input section
+    # Note: Streamlit forms submit on Enter by default - user must click button to calculate
+    st.info("💡 **Tip:** Press Enter in any field to update values, but click the button below to calculate geometry.")
+    with st.form("chamber_design_form", clear_on_submit=False):
+        st.subheader("Design Parameters")
+        
+        # Unit system toggle
+        unit_system = st.radio(
+            "Unit System",
+            ["Metric", "Imperial"],
+            horizontal=True,
+            key="chamber_unit_system"
+        )
+        
+        # Convert defaults based on unit system
+        if unit_system == "Imperial":
+            pc_design_default = pc_design_default_metric * PA_TO_PSI  # PSI (using module-level constant)
+            thrust_design_default = thrust_design_default_metric * N_TO_LBF  # lbf
+            diameter_inner_default = diameter_inner_default_metric * M_TO_IN  # inches
+            diameter_exit_default = diameter_exit_default_metric * M_TO_IN  # inches
+            l_star_default = l_star_default_metric * M_TO_IN  # inches
+            
+            # Pressure limits in PSI
+            pc_min = 100000.0 * PA_TO_PSI
+            pc_max = 20e6 * PA_TO_PSI
+            pc_step = 10000.0 * PA_TO_PSI
+            
+            # Thrust limits in lbf
+            thrust_min = 100.0 * N_TO_LBF
+            thrust_max = 100000.0 * N_TO_LBF
+            thrust_step = 100.0 * N_TO_LBF
+            
+            # Length limits in inches
+            length_min = 0.01 * M_TO_IN
+            length_max = 1.0 * M_TO_IN
+            length_step = 0.001 * M_TO_IN
+            l_star_min = 0.1 * M_TO_IN
+            l_star_max = 5.0 * M_TO_IN
+            l_star_step = 0.01 * M_TO_IN
+            
+            pc_unit = "PSI"
+            thrust_unit = "lbf"
+            length_unit = "in"
+        else:  # Metric
+            pc_design_default = pc_design_default_metric  # Pa
+            thrust_design_default = thrust_design_default_metric  # N
+            diameter_inner_default = diameter_inner_default_metric  # m
+            diameter_exit_default = diameter_exit_default_metric  # m
+            l_star_default = l_star_default_metric  # m
+            
+            pc_min = 100000.0
+            pc_max = 20e6
+            pc_step = 10000.0
+            
+            thrust_min = 100.0
+            thrust_max = 100000.0
+            thrust_step = 100.0
+            
+            length_min = 0.01
+            length_max = 1.0
+            length_step = 0.001
+            l_star_min = 0.1
+            l_star_max = 5.0
+            l_star_step = 0.01
+            
+            pc_unit = "Pa"
+            thrust_unit = "N"
+            length_unit = "m"
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            pc_design = st.number_input(
+                f"Design Chamber Pressure [{pc_unit}]",
+                min_value=pc_min,
+                max_value=pc_max,
+                value=pc_design_default,
+                step=pc_step,
+                format="%.2f" if unit_system == "Imperial" else "%.0f",
+                key="chamber_pc_design"
+            )
+            thrust_design = st.number_input(
+                f"Design Thrust [{thrust_unit}]",
+                min_value=thrust_min,
+                max_value=thrust_max,
+                value=thrust_design_default,
+                step=thrust_step,
+                format="%.2f" if unit_system == "Imperial" else "%.1f",
+                key="chamber_thrust_design"
+            )
+            force_coefficient = st.number_input(
+                "Force Coefficient",
+                min_value=1.0,
+                max_value=2.0,
+                value=force_coefficient_default,
+                step=0.1,
+                format="%.2f",
+                key="chamber_force_coefficient"
+            )
+        
+        with col2:
+            diameter_inner = st.number_input(
+                f"Chamber Inner Diameter [{length_unit}]",
+                min_value=length_min,
+                max_value=length_max,
+                value=diameter_inner_default,
+                step=length_step,
+                format="%.4f" if unit_system == "Imperial" else "%.6f",
+                key="chamber_diameter_inner"
+            )
+            diameter_exit = st.number_input(
+                f"Exit Diameter [{length_unit}]",
+                min_value=length_min,
+                max_value=length_max,
+                value=diameter_exit_default,
+                step=length_step,
+                format="%.4f" if unit_system == "Imperial" else "%.6f",
+                key="chamber_diameter_exit"
+            )
+            l_star = st.number_input(
+                f"L* (Characteristic Length) [{length_unit}]",
+                min_value=l_star_min,
+                max_value=l_star_max,
+                value=l_star_default,
+                step=l_star_step,
+                format="%.4f",
+                key="chamber_l_star"
+            )
+        
+        calculate_button = st.form_submit_button("Calculate Chamber Geometry", type="primary", use_container_width=False)
+    
+    if calculate_button:
+        try:
+            # Convert inputs to metric for calculation
+            if unit_system == "Imperial":
+                pc_design_metric = pc_design * PSI_TO_PA  # Convert PSI to Pa (using module-level constant)
+                thrust_design_metric = thrust_design * LBF_TO_N
+                diameter_inner_metric = diameter_inner * IN_TO_M
+                diameter_exit_metric = diameter_exit * IN_TO_M
+                l_star_metric = l_star * IN_TO_M
+            else:
+                pc_design_metric = pc_design
+                thrust_design_metric = thrust_design
+                diameter_inner_metric = diameter_inner
+                diameter_exit_metric = diameter_exit
+                l_star_metric = l_star
+            
+            # Calculate chamber geometry
+            with st.spinner("Calculating chamber geometry..."):
+                pts, table_data, total_chamber_length = chamber_geometry_calc(
+                    pc_design=pc_design_metric,
+                    thrust_design=thrust_design_metric,
+                    force_coeffcient=force_coefficient,
+                    diameter_inner=diameter_inner_metric,
+                    diameter_exit=diameter_exit_metric,
+                    l_star=l_star_metric,
+                    do_plot=False,
+                    steps=200
+                )
+            
+            # Extract calculated values from table_data
+            # table_data format: [headers, row1, row2, ...]
+            # Each row: [parameter_name, metric_value, metric_unit, imperial_value, imperial_unit]
+            calculated_values = {}
+            for row in table_data[1:]:  # Skip header row
+                param_name = row[0]
+                metric_value_str = str(row[1]).strip()
+                # Parse the metric value (handles scientific notation)
+                try:
+                    # Python's float() handles scientific notation automatically
+                    metric_value = float(metric_value_str)
+                    calculated_values[param_name] = metric_value
+                except (ValueError, TypeError):
+                    # Skip if we can't parse it
+                    pass
+            
+            # Also use the directly returned total_chamber_length as a fallback
+            if "Total Chamber Length" not in calculated_values and total_chamber_length is not None:
+                calculated_values["Total Chamber Length"] = total_chamber_length
+            
+            # Update config with calculated values
+            config_dict = config_obj.model_dump(exclude_none=False)
+            updated = False
+            
+            # Ensure chamber section exists
+            if "chamber" not in config_dict:
+                config_dict["chamber"] = {}
+            
+            # Update chamber section - always update these if calculated
+            if "Chamber Volume" in calculated_values:
+                config_dict["chamber"]["volume"] = calculated_values["Chamber Volume"]
+                updated = True
+            if "Throat Area" in calculated_values:
+                config_dict["chamber"]["A_throat"] = calculated_values["Throat Area"]
+                updated = True
+            if "L*" in calculated_values:
+                config_dict["chamber"]["Lstar"] = calculated_values["L*"]
+                updated = True
+            # Update chamber length with total chamber length (cylindrical + contraction)
+            if "Total Chamber Length" in calculated_values:
+                config_dict["chamber"]["length"] = calculated_values["Total Chamber Length"]
+                updated = True
+            
+            # Store design parameters used for geometry calculation
+            config_dict["chamber"]["design_pressure"] = pc_design_metric
+            config_dict["chamber"]["design_thrust"] = thrust_design_metric
+            config_dict["chamber"]["design_force_coefficient"] = force_coefficient
+            updated = True
+            
+            # Update nozzle section
+            if "nozzle" in config_dict:
+                if "Throat Area" in calculated_values and "A_throat" in config_dict["nozzle"]:
+                    config_dict["nozzle"]["A_throat"] = calculated_values["Throat Area"]
+                    updated = True
+                if "Exit Area" in calculated_values and "A_exit" in config_dict["nozzle"]:
+                    config_dict["nozzle"]["A_exit"] = calculated_values["Exit Area"]
+                    updated = True
+                if "Expansion Ratio" in calculated_values and "expansion_ratio" in config_dict["nozzle"]:
+                    config_dict["nozzle"]["expansion_ratio"] = calculated_values["Expansion Ratio"]
+                    updated = True
+            
+            # Update combustion.cea.expansion_ratio if it exists
+            if "combustion" in config_dict and "cea" in config_dict["combustion"]:
+                if "Expansion Ratio" in calculated_values and "expansion_ratio" in config_dict["combustion"]["cea"]:
+                    config_dict["combustion"]["cea"]["expansion_ratio"] = calculated_values["Expansion Ratio"]
+                    updated = True
+            
+            # Store calculation results in session state so they persist after rerun
+            # Note: config_dict contains the updated values but they are NOT automatically loaded
+            st.session_state["chamber_calc_results"] = {
+                "pts": pts,
+                "table_data": table_data,
+                "calculated_values": calculated_values,
+                "config_dict": config_dict,
+                "updated": updated  # This just indicates values were calculated, not that they're loaded
+            }
+            
+            # Generate DXF file for download
+            dxf_bytes = None
+            try:
+                import tempfile
+                import os
+                
+                # Generate DXF to a temporary file
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.dxf', delete=False) as tmp_file:
+                    tmp_dxf_path = tmp_file.name
+                
+                # Generate DXF using chamber_geometry_calc
+                _, _, _ = chamber_geometry_calc(
+                    pc_design=pc_design_metric,
+                    thrust_design=thrust_design_metric,
+                    force_coeffcient=force_coefficient,
+                    diameter_inner=diameter_inner_metric,
+                    diameter_exit=diameter_exit_metric,
+                    l_star=l_star_metric,
+                    do_plot=False,
+                    steps=200,
+                    export_dxf=tmp_dxf_path
+                )
+                
+                # Read the DXF file
+                with open(tmp_dxf_path, 'rb') as f:
+                    dxf_bytes = f.read()
+                
+                # Clean up temporary file
+                os.unlink(tmp_dxf_path)
+                
+                # Store DXF bytes in session state
+                st.session_state["chamber_dxf_bytes"] = dxf_bytes
+            except ImportError:
+                st.warning("ezdxf library is required for DXF export. Install it with: pip install ezdxf")
+            except Exception as e:
+                st.warning(f"Error generating DXF: {str(e)}")
+            
+            # Store DXF bytes in results for display
+            results_for_display = {
+                "pts": pts,
+                "table_data": table_data,
+                "calculated_values": calculated_values,
+                "config_dict": config_dict,
+                "updated": updated,
+                "dxf_bytes": dxf_bytes
+            }
+            
+            # Store results in session state FIRST (before any rerun)
+            st.session_state["chamber_calc_results"] = {
+                "pts": pts,
+                "table_data": table_data,
+                "calculated_values": calculated_values,
+                "config_dict": config_dict,
+                "updated": updated,
+                "dxf_bytes": dxf_bytes
+            }
+            if dxf_bytes:
+                st.session_state["chamber_dxf_bytes"] = dxf_bytes
+            
+            # Update session state config_dict and mark as updated
+            st.session_state["config_dict"] = config_dict
+            st.session_state["config_updated"] = True
+            
+            # Display results immediately after calculation
+            _display_chamber_results(results_for_display)
+            
+        except Exception as e:
+            st.error(f"Error calculating chamber geometry: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    # Display stored results if they exist (from previous calculation, not the one we just did)
+    # Only display if we didn't just calculate (to avoid double display)
+    if has_stored_results and stored_results and not calculate_button:
+        # Add DXF bytes to stored results if available
+        display_results = stored_results.copy()
+        if "chamber_dxf_bytes" in st.session_state:
+            display_results["dxf_bytes"] = st.session_state["chamber_dxf_bytes"]
+        else:
+            display_results["dxf_bytes"] = None
+        
+        # Display the results (they persist in session state after form submission)
+        _display_chamber_results(display_results)
+    
+    return config_obj
+
+
+def _display_chamber_results(results: dict) -> None:
+    """Helper function to display chamber calculation results."""
+    pts = results["pts"]
+    table_data = results["table_data"]
+    config_dict = results["config_dict"]
+    updated = results["updated"]
+    
+    # Display results
+    st.subheader("Chamber Contour")
+    
+    # Create contour plot using plotly
+    fig_contour = go.Figure()
+    fig_contour.add_trace(go.Scatter(
+        x=pts[:, 0],
+        y=pts[:, 1],
+        mode='lines',
+        name='Chamber Contour',
+        line=dict(color='black', width=2)
+    ))
+    # Add mirror image for full contour
+    fig_contour.add_trace(go.Scatter(
+        x=pts[:, 0],
+        y=-pts[:, 1],
+        mode='lines',
+        name='Lower Contour',
+        line=dict(color='black', width=2),
+        showlegend=False
+    ))
+    # Add centerline
+    x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+    fig_contour.add_trace(go.Scatter(
+        x=[x_min, x_max],
+        y=[0, 0],
+        mode='lines',
+        name='Centerline',
+        line=dict(color='gray', width=1, dash='dash'),
+        showlegend=False
+    ))
+    
+    fig_contour.update_layout(
+        title="Chamber Contour (Half-Section)",
+        xaxis_title="Axial Position [m]",
+        yaxis_title="Radius [m]",
+        height=500,
+        showlegend=True
+    )
+    st.plotly_chart(fig_contour, use_container_width=True)
+    
+    # Display geometry parameters table
+    st.subheader("Chamber Geometry Parameters")
+    if table_data:
+        df = pd.DataFrame(table_data[1:], columns=table_data[0])
+        st.dataframe(df, use_container_width=True)
+    
+    # Show update status
+    if updated:
+        st.success("✓ Configuration values have been updated. The page will reload to apply changes.")
+    
+    # DXF download button
+    if "dxf_bytes" in results and results["dxf_bytes"] is not None:
+        st.download_button(
+            label="Download Chamber Contour (DXF)",
+            data=results["dxf_bytes"],
+            file_name="chamber_contour.dxf",
+            mime="application/dxf",
+            key="chamber_dxf_download"  # Unique key to prevent duplicate element error
+        )
 
 
 def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, config_label: str) -> None:

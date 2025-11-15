@@ -102,61 +102,7 @@ def _compute_cea_point_chunk(
         
         try:
             out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps_to_use)
-            Tc, gamma, R, cstar, M = parse_cea_basic(out)
-            
-            try:
-                Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
-            except:
-                # Fallback: estimate from Isp
-                isp = chamber.estimate_Ambient_Isp(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
-                Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
-            
-            results.append((i, j, k_idx, cstar, Cf_ideal, Tc, gamma, R, M))
-        except Exception as e:
-            # On failure, store NaN values
-            results.append((i, j, k_idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan))
-    
-    return results
-
-
-def _compute_cea_point_chunk(
-    chunk: List[Tuple[int, int, int, float, float, float]],
-    ox_name: str,
-    fuel_name: str,
-    expansion_ratio: Optional[float] = None,
-) -> List[Tuple[int, int, int, float, float, float, float, float, float]]:
-    """
-    Worker function for parallel CEA cache building.
-    
-    Computes CEA properties for a chunk of grid points.
-    This function must be at module level for multiprocessing.
-    
-    Parameters:
-    -----------
-    chunk : List[Tuple[int, int, int, float, float, float]]
-        List of (i, j, k_idx, Pc_psia, MR, eps) tuples
-    ox_name : str
-        Oxidizer name
-    fuel_name : str
-        Fuel name
-    expansion_ratio : float, optional
-        Fixed expansion ratio (for 2D cache). If None, uses eps from chunk (3D cache)
-    
-    Returns:
-    --------
-    results : List[Tuple[int, int, int, float, float, float, float, float, float]]
-        List of (i, j, k_idx, cstar, Cf, Tc, gamma, R, M) tuples
-    """
-    chamber = CEA_Obj(oxName=ox_name, fuelName=fuel_name)
-    results = []
-    
-    for i, j, k_idx, Pc_psia, MR, eps in chunk:
-        # Use eps from chunk if provided (3D), otherwise use fixed expansion_ratio (2D)
-        eps_to_use = eps if expansion_ratio is None else expansion_ratio
-        
-        try:
-            out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps_to_use)
-            Tc, gamma, R, cstar, M = parse_cea_basic(out)
+            Tc, gamma, R, cstar, M, Isp = parse_cea_basic(out)
             
             try:
                 Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
@@ -256,30 +202,48 @@ class CEACache:
                 meta_loaded = None
 
         def _meta_matches(meta_loaded_dict: Optional[dict], meta_expected_dict: dict) -> bool:
+            """Check if cache is usable - lenient matching: only check critical fields"""
             if meta_loaded_dict is None:
                 return False
             try:
+                # Critical: propellant names must match
                 if meta_loaded_dict.get("ox_name") != meta_expected_dict["ox_name"]:
                     return False
                 if meta_loaded_dict.get("fuel_name") != meta_expected_dict["fuel_name"]:
                     return False
-                # Check dimensions match (2D vs 3D)
-                if meta_loaded_dict.get("dimensions", 2) != meta_expected_dict["dimensions"]:
-                    print(f"[WARNING] Cache dimension mismatch: {meta_loaded_dict.get('dimensions', 2)}D vs {meta_expected_dict['dimensions']}D")
+                # Critical: dimensions must match (2D vs 3D)
+                loaded_dims = meta_loaded_dict.get("dimensions", 2)
+                expected_dims = meta_expected_dict["dimensions"]
+                if loaded_dims != expected_dims:
+                    print(f"[WARNING] Cache dimension mismatch: {loaded_dims}D vs {expected_dims}D")
                     return False
-                if float(meta_loaded_dict.get("expansion_ratio", -1)) != float(meta_expected_dict["expansion_ratio"]):
-                    return False
-                if meta_loaded_dict.get("n_points") != meta_expected_dict["n_points"]:
-                    return False
-                if not np.allclose(meta_loaded_dict.get("Pc_range", []), meta_expected_dict["Pc_range"], atol=1e-6):
-                    return False
-                if not np.allclose(meta_loaded_dict.get("MR_range", []), meta_expected_dict["MR_range"], atol=1e-6):
-                    return False
-                # Check eps_range for 3D caches
-                if meta_expected_dict["dimensions"] == 3:
-                    if not np.allclose(meta_loaded_dict.get("eps_range", []), meta_expected_dict["eps_range"], atol=1e-6):
-                        return False
-            except Exception:
+                # Non-critical: ranges and n_points can differ - we can still interpolate
+                # Just warn if they're very different
+                loaded_pc_range = meta_loaded_dict.get("Pc_range", [])
+                expected_pc_range = meta_expected_dict.get("Pc_range", [])
+                if loaded_pc_range and expected_pc_range:
+                    # Check if requested range is within cached range (with some margin)
+                    if expected_pc_range[0] < loaded_pc_range[0] * 0.9 or expected_pc_range[1] > loaded_pc_range[1] * 1.1:
+                        print(f"[INFO] Requested Pc range {expected_pc_range} extends beyond cached range {loaded_pc_range}")
+                        print(f"[INFO] Will use trilinear interpolation - some extrapolation may occur")
+                
+                loaded_mr_range = meta_loaded_dict.get("MR_range", [])
+                expected_mr_range = meta_expected_dict.get("MR_range", [])
+                if loaded_mr_range and expected_mr_range:
+                    if expected_mr_range[0] < loaded_mr_range[0] * 0.9 or expected_mr_range[1] > loaded_mr_range[1] * 1.1:
+                        print(f"[INFO] Requested MR range {expected_mr_range} extends beyond cached range {loaded_mr_range}")
+                        print(f"[INFO] Will use trilinear interpolation - some extrapolation may occur")
+                
+                # For 3D caches, check eps_range similarly
+                if expected_dims == 3:
+                    loaded_eps_range = meta_loaded_dict.get("eps_range", [])
+                    expected_eps_range = meta_expected_dict.get("eps_range", [])
+                    if loaded_eps_range and expected_eps_range:
+                        if expected_eps_range[0] < loaded_eps_range[0] * 0.9 or expected_eps_range[1] > loaded_eps_range[1] * 1.1:
+                            print(f"[INFO] Requested eps range {expected_eps_range} extends beyond cached range {loaded_eps_range}")
+                            print(f"[INFO] Will use trilinear interpolation - some extrapolation may occur")
+            except Exception as e:
+                print(f"[WARNING] Error checking cache metadata: {e}")
                 return False
             return True
 
@@ -303,13 +267,46 @@ class CEACache:
             # Backwards compatibility: derive M from R
             self.M_table = 8314.462618 / self.R_table
         
-        # Verify grid matches
+        # Load grids from cache (use cached grids for interpolation)
+        # Trilinear interpolation can handle different grid ranges - no need to rebuild
         Pc_loaded = data["Pc"]
         MR_loaded = data["MR"]
         
-        if not np.allclose(Pc_loaded, self.Pc_grid) or not np.allclose(MR_loaded, self.MR_grid):
-            print("[WARNING] Cache grid doesn't match config, rebuilding...")
+        # Use cached grids instead of regenerating - trilinear interpolation can handle range differences
+        # Only rebuild if grids are completely incompatible (different sizes)
+        if len(Pc_loaded) != len(self.Pc_grid) or len(MR_loaded) != len(self.MR_grid):
+            print("[WARNING] Cache grid size doesn't match config, rebuilding...")
             self._build_cache()
+            return
+        
+        # For 3D caches, check eps grid
+        if self.use_3d:
+            if "eps" in data:
+                eps_loaded = data["eps"]
+                if len(eps_loaded) != len(self.eps_grid):
+                    print("[WARNING] Cache eps grid size doesn't match config, rebuilding...")
+                    self._build_cache()
+                    return
+                # Use cached eps grid
+                self.eps_grid = eps_loaded
+            else:
+                print("[WARNING] 3D cache missing eps grid, rebuilding...")
+                self._build_cache()
+                return
+        
+        # Use cached grids for interpolation (they may have different ranges, that's OK)
+        # Update our grid references to use cached grids
+        self.Pc_grid = Pc_loaded
+        self.MR_grid = MR_loaded
+        # Update min/max from loaded grids
+        self.Pc_min = float(Pc_loaded.min())
+        self.Pc_max = float(Pc_loaded.max())
+        self.MR_min = float(MR_loaded.min())
+        self.MR_max = float(MR_loaded.max())
+        if self.use_3d:
+            self.eps_min = float(self.eps_grid.min())
+            self.eps_max = float(self.eps_grid.max())
+        print(f"[INFO] Using cached grids - trilinear interpolation will handle any range differences")
     
     def _build_cache(self):
         """Build CEA lookup tables with parallel processing support"""
@@ -396,7 +393,7 @@ class CEACache:
                     
                     try:
                         out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps)
-                        Tc, gamma, R, cstar, M = parse_cea_basic(out)
+                        Tc, gamma, R, cstar, M, Isp = parse_cea_basic(out)
                         
                         try:
                             Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps)[0]
