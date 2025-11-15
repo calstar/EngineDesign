@@ -9,6 +9,8 @@
 !pintle_models/
 !pintle_pipeline/
 !examples/pintle_engine/
+!examples/pintle_engine/copv_pressure/
+!chamber/
 
 # Within pintle directories, ignore cache and compiled files
 pintle_models/**/__pycache__/

@@ -13,9 +13,9 @@ import time
 from .config_schemas import CEAConfig
 
 
-def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
+def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float, float]:
     """
-    Extract Tc, gamma, R, and c* from NASA CEA text output (chamber values only).
+    Extract Tc, gamma, R, c*, and Isp from NASA CEA text output (chamber values only).
     
     Returns:
     --------
@@ -23,6 +23,8 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
     gamma : float
     R : float [J/(kg·K)]
     cstar : float [m/s]
+    M : float [kg/kmol]
+    Isp : float [s] (ambient Isp, or NaN if not found)
     """
     # Extract the main performance block
     block_match = re.search(r'THEORETICAL ROCKET PERFORMANCE[\s\S]+?MOLE FRACTIONS', out)
@@ -52,7 +54,69 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
     if re.search(r'CSTAR.*FT/SEC', block, re.IGNORECASE):
         cstar *= 0.3048
 
-    return Tc, gamma, R, cstar, M
+    # Extract Isp (ambient Isp, typically appears as "Isp, M/SEC" or "Isp, SEC")
+    # Look for Isp in the performance block - it may appear in different formats
+    isp_match = re.search(r'Isp[, ]*(?:M/SEC|SEC|M/S)?\s+([\d.E+-]+)', block, re.IGNORECASE)
+    if not isp_match:
+        # Try alternative pattern: look for "Isp" followed by numbers
+        isp_match = re.search(r'Isp[:\s]+([\d.E+-]+)', block, re.IGNORECASE)
+    Isp = float(isp_match.group(1)) if isp_match else np.nan
+
+    return Tc, gamma, R, cstar, M, Isp
+
+
+def _compute_cea_point_chunk(
+    chunk: List[Tuple[int, int, int, float, float, float]],
+    ox_name: str,
+    fuel_name: str,
+    expansion_ratio: Optional[float] = None,
+) -> List[Tuple[int, int, int, float, float, float, float, float, float]]:
+    """
+    Worker function for parallel CEA cache building.
+    
+    Computes CEA properties for a chunk of grid points.
+    This function must be at module level for multiprocessing.
+    
+    Parameters:
+    -----------
+    chunk : List[Tuple[int, int, int, float, float, float]]
+        List of (i, j, k_idx, Pc_psia, MR, eps) tuples
+    ox_name : str
+        Oxidizer name
+    fuel_name : str
+        Fuel name
+    expansion_ratio : float, optional
+        Fixed expansion ratio (for 2D cache). If None, uses eps from chunk (3D cache)
+    
+    Returns:
+    --------
+    results : List[Tuple[int, int, int, float, float, float, float, float, float]]
+        List of (i, j, k_idx, cstar, Cf, Tc, gamma, R, M) tuples
+    """
+    chamber = CEA_Obj(oxName=ox_name, fuelName=fuel_name)
+    results = []
+    
+    for i, j, k_idx, Pc_psia, MR, eps in chunk:
+        # Use eps from chunk if provided (3D), otherwise use fixed expansion_ratio (2D)
+        eps_to_use = eps if expansion_ratio is None else expansion_ratio
+        
+        try:
+            out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps_to_use)
+            Tc, gamma, R, cstar, M = parse_cea_basic(out)
+            
+            try:
+                Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
+            except:
+                # Fallback: estimate from Isp
+                isp = chamber.estimate_Ambient_Isp(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
+                Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
+            
+            results.append((i, j, k_idx, cstar, Cf_ideal, Tc, gamma, R, M))
+        except Exception as e:
+            # On failure, store NaN values
+            results.append((i, j, k_idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan))
+    
+    return results
 
 
 def _compute_cea_point_chunk(

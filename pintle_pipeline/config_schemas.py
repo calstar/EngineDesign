@@ -390,6 +390,10 @@ class ChamberConfig(BaseModel):
         gt=0,
         description="Characteristic length [m] = V_chamber / A_throat. If not specified, calculated from volume and A_throat."
     )
+    # Design parameters (optional, used for geometry generation)
+    design_pressure: Optional[float] = Field(default=None, gt=0, description="Design chamber pressure [Pa] used for geometry calculation")
+    design_thrust: Optional[float] = Field(default=None, gt=0, description="Design thrust [N] used for geometry calculation")
+    design_force_coefficient: Optional[float] = Field(default=None, gt=0, description="Design force coefficient used for geometry calculation")
 
 
 class NozzleConfig(BaseModel):

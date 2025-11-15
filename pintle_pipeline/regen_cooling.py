@@ -331,7 +331,12 @@ def compute_regen_heat_transfer(
             throat_area = gas_props.get("A_throat", 1e-3)
             chamber_d_inner = np.sqrt(4.0 * throat_area / np.pi)
 
-    chamber_length = config.channel_length
+    # Use chamber_length from gas_props (comes from chamber.length in config)
+    # This is the actual physical chamber length, which should match channel_length
+    chamber_length = gas_props.get("chamber_length", config.channel_length)
+    # Fallback to config.channel_length if not in gas_props
+    if chamber_length <= 0:
+        chamber_length = config.channel_length
     circumference = np.pi * chamber_d_inner
     segment_count = max(config.n_segments, 1)
     segment_length = chamber_length / segment_count
@@ -434,11 +439,15 @@ def estimate_hot_wall_heat_flux(
     Pc = gas_props.get("Pc", 0.0)
     gamma = gas_props.get("gamma", 1.2)
     R_g = gas_props.get("R", 350.0)
-    chamber_length = 0.1
-    if config is not None and config.channel_length > 0:
+    # Prioritize chamber_length from gas_props (comes from chamber.length in config)
+    # This is the actual physical chamber length, not the regen channel length
+    chamber_length = gas_props.get("chamber_length", 0.1)
+    # Fallback to regen channel_length only if chamber_length is not in gas_props
+    if chamber_length <= 0 and config is not None and config.channel_length > 0:
         chamber_length = config.channel_length
-    else:
-        chamber_length = gas_props.get("chamber_length", chamber_length)
+    # Last resort: use default
+    if chamber_length <= 0:
+        chamber_length = 0.1
 
     chamber_d_inner = config.chamber_inner_diameter if config is not None else None
     if chamber_d_inner is None:

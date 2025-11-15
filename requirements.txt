@@ -8,3 +8,4 @@ rocketcea
 rocketpy
 streamlit
 plotly
+ezdxf
