@@ -167,8 +167,25 @@ class FilmCoolingConfig(BaseModel):
     cp_override: Optional[float] = Field(default=None, gt=0, description="Override specific heat for film coolant if different from bulk fuel [J/(kg·K)]")
 
 
+class GraphiteInsertConfig(BaseModel):
+    """Graphite throat insert configuration (separate from chamber ablator)"""
+    enabled: bool = Field(default=False, description="Enable graphite throat insert")
+    material_density: float = Field(default=1800.0, gt=0, description="Graphite density [kg/m³] (typical: 1800-2200)")
+    heat_of_ablation: float = Field(default=8.0e6, gt=0, description="Effective heat of ablation [J/kg] (graphite: ~8-12 MJ/kg)")
+    thermal_conductivity: float = Field(default=100.0, gt=0, description="Graphite thermal conductivity [W/(m·K)] (typical: 50-150)")
+    specific_heat: float = Field(default=710.0, gt=0, description="Graphite specific heat [J/(kg·K)]")
+    initial_thickness: float = Field(default=0.005, gt=0, description="Initial graphite insert thickness [m]")
+    surface_temperature_limit: float = Field(default=2500.0, gt=0, description="Maximum surface temperature before failure [K]")
+    oxidation_temperature: float = Field(default=800.0, gt=0, description="Onset temperature for oxidation [K]")
+    oxidation_rate: float = Field(default=1e-6, ge=0, description="Oxidation recession rate [m/s] at reference conditions")
+    recession_multiplier: Optional[float] = Field(default=None, gt=0, description="Recession multiplier vs chamber (if None, calculated from Bartz correlation). Typically 1.3-2.5")
+    char_layer_conductivity: float = Field(default=5.0, gt=0, description="Thermal conductivity of protective layer [W/(m·K)]")
+    char_layer_thickness: float = Field(default=0.0005, gt=0, description="Thickness of protective layer [m]")
+    coverage_fraction: float = Field(default=1.0, gt=0, le=1.0, description="Fraction of throat/nozzle with graphite insert")
+
+
 class AblativeCoolingConfig(BaseModel):
-    """Ablative cooling configuration"""
+    """Ablative cooling configuration for chamber liner"""
     enabled: bool = Field(default=False, description="Enable ablative cooling model")
     material_density: float = Field(default=1600.0, gt=0, description="Ablator density [kg/m³]")
     heat_of_ablation: float = Field(default=2.5e6, gt=0, description="Effective heat of ablation [J/kg]")
@@ -242,6 +259,8 @@ class SprayConfig(BaseModel):
 
 
 class CEAConfig(BaseModel):
+    use_parallel_cea_build: bool = Field(default=True, description="Use parallel processing for CEA cache building")
+    cea_parallel_workers: Optional[int] = Field(default=None, description="Number of parallel workers (None = auto-detect, limited to 8)")
     """CEA (Chemical Equilibrium Analysis) configuration"""
     ox_name: str = Field(default="LOX", description="Oxidizer name")
     fuel_name: str = Field(default="RP-1", description="Fuel name")
@@ -259,50 +278,53 @@ class CEAConfig(BaseModel):
         default=None,
         description="Expansion ratio range for 3D cache [min, max]. If None, uses 2D cache with fixed expansion_ratio"
     )
-    n_points: int = Field(default=200, gt=0, description="Number of grid points per dimension")
+    n_points: int = Field(default=34, gt=0, description="Number of grid points per dimension (34³ ≈ 39,300 points for 3D cache, similar to old 2D cache with ~40k points)")
 
 
 class CombustionEfficiencyConfig(BaseModel):
-    """Combustion efficiency (L* correction) configuration"""
-    model: Literal["exponential", "constant", "linear"] = Field(
+    """Combustion efficiency (L* correction) configuration
+    
+    NOTE: CEA uses EQUILIBRIUM flow (not frozen). The efficiency correction
+    accounts for finite chamber effects that prevent perfect equilibrium.
+    
+    Two models available:
+    1. Simple model: Exponential L* correction (backward compatible)
+    2. Advanced model: Physics-based with kinetics, mixing, turbulence
+    """
+    model: Literal["constant", "linear", "exponential"] = Field(
         default="exponential",
         description="Efficiency model type"
     )
-    C: float = Field(default=0.3, ge=0, le=1, description="Efficiency loss parameter")
-    K: float = Field(default=0.15, gt=0, description="Recovery rate parameter")
-    use_spray_correction: bool = Field(
+    C: float = Field(default=0.3, ge=0, le=1, description="Efficiency loss parameter (for exponential/linear models)")
+    K: float = Field(default=0.15, ge=0, description="Recovery rate parameter (for exponential model)")
+    use_spray_correction: bool = Field(default=False, description="Apply spray quality penalty")
+    spray_penalty_factor: float = Field(default=0.8, ge=0, le=1, description="Efficiency penalty if spray constraints violated")
+    use_mixture_coupling: bool = Field(default=True, description="Apply mixture quality corrections")
+    use_cooling_coupling: bool = Field(default=True, description="Apply cooling efficiency corrections")
+    use_turbulence_coupling: bool = Field(default=False, description="Apply turbulence corrections")
+    mixture_efficiency_floor: float = Field(default=0.25, ge=0, le=1, description="Minimum mixture efficiency")
+    cooling_efficiency_floor: float = Field(default=0.25, ge=0, le=1, description="Minimum cooling efficiency")
+    turbulence_efficiency_floor: float = Field(default=0.3, ge=0, le=1, description="Minimum turbulence efficiency")
+    target_turbulence_intensity: float = Field(default=0.08, ge=0, description="Target turbulence intensity")
+    turbulence_penalty_exponent: float = Field(default=1.0, gt=0, description="Turbulence penalty exponent")
+    target_smd_microns: float = Field(default=50.0, gt=0, description="Target SMD for good atomization [microns]")
+    xstar_limit_mm: float = Field(default=50.0, gt=0, description="Maximum evaporation length [mm]")
+    xstar_penalty_exponent: float = Field(default=2.0, gt=0, description="Evaporation length penalty exponent")
+    we_reference: float = Field(default=100.0, gt=0, description="Reference Weber number")
+    we_penalty_exponent: float = Field(default=0.5, gt=0, description="Weber number penalty exponent")
+    smd_penalty_exponent: float = Field(default=1.0, gt=0, description="SMD penalty exponent")
+    use_advanced_model: bool = Field(
         default=False,
-        description="Adjust efficiency based on spray quality"
+        description="Use advanced physics-based efficiency model (kinetics, mixing, turbulence)"
     )
-    spray_penalty_factor: float = Field(
-        default=0.8,
-        ge=0,
-        le=1,
-        description="Penalty factor if spray constraints violated"
+    # Finite-rate chemistry and reaction modeling
+    use_finite_rate_chemistry: bool = Field(
+        default=True,
+        description="Model finite-rate chemistry in chamber (reaction progress tracking)"
     )
-    use_mixture_coupling: bool = Field(
-        default=False,
-        description="Couple droplet metrics to combustion efficiency"
-    )
-    target_smd_microns: float = Field(
-        default=50.0,
-        gt=0,
-        description="Target SMD for full efficiency [µm]"
-    )
-    smd_penalty_exponent: float = Field(
-        default=1.5,
-        gt=0,
-        description="Exponent controlling how strongly large droplets penalize efficiency"
-    )
-    xstar_limit_mm: float = Field(
-        default=50.0,
-        gt=0,
-        description="Target evaporation length [mm]"
-    )
-    xstar_penalty_exponent: float = Field(
-        default=1.0,
-        gt=0,
-        description="Exponent for evaporation length penalty"
+    use_shifting_equilibrium: bool = Field(
+        default=True,
+        description="Use shifting equilibrium in nozzle (composition changes with expansion)"
     )
     we_reference: float = Field(
         default=20.0,
@@ -445,7 +467,6 @@ class FinsConfig(BaseModel):
 class MotorConfig(BaseModel):
     """Motor configuration for flight simulation"""
     dry_mass: float = Field(gt=0, description="Motor dry mass [kg]")
-    inertia: list[float] = Field(description="Motor inertia [kg·m²]")
 
 
 class RocketConfig(BaseModel):
@@ -454,10 +475,9 @@ class RocketConfig(BaseModel):
     inertia: list[float] = Field(description="Rocket inertia [kg·m²]")
     radius: float = Field(gt=0, description="Rocket radius [m]")
     cm_wo_motor: float = Field(description="Center of mass without motor [m]")
-    dry_mass: float = Field(gt=0, description="Dry mass [kg]")
     motor_inertia: list[float] = Field(description="Motor inertia [kg·m²]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
-    motor: Optional[MotorConfig] = Field(default=None, description="Motor configuration")
+    motor: MotorConfig = Field(description="Motor configuration")
 
 
 class EnvironmentConfig(BaseModel):
@@ -481,7 +501,8 @@ class PintleEngineConfig(BaseModel):
     feed_system: dict[str, FeedSystemConfig]  # "oxidizer" and "fuel"
     regen_cooling: Optional[RegenCoolingConfig] = Field(default=None, description="Regenerative cooling configuration (fuel only)")
     film_cooling: Optional[FilmCoolingConfig] = Field(default=None, description="Film cooling configuration")
-    ablative_cooling: Optional[AblativeCoolingConfig] = Field(default=None, description="Ablative cooling configuration")
+    ablative_cooling: Optional[AblativeCoolingConfig] = Field(default=None, description="Ablative cooling configuration for chamber liner")
+    graphite_insert: Optional[GraphiteInsertConfig] = Field(default=None, description="Graphite throat insert configuration (separate from chamber ablator)")
     discharge: dict[str, DischargeConfig]  # "oxidizer" and "fuel"
     spray: SprayConfig = Field(default_factory=SprayConfig)
     combustion: CombustionConfig = Field(default_factory=CombustionConfig)

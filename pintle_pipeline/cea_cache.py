@@ -4,8 +4,12 @@ import numpy as np
 import os
 import re
 import json
+import sys
 from rocketcea.cea_obj import CEA_Obj
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List, Dict, Any
+from multiprocessing import Pool, cpu_count
+from functools import partial
+import time
 from .config_schemas import CEAConfig
 
 
@@ -49,6 +53,60 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
         cstar *= 0.3048
 
     return Tc, gamma, R, cstar, M
+
+
+def _compute_cea_point_chunk(
+    chunk: List[Tuple[int, int, int, float, float, float]],
+    ox_name: str,
+    fuel_name: str,
+    expansion_ratio: Optional[float] = None,
+) -> List[Tuple[int, int, int, float, float, float, float, float, float]]:
+    """
+    Worker function for parallel CEA cache building.
+    
+    Computes CEA properties for a chunk of grid points.
+    This function must be at module level for multiprocessing.
+    
+    Parameters:
+    -----------
+    chunk : List[Tuple[int, int, int, float, float, float]]
+        List of (i, j, k_idx, Pc_psia, MR, eps) tuples
+    ox_name : str
+        Oxidizer name
+    fuel_name : str
+        Fuel name
+    expansion_ratio : float, optional
+        Fixed expansion ratio (for 2D cache). If None, uses eps from chunk (3D cache)
+    
+    Returns:
+    --------
+    results : List[Tuple[int, int, int, float, float, float, float, float, float]]
+        List of (i, j, k_idx, cstar, Cf, Tc, gamma, R, M) tuples
+    """
+    chamber = CEA_Obj(oxName=ox_name, fuelName=fuel_name)
+    results = []
+    
+    for i, j, k_idx, Pc_psia, MR, eps in chunk:
+        # Use eps from chunk if provided (3D), otherwise use fixed expansion_ratio (2D)
+        eps_to_use = eps if expansion_ratio is None else expansion_ratio
+        
+        try:
+            out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps_to_use)
+            Tc, gamma, R, cstar, M = parse_cea_basic(out)
+            
+            try:
+                Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
+            except:
+                # Fallback: estimate from Isp
+                isp = chamber.estimate_Ambient_Isp(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
+                Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
+            
+            results.append((i, j, k_idx, cstar, Cf_ideal, Tc, gamma, R, M))
+        except Exception as e:
+            # On failure, store NaN values
+            results.append((i, j, k_idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan))
+    
+    return results
 
 
 class CEACache:
@@ -190,20 +248,63 @@ class CEACache:
             self._build_cache()
     
     def _build_cache(self):
-        """Build CEA lookup tables (this takes a while)"""
+        """Build CEA lookup tables with parallel processing support"""
         print(f"[BUILDING] Building CEA cache (this will take a while)...")
-        print(f"   Grid: Pc ∈ [{self.Pc_min/1e6:.1f}, {self.Pc_max/1e6:.1f}] MPa")
-        print(f"         MR ∈ [{self.MR_min:.2f}, {self.MR_max:.2f}]")
+        print(f"   Grid: Pc ∈ [{self.Pc_min/1e6:.1f}, {self.Pc_max/1e6:.1f}] MPa ({self.n_points} points)")
+        print(f"         MR ∈ [{self.MR_min:.2f}, {self.MR_max:.2f}] ({self.n_points} points)")
         if self.use_3d:
-            print(f"         eps ∈ [{self.eps_min:.2f}, {self.eps_max:.2f}]")
-            print(f"         Points: {self.n_points}³ = {self.n_points**3}")
-            print(f"   [WARNING] This will take ~{self.n_points**3 * 0.5 / 60:.0f} minutes!")
+            print(f"         eps ∈ [{self.eps_min:.2f}, {self.eps_max:.2f}] ({self.n_points} points)")
+            total_points = self.n_points**3
+            print(f"         Total: {self.n_points}³ = {total_points} points")
+            print(f"   [WARNING] Sequential build would take ~{total_points * 0.5 / 60:.0f} minutes!")
         else:
-            print(f"         Points: {self.n_points}² = {self.n_points**2}")
+            total_points = self.n_points**2
+            print(f"         Total: {self.n_points}² = {total_points} points")
+            print(f"   [INFO] Sequential build would take ~{total_points * 0.5 / 60:.0f} minutes")
         
+        # Check for parallel processing option
+        # On Windows, multiprocessing with 'spawn' can cause memory issues when workers import heavy modules
+        # Disable parallel by default on Windows unless explicitly enabled
+        is_windows = sys.platform == 'win32'
+        use_parallel = getattr(self.config, 'use_parallel_cea_build', True)
+        n_workers = getattr(self.config, 'cea_parallel_workers', None)
+        
+        # Only parallelize for large grids and if not Windows (or Windows with explicit override)
+        should_use_parallel = use_parallel and total_points > 100
+        
+        if should_use_parallel and not is_windows:
+            # Linux/Mac: use parallel processing
+            if n_workers is None:
+                n_workers = min(cpu_count(), 8)  # Limit to 8 workers
+            print(f"   [PARALLEL] Using {n_workers} workers for parallel processing")
+            try:
+                self._build_cache_parallel(n_workers, total_points)
+            except (NameError, ImportError, MemoryError) as e:
+                print(f"   [WARNING] Parallel processing failed: {e}")
+                print(f"   [FALLBACK] Building cache sequentially")
+                self._build_cache_sequential(total_points)
+        elif should_use_parallel and is_windows:
+            # Windows: Default to sequential due to multiprocessing spawn issues
+            # Windows 'spawn' method requires re-importing the entire module in each worker,
+            # which causes memory issues with heavy imports (plotly, scipy, etc.)
+            # Sequential is slower but much more stable
+            print(f"   [WARNING] Windows detected - using sequential mode to avoid multiprocessing issues")
+            print(f"   [INFO] On Windows, parallel processing can cause memory/import errors")
+            print(f"   [INFO] Sequential mode is slower but stable (ETA: ~{total_points * 0.5 / 60:.1f} min)")
+            self._build_cache_sequential(total_points)
+        else:
+            print(f"   [SEQUENTIAL] Building cache sequentially")
+            self._build_cache_sequential(total_points)
+        
+        # Save to cache
+        self._save_cache()
+        print(f"💾 CEA cache saved to {self.cache_file}")
+    
+    def _build_cache_sequential(self, total_points: int):
+        """Sequential CEA cache building (original method)"""
         chamber = CEA_Obj(oxName=self.config.ox_name, fuelName=self.config.fuel_name)
         
-        # Initialize tables (2D or 3D)
+        # Initialize tables
         shape = (self.n_points, self.n_points, self.n_points) if self.use_3d else (self.n_points, self.n_points)
         self.cstar_table = np.zeros(shape)
         self.Cf_table = np.zeros(shape)
@@ -212,53 +313,33 @@ class CEACache:
         self.R_table = np.zeros(shape)
         self.M_table = np.zeros(shape)
         
-        # Convert Pc from Pa to psia for CEA
         Pc_psia_grid = self.Pc_grid / 6894.76
-        
-        # Build lookup tables
-        total_points = self.n_points**3 if self.use_3d else self.n_points**2
         point_count = 0
+        start_time = time.time()
         
         for i, Pc_psia in enumerate(Pc_psia_grid):
             for j, MR in enumerate(self.MR_grid):
-                # 3D: loop over expansion ratios
                 eps_list = self.eps_grid if self.use_3d else [self.config.expansion_ratio]
                 
                 for k_idx, eps in enumerate(eps_list):
                     point_count += 1
-                    if point_count % 100 == 0 or point_count == 1:
+                    elapsed = time.time() - start_time
+                    if point_count % max(10, total_points // 100) == 0 or point_count == 1:
                         pct = 100 * point_count / total_points
-                        print(f"   Progress: {point_count}/{total_points} ({pct:.1f}%) - Pc={Pc_psia:.0f} psi, MR={MR:.2f}, eps={eps:.1f}")
+                        rate = point_count / elapsed if elapsed > 0 else 0
+                        eta = (total_points - point_count) / rate if rate > 0 else 0
+                        print(f"   [{point_count}/{total_points}] {pct:.1f}% | Rate: {rate:.1f} pts/s | ETA: {eta/60:.1f} min | Pc={Pc_psia:.0f} psi, MR={MR:.2f}, eps={eps:.1f}")
                     
                     try:
-                        # Get full CEA output for detailed parsing
-                        out = chamber.get_full_cea_output(
-                            Pc=Pc_psia,
-                            MR=MR,
-                            eps=eps
-                        )
+                        out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps)
                         Tc, gamma, R, cstar, M = parse_cea_basic(out)
                         
-                        # Get Isp and calculate Cf_ideal
-                        isp = chamber.estimate_Ambient_Isp(
-                            Pc=Pc_psia,
-                            MR=MR,
-                            eps=eps
-                        )[0]
-                        
-                        # Cf_ideal from Isp: Cf = Isp * g0 / c*
-                        # But CEA can give Cf directly, so try that first
                         try:
-                            Cf_ideal = chamber.get_PambCf(
-                                Pc=Pc_psia,
-                                MR=MR,
-                                eps=eps
-                            )[0]
+                            Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps)[0]
                         except:
-                            # Fallback: Cf ≈ Isp * g0 / c* (approximate)
+                            isp = chamber.estimate_Ambient_Isp(Pc=Pc_psia, MR=MR, eps=eps)[0]
                             Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
                         
-                        # Store in 2D or 3D table
                         if self.use_3d:
                             self.cstar_table[i, j, k_idx] = cstar
                             self.Cf_table[i, j, k_idx] = Cf_ideal
@@ -290,11 +371,75 @@ class CEACache:
                             self.gamma_table[i, j] = np.nan
                             self.R_table[i, j] = np.nan
                             self.M_table[i, j] = np.nan
-        
-        # Save to cache
-        self._save_cache()
-        print(f"💾 CEA cache saved to {self.cache_file}")
     
+    def _build_cache_parallel(self, n_workers: int, total_points: int):
+        """Parallel CEA cache building with chunking"""
+        # Create all grid points as list of tuples (i, j, k, Pc_psia, MR, eps)
+        grid_points = []
+        Pc_psia_grid = self.Pc_grid / 6894.76
+        eps_list = self.eps_grid if self.use_3d else [self.config.expansion_ratio]
+        
+        for i, Pc_psia in enumerate(Pc_psia_grid):
+            for j, MR in enumerate(self.MR_grid):
+                for k_idx, eps in enumerate(eps_list):
+                    grid_points.append((i, j, k_idx, Pc_psia, MR, eps))
+        
+        # Initialize tables
+        shape = (self.n_points, self.n_points, self.n_points) if self.use_3d else (self.n_points, self.n_points)
+        self.cstar_table = np.zeros(shape)
+        self.Cf_table = np.zeros(shape)
+        self.Tc_table = np.zeros(shape)
+        self.gamma_table = np.zeros(shape)
+        self.R_table = np.zeros(shape)
+        self.M_table = np.zeros(shape)
+        
+        # Chunk grid points for parallel processing
+        chunk_size = max(1, len(grid_points) // (n_workers * 4))  # 4 chunks per worker
+        chunks = [grid_points[i:i+chunk_size] for i in range(0, len(grid_points), chunk_size)]
+        print(f"   [PARALLEL] Split into {len(chunks)} chunks of ~{chunk_size} points each")
+        
+        # Prepare worker function
+        # The function is defined at module level (above), so it's directly accessible
+        # On Windows with 'spawn', workers will re-import this module and find the function
+        worker_func = partial(
+            _compute_cea_point_chunk,
+            ox_name=self.config.ox_name,
+            fuel_name=self.config.fuel_name,
+            expansion_ratio=self.config.expansion_ratio if not self.use_3d else None,
+        )
+        
+        # Process chunks in parallel
+        start_time = time.time()
+        completed = 0
+        
+        with Pool(processes=n_workers) as pool:
+            results = pool.imap_unordered(worker_func, chunks)
+            
+            for chunk_results in results:
+                completed += len(chunk_results)
+                elapsed = time.time() - start_time
+                pct = 100 * completed / total_points
+                rate = completed / elapsed if elapsed > 0 else 0
+                eta = (total_points - completed) / rate if rate > 0 else 0
+                print(f"   [{completed}/{total_points}] {pct:.1f}% | Rate: {rate:.1f} pts/s | ETA: {eta/60:.1f} min")
+                
+                # Store results
+                for i, j, k_idx, cstar, Cf, Tc, gamma, R, M in chunk_results:
+                    if self.use_3d:
+                        self.cstar_table[i, j, k_idx] = cstar
+                        self.Cf_table[i, j, k_idx] = Cf
+                        self.Tc_table[i, j, k_idx] = Tc
+                        self.gamma_table[i, j, k_idx] = gamma
+                        self.R_table[i, j, k_idx] = R
+                        self.M_table[i, j, k_idx] = M
+                    else:
+                        self.cstar_table[i, j] = cstar
+                        self.Cf_table[i, j] = Cf
+                        self.Tc_table[i, j] = Tc
+                        self.gamma_table[i, j] = gamma
+                        self.R_table[i, j] = R
+                        self.M_table[i, j] = M
+
     def _save_cache(self):
         """Save CEA data to cache file"""
         meta = {
@@ -327,49 +472,113 @@ class CEACache:
         np.savez_compressed(self.cache_file, **save_dict)
     
     def _bilinear_interpolate(self, Pc: float, MR: float, table: np.ndarray) -> float:
-        """Bilinear interpolation in (Pc, MR) space"""
-        # Find indices
+        """
+        Bilinear interpolation in (Pc, MR) space with robust error handling.
+        
+        Uses improved boundary handling and NaN management for numerical stability.
+        """
+        # Validate inputs
+        if not (np.isfinite(Pc) and np.isfinite(MR)):
+            raise ValueError(f"Non-finite interpolation point: Pc={Pc}, MR={MR}")
+        
+        # Find indices using searchsorted (returns insertion point)
         i_pc = np.searchsorted(self.Pc_grid, Pc)
         i_mr = np.searchsorted(self.MR_grid, MR)
         
-        # Clamp to valid range
-        i_pc = np.clip(i_pc, 0, len(self.Pc_grid) - 1)
-        i_mr = np.clip(i_mr, 0, len(self.MR_grid) - 1)
-        
-        # Handle edge cases
-        if i_pc == 0:
-            i_pc = 1
-        if i_mr == 0:
-            i_mr = 1
+        # Handle boundary cases robustly
+        # If at or beyond upper bound, use last two points
         if i_pc >= len(self.Pc_grid):
             i_pc = len(self.Pc_grid) - 1
         if i_mr >= len(self.MR_grid):
             i_mr = len(self.MR_grid) - 1
         
+        # If at or below lower bound, use first two points
+        if i_pc == 0:
+            i_pc = 1
+        if i_mr == 0:
+            i_mr = 1
+        
+        # Ensure we have valid indices for interpolation
+        i_pc = np.clip(i_pc, 1, len(self.Pc_grid) - 1)
+        i_mr = np.clip(i_mr, 1, len(self.MR_grid) - 1)
+        
         # Get surrounding points
         Pc0, Pc1 = self.Pc_grid[i_pc - 1], self.Pc_grid[i_pc]
         MR0, MR1 = self.MR_grid[i_mr - 1], self.MR_grid[i_mr]
         
-        # Bilinear interpolation
+        # Validate grid spacing
+        if Pc1 <= Pc0 or MR1 <= MR0:
+            raise ValueError(f"Invalid grid spacing: Pc grid or MR grid not monotonic")
+        
+        # Get corner values
         f00 = table[i_pc - 1, i_mr - 1]
         f01 = table[i_pc - 1, i_mr]
         f10 = table[i_pc, i_mr - 1]
         f11 = table[i_pc, i_mr]
         
-        # Check for NaN values
-        if np.isnan(f00) or np.isnan(f01) or np.isnan(f10) or np.isnan(f11):
-            # Fallback to nearest neighbor
-            return table[i_pc - 1, i_mr - 1]
+        # Count valid (non-NaN) values
+        valid_values = [v for v in [f00, f01, f10, f11] if np.isfinite(v)]
         
-        # Interpolation weights
-        wx = (Pc - Pc0) / (Pc1 - Pc0) if Pc1 != Pc0 else 0
-        wy = (MR - MR0) / (MR1 - MR0) if MR1 != MR0 else 0
+        if len(valid_values) == 0:
+            # All NaN - return NaN
+            return np.nan
+        elif len(valid_values) < 4:
+            # Some NaN - use weighted average of valid values only
+            # This is more robust than simple nearest neighbor
+            weights = []
+            values = []
+            
+            # Calculate weights for each corner
+            for i, (f_val, pc_idx, mr_idx) in enumerate([
+                (f00, i_pc - 1, i_mr - 1),
+                (f01, i_pc - 1, i_mr),
+                (f10, i_pc, i_mr - 1),
+                (f11, i_pc, i_mr),
+            ]):
+                if np.isfinite(f_val):
+                    # Distance-based weight (inverse distance)
+                    pc_dist = abs(Pc - self.Pc_grid[pc_idx]) / (Pc1 - Pc0) if Pc1 != Pc0 else 1.0
+                    mr_dist = abs(MR - self.MR_grid[mr_idx]) / (MR1 - MR0) if MR1 != MR0 else 1.0
+                    weight = 1.0 / (1.0 + pc_dist + mr_dist)
+                    weights.append(weight)
+                    values.append(f_val)
+            
+            if len(weights) > 0:
+                weights = np.array(weights)
+                weights = weights / np.sum(weights)  # Normalize
+                result = np.sum(np.array(values) * weights)
+            else:
+                result = np.nan
+        else:
+            # All values valid - standard bilinear interpolation
+            # Interpolation weights (normalized to [0, 1])
+            wx = (Pc - Pc0) / (Pc1 - Pc0) if Pc1 != Pc0 else 0.0
+            wy = (MR - MR0) / (MR1 - MR0) if MR1 != MR0 else 0.0
+            
+            # Clamp weights to [0, 1] for numerical stability
+            wx = np.clip(wx, 0.0, 1.0)
+            wy = np.clip(wy, 0.0, 1.0)
+            
+            # Bilinear interpolation
+            result = (f00 * (1 - wx) * (1 - wy) +
+                     f10 * wx * (1 - wy) +
+                     f01 * (1 - wx) * wy +
+                     f11 * wx * wy)
         
-        # Bilinear interpolation
-        result = (f00 * (1 - wx) * (1 - wy) +
-                 f10 * wx * (1 - wy) +
-                 f01 * (1 - wx) * wy +
-                 f11 * wx * wy)
+        # Validate result
+        if not np.isfinite(result):
+            # Final fallback: use nearest valid neighbor
+            distances = [
+                (abs(Pc - Pc0) + abs(MR - MR0), f00),
+                (abs(Pc - Pc0) + abs(MR - MR1), f01),
+                (abs(Pc - Pc1) + abs(MR - MR0), f10),
+                (abs(Pc - Pc1) + abs(MR - MR1), f11),
+            ]
+            valid_distances = [(d, v) for d, v in distances if np.isfinite(v)]
+            if valid_distances:
+                result = min(valid_distances, key=lambda x: x[0])[1]
+            else:
+                result = np.nan
         
         return float(result)
     

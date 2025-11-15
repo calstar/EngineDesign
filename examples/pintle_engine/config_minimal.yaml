@@ -178,9 +178,25 @@ ablative_cooling:
   char_layer_conductivity: 0.2  # W/(m·K) - Protective char layer
   char_layer_thickness: 0.001  # m - 1mm char layer
   track_geometry_evolution: true  # Enable time-varying L* tracking
-  nozzle_ablative: true  # ENABLE to see eps vary! (graphite nozzle insert)
-                         # If true: both throat and exit recede → eps can increase/decrease/stay constant
-                         # If false: only throat recedes → eps decreases
+  nozzle_ablative: false  # Chamber ablator only (graphite insert is separate)
+
+# Graphite Throat Insert (separate from chamber ablator)
+# Graphite inserts prevent burn-through in nozzle throat/exit
+graphite_insert:
+  enabled: true  # Enable graphite throat insert
+  material_density: 1800.0  # kg/m³ - Graphite (1800-2200 typical)
+  heat_of_ablation: 8.0e6  # J/kg - Graphite (~8-12 MJ/kg, much higher than ablator)
+  thermal_conductivity: 100.0  # W/(m·K) - Graphite (50-150 typical, much higher than ablator)
+  specific_heat: 710.0  # J/(kg·K) - Graphite
+  initial_thickness: 0.005  # m - 5mm graphite insert
+  surface_temperature_limit: 2500.0  # K - Graphite can handle very high temps
+  oxidation_temperature: 800.0  # K - Onset of oxidation
+  oxidation_rate: 1e-6  # m/s - Oxidation recession rate at reference conditions
+  recession_multiplier: null  # null = calculate from physics (Bartz correlation)
+                              # or specify 1.3-2.5 for fixed multiplier (throat recedes faster)
+  char_layer_conductivity: 5.0  # W/(m·K) - Protective layer
+  char_layer_thickness: 0.0005  # m - 0.5mm protective layer
+  coverage_fraction: 1.0  # Full coverage of throat/nozzle
 
 # Injector Discharge
 # Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]
@@ -250,10 +266,10 @@ combustion:
     Pc_range: [1.0e6, 9.0e6]  # Pa - Lookup table range (NOT pipeline input! Just for table grid)
     MR_range: [1.6, 3.5]  # Mixture ratio range for lookup table (extended to capture peaks and falling edges)
     eps_range: [4.0, 15.0]  # Expansion ratio range for 3D cache (covers throat growth from ablation)
-    n_points: 20  # Grid points per dimension (20³ = 8,000 points, ~67 min build time)
+    n_points: 34  # Grid points per dimension (34³ ≈ 39,300 points, similar to old 2D cache with ~40k points)
                   # Original 2D was 200² = 40,000 points
-                  # For 3D: 20³ = 8,000 is good balance of resolution vs speed
-                  # Can increase to 30³ = 27,000 for production (~225 min build)
+                  # For 3D: 34³ ≈ 39,300 matches old 2D refinement
+                  # With parallel processing (8 workers): ~8-10 min build time
   
   # Combustion Efficiency (L* correction)
   # CEA assumes infinite-area equilibrium, real chambers have finite volume
@@ -282,21 +298,21 @@ combustion:
 #   Lcyl = 107.45 mm (cylindrical length)
 chamber:
   volume: 0.001516  # m³ - Calculated from L*×At = 1.0 × 0.000857892
-  A_throat: 0.00156235266901  # m² - From Dt = 33.05 mm
+  A_throat: 0.000857892377  # m² - From Dt = 33.05 mm (π × (33.05e-3/2)²)
   Lstar: 0.97033149433  # m - From engine specs (1000.00 mm)
 
 # Nozzle
 # From engine specs:
 #   Dt = 33.05 mm → At = 0.000857892 m²
 #   De = 84.56 mm → Ae = 0.005615906 m²
-#   Ae/At = 6.54 (expansion ratio)
+#   Ae/At = 6.546 (expansion ratio)
 # Thrust = F_momentum + F_pressure
 #   F_momentum = ṁ × v_exit
 #   F_pressure = (P_exit - Pa) × A_exit
 nozzle:
-  A_throat: 0.00156235266901     # m² - From Dt = 33.05 mm
-  A_exit: 0.00831498636119     # m² - From De = 84.56 mm
-  expansion_ratio: 5.32209310109    # From engine specs: Ae/At = 6.54
+  A_throat: 0.000857892377     # m² - From Dt = 33.05 mm (π × (33.05e-3/2)²)
+  A_exit: 0.005615906001     # m² - From De = 84.56 mm (π × (84.56e-3/2)²)
+  expansion_ratio: 6.546166103254    # From engine specs: Ae/At = 6.546
   efficiency: 0.98  # Nozzle efficiency (accounts for losses)
 
 # Tanks

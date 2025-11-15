@@ -8,12 +8,17 @@ from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.cea_cache import CEACache
 from pintle_models.chamber_solver import ChamberSolver
 from pintle_models.nozzle import calculate_thrust
+from pintle_models.chamber_profiles import (
+    calculate_chamber_pressure_profile,
+    calculate_chamber_intrinsics,
+)
 from pintle_pipeline.ablative_geometry import (
     update_chamber_geometry_from_ablation,
     update_nozzle_exit_from_ablation,
     calculate_throat_recession_multiplier,
     calculate_local_recession_rate,
 )
+from pintle_pipeline.graphite_cooling import compute_graphite_recession
 
 
 class PintleEngineRunner:
@@ -77,7 +82,9 @@ class PintleEngineRunner:
         MR = diagnostics["MR"]
         
         # Get CEA properties for nozzle calculation
-        cea_props = self.cea_cache.eval(MR, Pc)
+        # Calculate current expansion ratio (for 3D CEA cache)
+        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
+        cea_props = self.cea_cache.eval(MR, Pc, 101325.0, eps_current)
         cstar_actual = diagnostics["cstar_actual"]
         gamma = diagnostics["gamma"]
         R = diagnostics["R"]
@@ -90,6 +97,10 @@ class PintleEngineRunner:
         # Calculate current expansion ratio (for 3D CEA cache)
         eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
         
+        # Check if shifting equilibrium is enabled
+        use_shifting = getattr(self.config.combustion.efficiency, 'use_shifting_equilibrium', True)
+        reaction_progress = diagnostics.get("reaction_progress", None)
+        
         thrust_results = calculate_thrust(
             Pc,
             MR,
@@ -97,15 +108,90 @@ class PintleEngineRunner:
             self.cea_cache,
             self.config.nozzle,
             Pa,
-            eps=eps_current  # Pass current expansion ratio
+            eps=eps_current,  # Pass current expansion ratio
+            reaction_progress=reaction_progress,  # Pass reaction progress for shifting equilibrium
+            use_shifting_equilibrium=use_shifting,
+            config=self.config,
         )
         
         F = thrust_results["F"]
         Isp = thrust_results["Isp"]
         v_exit = thrust_results["v_exit"]
         P_exit = thrust_results["P_exit"]
+        P_throat = thrust_results.get("P_throat", Pc * 0.6)  # Throat pressure
+        T_exit = thrust_results.get("T_exit", Tc * 0.5)  # Exit temperature
+        T_throat = thrust_results.get("T_throat", Tc * 0.85)  # Throat temperature
+        Cf_actual = thrust_results.get("Cf_actual", thrust_results.get("Cf", 0.0))
+        Cf_ideal = thrust_results.get("Cf_ideal", 0.0)
+        Cf_theoretical = thrust_results.get("Cf_theoretical", 0.0)
+        temperature_profile = thrust_results.get("temperature_profile", None)
 
         cooling_results = diagnostics.get("cooling", {})
+        
+        # Calculate chamber pressure profile along length
+        pressure_profile = None
+        try:
+            pressure_profile = calculate_chamber_pressure_profile(
+                Pc=Pc,
+                Lstar=self.solver.Lstar,
+                mdot_total=mdot_total,
+                gamma=gamma,
+                R=R,
+                Tc=Tc,
+                A_throat=self.config.chamber.A_throat,
+                n_points=30,
+            )
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Pressure profile calculation failed: {e}")
+        
+        # Calculate chamber intrinsics
+        chamber_intrinsics = None
+        try:
+            chamber_intrinsics = calculate_chamber_intrinsics(
+                Pc=Pc,
+                Tc=Tc,
+                mdot_total=mdot_total,
+                gamma=gamma,
+                R=R,
+                V_chamber=self.config.chamber.volume,
+                A_throat=self.config.chamber.A_throat,
+                Lstar=self.solver.Lstar,
+                MR=MR,
+            )
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Chamber intrinsics calculation failed: {e}")
+        
+        # Extract injector pressure diagnostics from closure diagnostics
+        injector_pressure_diagnostics = {
+            "P_injector_O": diagnostics.get("P_injector_O"),
+            "P_injector_F": diagnostics.get("P_injector_F"),
+            "delta_p_injector_O": diagnostics.get("delta_p_injector_O"),
+            "delta_p_injector_F": diagnostics.get("delta_p_injector_F"),
+            "delta_p_feed_O": diagnostics.get("delta_p_feed_O"),
+            "delta_p_feed_F": diagnostics.get("delta_p_feed_F"),
+        }
+        
+        # Calculate stability analysis if enabled
+        stability_results = None
+        try:
+            from pintle_pipeline.stability_analysis import comprehensive_stability_analysis
+            
+            stability_results = comprehensive_stability_analysis(
+                config=self.config,
+                Pc=Pc,
+                MR=MR,
+                mdot_total=mdot_total,
+                cstar=cstar_actual,
+                gamma=gamma,
+                R=R,
+                Tc=Tc,
+                diagnostics=diagnostics,
+            )
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Stability analysis failed: {e}")
         
         # Compile results
         results = {
@@ -118,16 +204,28 @@ class PintleEngineRunner:
             "Isp": Isp,
             "v_exit": v_exit,
             "P_exit": P_exit,
+            "P_throat": P_throat,
+            "T_exit": T_exit,
+            "T_throat": T_throat,
+            "Tc": Tc,
+            "Cf": Cf_actual,  # Actual measured Cf
+            "Cf_actual": Cf_actual,
+            "Cf_ideal": Cf_ideal,
+            "Cf_theoretical": Cf_theoretical,
+            "temperature_profile": temperature_profile,
             "eps": eps_current,  # Expansion ratio (for 3D CEA cache)
             "A_throat": self.config.chamber.A_throat,
             "A_exit": self.config.nozzle.A_exit,
             "cstar_actual": cstar_actual,
             "cstar_ideal": diagnostics["cstar_ideal"],
             "eta_cstar": diagnostics["eta_cstar"],
-            "Tc": Tc,
             "gamma": gamma,
             "R": R,
             "cooling": cooling_results,
+            "stability": stability_results,
+            "pressure_profile": pressure_profile,
+            "chamber_intrinsics": chamber_intrinsics,
+            "injector_pressure": injector_pressure_diagnostics,
             "diagnostics": diagnostics,
         }
         
@@ -389,9 +487,57 @@ class PintleEngineRunner:
                     cooling_diag = point_results.get("diagnostics", {}).get("cooling", {})
                     ablative_diag = cooling_diag.get("ablative", {})
                     
+                    # Check for graphite insert (separate from chamber ablator)
+                    graphite_cfg = config_copy.graphite_insert
+                    use_graphite_throat = graphite_cfg is not None and graphite_cfg.enabled
+                    
+                    recession_rate_chamber = 0.0
+                    recession_rate_throat = 0.0
+                    
+                    # Chamber recession (from ablative cooling)
                     if ablative_diag.get("enabled", False):
-                        recession_rate = ablative_diag.get("recession_rate", 0.0)
+                        recession_rate_chamber = ablative_diag.get("recession_rate", 0.0)
+                    
+                    # Throat recession (from graphite insert if enabled, else from ablator)
+                    if use_graphite_throat:
+                        # Use graphite insert properties for throat recession
+                        Pc = point_results["Pc"]
+                        Tc = point_results["Tc"]
                         
+                        # Get throat heat flux from cooling diagnostics
+                        # Throat heat flux is typically higher than chamber
+                        chamber_heat_flux = ablative_diag.get("incident_heat_flux", 1e6) if ablative_diag.get("enabled", False) else 1e6
+                        
+                        # Estimate throat heat flux (higher than chamber due to sonic conditions)
+                        # Use Bartz correlation multiplier
+                        gamma = point_results.get("gamma", 1.2)
+                        throat_heat_flux_mult = calculate_throat_recession_multiplier(
+                            Pc, 50.0, 1000.0, chamber_heat_flux, gamma  # Approximate velocities
+                        )
+                        throat_heat_flux = chamber_heat_flux * throat_heat_flux_mult
+                        
+                        # Calculate graphite recession rate
+                        graphite_results = compute_graphite_recession(
+                            net_heat_flux=throat_heat_flux,
+                            throat_temperature=Tc * 0.85,  # Approximate throat temperature
+                            gas_temperature=Tc,
+                            graphite_config=graphite_cfg,
+                            throat_area=config_copy.chamber.A_throat,
+                            pressure=Pc,
+                        )
+                        
+                        recession_rate_throat = graphite_results.get("recession_rate", 0.0)
+                        
+                        # Apply graphite coverage fraction
+                        recession_rate_throat *= graphite_cfg.coverage_fraction
+                        
+                        # If ablator also covers throat (partial coverage), add ablator contribution
+                        if ablative_diag.get("enabled", False) and graphite_cfg.coverage_fraction < 1.0:
+                            ablator_coverage = 1.0 - graphite_cfg.coverage_fraction
+                            recession_rate_ablator_throat = recession_rate_chamber * throat_heat_flux_mult
+                            recession_rate_throat += recession_rate_ablator_throat * ablator_coverage
+                    elif ablative_diag.get("enabled", False):
+                        # Use ablative properties for throat (original behavior)
                         # Calculate throat recession multiplier from flow conditions
                         if ablative_cfg.throat_recession_multiplier is not None:
                             throat_mult = ablative_cfg.throat_recession_multiplier
@@ -419,53 +565,58 @@ class PintleEngineRunner:
                             )
                         
                         results["throat_recession_multiplier"][i] = throat_mult
+                        recession_rate_throat = recession_rate_chamber * throat_mult
+                    
+                    # Update cumulative recession
+                    recession_increment_chamber = recession_rate_chamber * dt
+                    recession_increment_throat = recession_rate_throat * dt
+                    
+                    cumulative_recession_chamber += recession_increment_chamber
+                    cumulative_recession_throat += recession_increment_throat
+                    
+                    # Update geometry
+                    # Use ablative coverage for chamber, graphite coverage for throat
+                    chamber_coverage = ablative_cfg.coverage_fraction if ablative_cfg and ablative_cfg.enabled else 1.0
+                    throat_coverage = graphite_cfg.coverage_fraction if use_graphite_throat and graphite_cfg else chamber_coverage
+                    
+                    V_new, A_throat_new, D_chamber_new, D_throat_new, geom_diag = update_chamber_geometry_from_ablation(
+                        V_chamber_initial,
+                        A_throat_initial,
+                        D_chamber_initial,
+                        D_throat_initial,
+                        L_chamber,
+                        cumulative_recession_chamber,
+                        cumulative_recession_throat,
+                        chamber_coverage,  # Chamber coverage from ablator
+                        None,  # Don't use multiplier here, we already calculated throat recession
+                    )
+                    
+                    # Update config for next iteration
+                    config_copy.chamber.volume = V_new
+                    config_copy.chamber.A_throat = A_throat_new
+                    
+                    # Update L* if specified
+                    if config_copy.chamber.Lstar is not None:
+                        config_copy.chamber.Lstar = V_new / A_throat_new
+                    
+                    # Update nozzle exit geometry if nozzle is ablative
+                    if ablative_cfg and ablative_cfg.enabled and ablative_cfg.nozzle_ablative:
+                        # Nozzle exit recedes at similar rate to chamber (can be tuned)
+                        # For now, assume exit recession rate = 0.8 × chamber rate (less severe than throat)
+                        recession_increment_exit = recession_rate_chamber * 0.8 * dt
+                        cumulative_recession_exit += recession_increment_exit
                         
-                        # Update cumulative recession
-                        recession_increment_chamber = recession_rate * dt
-                        recession_increment_throat = recession_rate * throat_mult * dt
-                        
-                        cumulative_recession_chamber += recession_increment_chamber
-                        cumulative_recession_throat += recession_increment_throat
-                        
-                        # Update geometry
-                        V_new, A_throat_new, D_chamber_new, D_throat_new, geom_diag = update_chamber_geometry_from_ablation(
-                            V_chamber_initial,
-                            A_throat_initial,
-                            D_chamber_initial,
-                            D_throat_initial,
-                            L_chamber,
-                            cumulative_recession_chamber,
-                            cumulative_recession_throat,
+                        A_exit_new, D_exit_new, exit_diag = update_nozzle_exit_from_ablation(
+                            A_exit_initial,
+                            D_exit_initial,
+                            cumulative_recession_exit,
                             ablative_cfg.coverage_fraction,
-                            None,  # Don't use multiplier here, we already calculated throat recession
                         )
                         
-                        # Update config for next iteration
-                        config_copy.chamber.volume = V_new
-                        config_copy.chamber.A_throat = A_throat_new
+                        # Update nozzle config
+                        config_copy.nozzle.A_exit = A_exit_new
                         
-                        # Update L* if specified
-                        if config_copy.chamber.Lstar is not None:
-                            config_copy.chamber.Lstar = V_new / A_throat_new
-                        
-                        # Update nozzle exit geometry if nozzle is ablative
-                        if ablative_cfg.nozzle_ablative:
-                            # Nozzle exit recedes at similar rate to chamber (can be tuned)
-                            # For now, assume exit recession rate = 0.8 × chamber rate (less severe than throat)
-                            recession_increment_exit = recession_rate * 0.8 * dt
-                            cumulative_recession_exit += recession_increment_exit
-                            
-                            A_exit_new, D_exit_new, exit_diag = update_nozzle_exit_from_ablation(
-                                A_exit_initial,
-                                D_exit_initial,
-                                cumulative_recession_exit,
-                                ablative_cfg.coverage_fraction,
-                            )
-                            
-                            # Update nozzle config
-                            config_copy.nozzle.A_exit = A_exit_new
-                            
-                            # Expansion ratio will be recalculated on next iteration
+                        # Expansion ratio will be recalculated on next iteration
                 
             except Exception as e:
                 # If solve fails, leave NaN values

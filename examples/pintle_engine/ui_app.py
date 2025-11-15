@@ -31,7 +31,7 @@ from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
-from examples.pintle_engine.flight_sim import setup_flight
+from examples.pintle_engine.flight_sim import setup_flight, detect_tank_underfill_time
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
 )
@@ -371,6 +371,207 @@ def summarize_results(results: Dict[str, Any]) -> None:
     st.metric("c* (actual)", f"{cstar:.1f} m/s")
     st.metric("Exit Velocity", f"{v_exit:.1f} m/s")
     st.metric("Exit Pressure", format_value(results["P_exit"], "pressure", pressure_unit) + f" {pressure_unit}")
+    
+    # Thrust coefficient
+    Cf_actual = results.get("Cf_actual", results.get("Cf", np.nan))
+    Cf_ideal = results.get("Cf_ideal", np.nan)
+    Cf_theoretical = results.get("Cf_theoretical", np.nan)
+    if np.isfinite(Cf_actual):
+        st.metric("Cf (actual)", f"{Cf_actual:.4f}")
+        if np.isfinite(Cf_ideal):
+            st.caption(f"Cf ideal: {Cf_ideal:.4f}")
+        if np.isfinite(Cf_theoretical) and Cf_theoretical > 0:
+            efficiency_pct = (Cf_actual / Cf_theoretical) * 100.0
+            # Efficiency should be <= 100% (nozzle losses)
+            efficiency_pct = min(efficiency_pct, 100.0)  # Cap at 100%
+            st.caption(f"Cf theoretical: {Cf_theoretical:.4f} | Nozzle Efficiency: {efficiency_pct:.1f}%")
+            if efficiency_pct > 100.0 or Cf_actual > Cf_ideal:
+                st.warning("⚠️ Cf_actual > Cf_ideal may indicate calculation error (exit temp/velocity issue)")
+    
+    # Temperatures
+    Tc = results.get("Tc", np.nan)
+    T_throat = results.get("T_throat", np.nan)
+    T_exit = results.get("T_exit", np.nan)
+    if np.isfinite(Tc):
+        st.metric("Chamber Temp", f"{Tc:.1f} K ({Tc-273.15:.1f} °C)")
+    if np.isfinite(T_throat):
+        st.metric("Throat Temp", f"{T_throat:.1f} K ({T_throat-273.15:.1f} °C)")
+    if np.isfinite(T_exit):
+        st.metric("Exit Temp", f"{T_exit:.1f} K ({T_exit-273.15:.1f} °C)")
+    
+    # Pressure and Temperature Profiles
+    st.subheader("Chamber Profiles")
+    
+    # Pressure profile plot
+    pressure_profile = results.get("pressure_profile")
+    temp_profile = results.get("temperature_profile")
+    
+    if pressure_profile and isinstance(pressure_profile, dict):
+        positions_p = pressure_profile.get("positions", [])
+        pressures = pressure_profile.get("pressures", [])
+        if positions_p and pressures and len(positions_p) == len(pressures):
+            fig_pressure = go.Figure()
+            fig_pressure.add_trace(go.Scatter(
+                x=positions_p,
+                y=np.array(pressures) * PA_TO_PSI,  # Convert to psi
+                mode='lines+markers',
+                name='Pressure',
+                line=dict(color='blue', width=2),
+                marker=dict(size=6)
+            ))
+            fig_pressure.update_layout(
+                title="Pressure Profile Along Chamber",
+                xaxis_title="Position from Injection [m]",
+                yaxis_title="Pressure [psi]",
+                height=300
+            )
+            st.plotly_chart(fig_pressure, use_container_width=True)
+            
+            # Show key pressures
+            P_inj = pressure_profile.get("P_injection", np.nan) * PA_TO_PSI
+            P_mid = pressure_profile.get("P_mid", np.nan) * PA_TO_PSI
+            P_th = pressure_profile.get("P_throat", np.nan) * PA_TO_PSI
+            if np.isfinite(P_inj):
+                st.caption(f"P_injection: {P_inj:.1f} psi | P_mid: {P_mid:.1f} psi | P_throat: {P_th:.1f} psi")
+    
+    # Temperature profile plot
+    if temp_profile and isinstance(temp_profile, dict):
+        positions_t = temp_profile.get("positions", [])
+        temperatures = temp_profile.get("temperatures", [])
+        if positions_t and temperatures and len(positions_t) == len(temperatures):
+            fig_temp = go.Figure()
+            fig_temp.add_trace(go.Scatter(
+                x=positions_t,
+                y=temperatures,
+                mode='lines+markers',
+                name='Temperature',
+                line=dict(color='red', width=2),
+                marker=dict(size=6)
+            ))
+            fig_temp.update_layout(
+                title="Temperature Profile Along Chamber",
+                xaxis_title="Position from Injection [m]",
+                yaxis_title="Temperature [K]",
+                height=300
+            )
+            st.plotly_chart(fig_temp, use_container_width=True)
+            
+            # Show key temperatures
+            T_inj = temp_profile.get("T_injection", np.nan)
+            T_mid = temp_profile.get("T_mid", np.nan)
+            T_th = temp_profile.get("T_throat", T_throat)
+            if np.isfinite(T_inj):
+                st.caption(f"T_injection: {T_inj:.1f} K | T_mid: {T_mid:.1f} K | T_throat: {T_th:.1f} K")
+    
+    # Combined pressure-temperature profile
+    if (pressure_profile and isinstance(pressure_profile, dict) and 
+        temp_profile and isinstance(temp_profile, dict)):
+        positions_p = pressure_profile.get("positions", [])
+        positions_t = temp_profile.get("positions", [])
+        pressures = pressure_profile.get("pressures", [])
+        temperatures = temp_profile.get("temperatures", [])
+        
+        if (positions_p and positions_t and pressures and temperatures and
+            len(positions_p) == len(pressures) and len(positions_t) == len(temperatures)):
+            # Use common positions (interpolate if needed)
+            if len(positions_p) == len(positions_t):
+                fig_combined = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                # Pressure trace
+                fig_combined.add_trace(
+                    go.Scatter(
+                        x=positions_p,
+                        y=np.array(pressures) * PA_TO_PSI,
+                        mode='lines+markers',
+                        name='Pressure [psi]',
+                        line=dict(color='blue', width=2),
+                        marker=dict(size=6)
+                    ),
+                    secondary_y=False,
+                )
+                
+                # Temperature trace
+                fig_combined.add_trace(
+                    go.Scatter(
+                        x=positions_t,
+                        y=temperatures,
+                        mode='lines+markers',
+                        name='Temperature [K]',
+                        line=dict(color='red', width=2),
+                        marker=dict(size=6)
+                    ),
+                    secondary_y=True,
+                )
+                
+                fig_combined.update_xaxes(title_text="Position from Injection [m]")
+                fig_combined.update_yaxes(title_text="Pressure [psi]", secondary_y=False)
+                fig_combined.update_yaxes(title_text="Temperature [K]", secondary_y=True)
+                fig_combined.update_layout(
+                    title="Pressure and Temperature Profiles Along Chamber",
+                    height=400
+                )
+                st.plotly_chart(fig_combined, use_container_width=True)
+    
+    # Injector Pressure Drop
+    injector_pressure = results.get("injector_pressure")
+    if injector_pressure and isinstance(injector_pressure, dict):
+        st.subheader("Injector Pressure Drop")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            P_inj_O = injector_pressure.get("P_injector_O")
+            delta_p_O = injector_pressure.get("delta_p_injector_O")
+            if P_inj_O is not None and np.isfinite(P_inj_O):
+                st.metric("P_injector_O", f"{P_inj_O * PA_TO_PSI:.1f} psi")
+            if delta_p_O is not None and np.isfinite(delta_p_O):
+                st.metric("ΔP_injector_O", f"{delta_p_O * PA_TO_PSI:.1f} psi")
+        with col2:
+            P_inj_F = injector_pressure.get("P_injector_F")
+            delta_p_F = injector_pressure.get("delta_p_injector_F")
+            if P_inj_F is not None and np.isfinite(P_inj_F):
+                st.metric("P_injector_F", f"{P_inj_F * PA_TO_PSI:.1f} psi")
+            if delta_p_F is not None and np.isfinite(delta_p_F):
+                st.metric("ΔP_injector_F", f"{delta_p_F * PA_TO_PSI:.1f} psi")
+        with col3:
+            delta_p_feed_O = injector_pressure.get("delta_p_feed_O")
+            delta_p_feed_F = injector_pressure.get("delta_p_feed_F")
+            if delta_p_feed_O is not None and np.isfinite(delta_p_feed_O):
+                st.metric("ΔP_feed_O", f"{delta_p_feed_O * PA_TO_PSI:.1f} psi")
+            if delta_p_feed_F is not None and np.isfinite(delta_p_feed_F):
+                st.metric("ΔP_feed_F", f"{delta_p_feed_F * PA_TO_PSI:.1f} psi")
+    
+    # Chamber Intrinsics
+    chamber_intrinsics = results.get("chamber_intrinsics")
+    if chamber_intrinsics and isinstance(chamber_intrinsics, dict):
+        st.subheader("Chamber Intrinsics")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            Lstar = chamber_intrinsics.get("Lstar")
+            if Lstar is not None and np.isfinite(Lstar):
+                st.metric("L*", f"{Lstar*1000:.1f} mm")
+            residence = chamber_intrinsics.get("residence_time")
+            if residence is not None and np.isfinite(residence):
+                st.metric("Residence Time", f"{residence*1000:.2f} ms")
+        with col2:
+            v_mean = chamber_intrinsics.get("velocity_mean")
+            if v_mean is not None and np.isfinite(v_mean):
+                st.metric("Mean Velocity", f"{v_mean:.1f} m/s")
+            v_throat = chamber_intrinsics.get("velocity_throat")
+            if v_throat is not None and np.isfinite(v_throat):
+                st.metric("Throat Velocity", f"{v_throat:.0f} m/s")
+        with col3:
+            mach = chamber_intrinsics.get("mach_number")
+            if mach is not None and np.isfinite(mach):
+                st.metric("Mach Number", f"{mach:.3f}")
+            Re = chamber_intrinsics.get("reynolds_number")
+            if Re is not None and np.isfinite(Re):
+                st.metric("Reynolds Number", f"{Re:.0f}")
+        with col4:
+            rho = chamber_intrinsics.get("density")
+            if rho is not None and np.isfinite(rho):
+                st.metric("Gas Density", f"{rho:.2f} kg/m³")
+            sound = chamber_intrinsics.get("sound_speed")
+            if sound is not None and np.isfinite(sound):
+                st.metric("Sound Speed", f"{sound:.0f} m/s")
 
     eta_cstar = diagnostics.get("eta_cstar")
     if eta_cstar is not None:
@@ -442,6 +643,176 @@ def summarize_results(results: Dict[str, Any]) -> None:
         if gas_turb is not None and np.isfinite(gas_turb):
             st.caption("Chamber turbulence")
             st.write(f"Gas-side turbulence intensity: {gas_turb:.3f}")
+
+    # Graphite Insert Parameters
+    graphite_cfg = None
+    try:
+        # Try to get config from default runner
+        runner = load_default_runner()
+        graphite_cfg = runner.config.graphite_insert if hasattr(runner.config, 'graphite_insert') and runner.config.graphite_insert else None
+    except:
+        pass
+    
+    if graphite_cfg and graphite_cfg.enabled:
+        st.subheader("Graphite Throat Insert")
+        st.caption("Material properties and configuration")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Material Density", f"{graphite_cfg.material_density:.0f} kg/m³")
+            st.metric("Heat of Ablation", f"{graphite_cfg.heat_of_ablation/1e6:.2f} MJ/kg")
+            st.metric("Thermal Conductivity", f"{graphite_cfg.thermal_conductivity:.1f} W/(m·K)")
+        with col2:
+            st.metric("Specific Heat", f"{graphite_cfg.specific_heat:.0f} J/(kg·K)")
+            st.metric("Initial Thickness", f"{graphite_cfg.initial_thickness*1000:.1f} mm")
+            st.metric("Surface Temp Limit", f"{graphite_cfg.surface_temperature_limit:.0f} K")
+        with col3:
+            st.metric("Oxidation Temperature", f"{graphite_cfg.oxidation_temperature:.0f} K")
+            st.metric("Oxidation Rate", f"{graphite_cfg.oxidation_rate*1e6:.3f} µm/s")
+            st.metric("Coverage Fraction", f"{graphite_cfg.coverage_fraction*100:.0f}%")
+        
+        if graphite_cfg.recession_multiplier is not None:
+            st.caption(f"Recession multiplier: {graphite_cfg.recession_multiplier:.2f}x (fixed)")
+        else:
+            st.caption("Recession multiplier: Calculated from Bartz correlation")
+        
+        if graphite_cfg.char_layer_thickness > 0:
+            st.caption(f"Char layer: {graphite_cfg.char_layer_thickness*1000:.1f} mm thick, {graphite_cfg.char_layer_conductivity:.1f} W/(m·K) conductivity")
+
+    # Stability Analysis
+    stability = results.get("stability")
+    if stability and isinstance(stability, dict):
+        st.subheader("Stability Analysis")
+        
+        is_stable = stability.get("is_stable", False)
+        status_color = "🟢" if is_stable else "🔴"
+        st.markdown(f"**Overall Status:** {status_color} {'STABLE' if is_stable else 'INSTABILITY RISK'}")
+        
+        # Chugging analysis
+        chugging = stability.get("chugging", {})
+        if chugging:
+            st.caption("**Combustion Stability - Chugging**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                freq = chugging.get("frequency", np.nan)
+                if np.isfinite(freq):
+                    st.metric("Frequency", f"{freq:.1f} Hz")
+            with col2:
+                damping = chugging.get("damping_ratio", np.nan)
+                if np.isfinite(damping):
+                    st.metric("Damping Ratio", f"{damping:.3f}")
+            with col3:
+                margin = chugging.get("stability_margin", np.nan)
+                if np.isfinite(margin):
+                    margin_color = "normal" if margin > 0 else "off"
+                    st.metric("Stability Margin", f"{margin:.3f}", delta=None if margin > 0 else "⚠️ Risk")
+        
+        # Acoustic modes
+        acoustic = stability.get("acoustic", {})
+        if acoustic:
+            st.caption("**Acoustic Modes**")
+            long_modes = acoustic.get("longitudinal_modes", [])
+            trans_modes = acoustic.get("transverse_modes", [])
+            
+            if long_modes and len(long_modes) > 0:
+                st.write("Longitudinal modes:")
+                modes_str = ", ".join([f"{f:.0f} Hz" for f in long_modes[:5] if np.isfinite(f)])
+                st.caption(modes_str)
+            
+            if trans_modes and len(trans_modes) > 0:
+                st.write("Transverse modes:")
+                modes_str = ", ".join([f"{f:.0f} Hz" for f in trans_modes[:5] if np.isfinite(f)])
+                st.caption(modes_str)
+        
+        # Feed system stability
+        feed_sys = stability.get("feed_system", {})
+        if feed_sys:
+            st.caption("**Feed System Stability**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                pogo = feed_sys.get("pogo_frequency", np.nan)
+                if np.isfinite(pogo):
+                    st.metric("POGO Frequency", f"{pogo:.1f} Hz")
+            with col2:
+                surge = feed_sys.get("surge_frequency", np.nan)
+                if np.isfinite(surge):
+                    st.metric("Surge Frequency", f"{surge:.1f} Hz")
+            with col3:
+                margin_feed = feed_sys.get("stability_margin", np.nan)
+                if np.isfinite(margin_feed):
+                    margin_color = "normal" if margin_feed > 1.0 else "off"
+                    st.metric("Feed Margin", f"{margin_feed:.2f}", delta=None if margin_feed > 1.0 else "⚠️ Risk")
+        
+        # Issues and recommendations
+        issues = stability.get("issues", [])
+        if issues:
+            st.warning("**Potential Issues:**")
+            for issue in issues:
+                st.write(f"  • {issue}")
+        
+        recommendations = stability.get("recommendations", [])
+        if recommendations:
+            st.info("**Recommendations:**")
+            for rec in recommendations:
+                st.write(f"  → {rec}")
+
+    # Burn Analysis (for time-series data)
+    # Note: This would need to be called separately for time-series evaluations
+    timeseries_results = st.session_state.get("timeseries_results")
+    if timeseries_results and isinstance(timeseries_results, dict):
+        if "F" in timeseries_results and "time" in timeseries_results or "times" in timeseries_results:
+            st.subheader("Burn Analysis")
+            try:
+                from pintle_pipeline.burn_analysis import analyze_burn_degradation
+                
+                # Extract time history
+                times = timeseries_results.get("times") or timeseries_results.get("time")
+                if times is not None and len(times) > 1:
+                    burn_results = analyze_burn_degradation(
+                        np.asarray(times),
+                        np.asarray(timeseries_results.get("F", [])),
+                        np.asarray(timeseries_results.get("Pc", [])),
+                        np.asarray(timeseries_results.get("Isp", [])),
+                        np.asarray(timeseries_results.get("MR", [])),
+                        np.asarray(timeseries_results.get("mdot_total", [])),
+                        A_throat_history=timeseries_results.get("A_throat"),
+                        recession_history=timeseries_results.get("recession_throat"),
+                    )
+                    
+                    if "error" not in burn_results:
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            duration = burn_results.get("burn_time", np.nan)
+                            if np.isfinite(duration):
+                                st.metric("Burn Duration", f"{duration:.2f} s")
+                            impulse = burn_results.get("total_impulse", np.nan)
+                            if np.isfinite(impulse):
+                                st.metric("Total Impulse", f"{impulse/1000:.2f} kN·s")
+                        with col2:
+                            thrust_pct = burn_results.get("changes", {}).get("thrust_pct", np.nan)
+                            if np.isfinite(thrust_pct):
+                                st.metric("Thrust Change", f"{thrust_pct:.2f}%")
+                            isp_pct = burn_results.get("changes", {}).get("Isp_pct", np.nan)
+                            if np.isfinite(isp_pct):
+                                st.metric("Isp Change", f"{isp_pct:.2f}%")
+                        with col3:
+                            pc_pct = burn_results.get("changes", {}).get("Pc_pct", np.nan)
+                            if np.isfinite(pc_pct):
+                                st.metric("Pc Change", f"{pc_pct:.2f}%")
+                            throat_pct = burn_results.get("changes", {}).get("A_throat_pct", np.nan)
+                            if np.isfinite(throat_pct):
+                                st.metric("Throat Area Growth", f"{throat_pct:.2f}%")
+                        
+                        # Degradation rates
+                        rates = burn_results.get("degradation_rates", {})
+                        if rates:
+                            st.caption("**Degradation Rates:**")
+                            if "thrust" in rates and np.isfinite(rates["thrust"]):
+                                st.write(f"Thrust: {rates['thrust']:.2f} N/s")
+                            if "Pc" in rates and np.isfinite(rates["Pc"]):
+                                st.write(f"Pc: {rates['Pc']/1000:.2f} kPa/s")
+            except Exception as e:
+                st.caption(f"Burn analysis unavailable: {e}")
 
 
 def init_session_state() -> None:
@@ -604,6 +975,26 @@ def compute_timeseries_dataframe(
     ablative_heat_removed = []
     ablative_heat_flux = []
     injector_turbulence_mix = []
+    
+    # Injector pressure diagnostics
+    P_injector_O = []
+    P_injector_F = []
+    delta_p_injector_O = []
+    delta_p_injector_F = []
+    
+    # Stability metrics
+    chugging_frequency = []
+    stability_margin = []
+    damping_ratio = []
+    pogo_frequency = []
+    surge_frequency = []
+    
+    # Chamber intrinsics
+    Lstar_list = []
+    residence_time_list = []
+    velocity_mean_list = []
+    mach_number_list = []
+    
     diag_list = results.get("diagnostics", [])
     errors: list[str] = []
 
@@ -627,6 +1018,12 @@ def compute_timeseries_dataframe(
         ablative_heat_removed.append(ablative.get("heat_removed", np.nan) / 1000.0 if ablative else np.nan)
         ablative_heat_flux.append(ablative.get("effective_heat_flux", np.nan) / 1000.0 if ablative else np.nan)
         injector_turbulence_mix.append(diag.get("turbulence_intensity_mix", np.nan) if isinstance(diag, dict) else np.nan)
+        
+        # Injector pressure diagnostics
+        P_injector_O.append(diag.get("P_injector_O", np.nan) if isinstance(diag, dict) else np.nan)
+        P_injector_F.append(diag.get("P_injector_F", np.nan) if isinstance(diag, dict) else np.nan)
+        delta_p_injector_O.append(diag.get("delta_p_injector_O", np.nan) if isinstance(diag, dict) else np.nan)
+        delta_p_injector_F.append(diag.get("delta_p_injector_F", np.nan) if isinstance(diag, dict) else np.nan)
 
     if regen_heat_flux:
         df_dict["Regen Heat Flux (kW/m²)"] = np.asarray(regen_heat_flux, dtype=float)
@@ -644,6 +1041,13 @@ def compute_timeseries_dataframe(
         df_dict["Ablative Heat Removed (kW)"] = np.asarray(ablative_heat_removed, dtype=float)
         df_dict["Ablative Heat Flux (kW/m²)"] = np.asarray(ablative_heat_flux, dtype=float)
 
+    # Add injector pressure drop data
+    if P_injector_O and any(np.isfinite(P_injector_O)):
+        df_dict["P_injector_O (psi)"] = np.asarray(P_injector_O, dtype=float) * PA_TO_PSI
+        df_dict["P_injector_F (psi)"] = np.asarray(P_injector_F, dtype=float) * PA_TO_PSI
+        df_dict["ΔP_injector_O (psi)"] = np.asarray(delta_p_injector_O, dtype=float) * PA_TO_PSI
+        df_dict["ΔP_injector_F (psi)"] = np.asarray(delta_p_injector_F, dtype=float) * PA_TO_PSI
+    
     # Add ablative geometry evolution data if available
     if "Lstar" in results:
         df_dict["L* (mm)"] = np.asarray(results["Lstar"], dtype=float) * 1000.0
@@ -653,6 +1057,38 @@ def compute_timeseries_dataframe(
         df_dict["Cumulative Throat Recession (µm)"] = np.asarray(results["recession_throat"], dtype=float) * 1e6
         if "throat_recession_multiplier" in results:
             df_dict["Throat Recession Multiplier"] = np.asarray(results["throat_recession_multiplier"], dtype=float)
+    
+    # Extract stability metrics from diagnostics (if stored per point)
+    # Note: For full time-series stability analysis, this would need to call comprehensive_stability_analysis
+    # for each point, which can be expensive. For now, we check if it's already in diagnostics.
+    if any(isinstance(d, dict) and "stability" in d for d in diag_list):
+        for diag in diag_list:
+            if isinstance(diag, dict):
+                stability = diag.get("stability")
+                if stability and isinstance(stability, dict):
+                    chugging = stability.get("chugging", {})
+                    feed_sys = stability.get("feed_system", {})
+                    chugging_frequency.append(chugging.get("frequency", np.nan))
+                    stability_margin.append(chugging.get("stability_margin", np.nan))
+                    damping_ratio.append(chugging.get("damping_ratio", np.nan))
+                    pogo_frequency.append(feed_sys.get("pogo_frequency", np.nan))
+                    surge_frequency.append(feed_sys.get("surge_frequency", np.nan))
+                else:
+                    # Pad with NaN if not available for this point
+                    chugging_frequency.append(np.nan)
+                    stability_margin.append(np.nan)
+                    damping_ratio.append(np.nan)
+                    pogo_frequency.append(np.nan)
+                    surge_frequency.append(np.nan)
+        
+        # Only add if we have data
+        if chugging_frequency and any(np.isfinite(chugging_frequency)):
+            df_dict["Chugging Frequency (Hz)"] = np.asarray(chugging_frequency, dtype=float)
+            df_dict["Stability Margin"] = np.asarray(stability_margin, dtype=float)
+            df_dict["Damping Ratio"] = np.asarray(damping_ratio, dtype=float)
+        if pogo_frequency and any(np.isfinite(pogo_frequency)):
+            df_dict["POGO Frequency (Hz)"] = np.asarray(pogo_frequency, dtype=float)
+            df_dict["Surge Frequency (Hz)"] = np.asarray(surge_frequency, dtype=float)
 
     mixture_eff = [diag.get("mixture_efficiency", np.nan) if isinstance(diag, dict) else np.nan for diag in diag_list]
     cooling_eff = [diag.get("cooling_efficiency", np.nan) if isinstance(diag, dict) else np.nan for diag in diag_list]
@@ -707,6 +1143,85 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
 
     mr_fig = px.line(df, x="time", y="MR", markers=False, title="Mixture Ratio vs Time")
     st.plotly_chart(mr_fig, width="stretch", key="ts_mr")
+    
+    # Injector pressure drop plots
+    if "ΔP_injector_O (psi)" in df.columns and not df["ΔP_injector_O (psi)"].isna().all():
+        injector_p_fig = px.line(
+            df,
+            x="time",
+            y=["ΔP_injector_O (psi)", "ΔP_injector_F (psi)"],
+            markers=False,
+            title="Injector Pressure Drop vs Time",
+            labels={"value": "Pressure Drop [psi]", "variable": "Propellant"},
+        )
+        st.plotly_chart(injector_p_fig, width="stretch", key="ts_injector_p")
+    
+    if "P_injector_O (psi)" in df.columns and not df["P_injector_O (psi)"].isna().all():
+        injector_p_abs_fig = px.line(
+            df,
+            x="time",
+            y=["P_injector_O (psi)", "P_injector_F (psi)", "Pc (psi)"],
+            markers=False,
+            title="Injector and Chamber Pressures vs Time",
+            labels={"value": "Pressure [psi]", "variable": "Location"},
+        )
+        st.plotly_chart(injector_p_abs_fig, width="stretch", key="ts_injector_p_abs")
+    
+    # Chamber intrinsics plots if available
+    if "L* (mm)" in df.columns and not df["L* (mm)"].isna().all():
+        lstar_fig = px.line(df, x="time", y="L* (mm)", markers=False, title="Characteristic Length (L*) vs Time")
+        st.plotly_chart(lstar_fig, width="stretch", key="ts_lstar")
+    
+    # Stability metrics plots if available
+    if "Chugging Frequency (Hz)" in df.columns and not df["Chugging Frequency (Hz)"].isna().all():
+        stability_fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=("Chugging Frequency", "Stability Margin", "Damping Ratio", "POGO/Surge Frequency"),
+            vertical_spacing=0.15,
+        )
+        
+        # Chugging frequency
+        stability_fig.add_trace(
+            go.Scatter(x=df["time"], y=df["Chugging Frequency (Hz)"], mode='lines+markers', name='Chugging', line=dict(color='blue')),
+            row=1, col=1
+        )
+        
+        # Stability margin
+        if "Stability Margin" in df.columns and not df["Stability Margin"].isna().all():
+            stability_fig.add_trace(
+                go.Scatter(x=df["time"], y=df["Stability Margin"], mode='lines+markers', name='Margin', line=dict(color='green')),
+                row=1, col=2
+            )
+            # Add zero line
+            stability_fig.add_hline(y=0, line_dash="dash", line_color="red", row=1, col=2)
+        
+        # Damping ratio
+        if "Damping Ratio" in df.columns and not df["Damping Ratio"].isna().all():
+            stability_fig.add_trace(
+                go.Scatter(x=df["time"], y=df["Damping Ratio"], mode='lines+markers', name='Damping', line=dict(color='orange')),
+                row=2, col=1
+            )
+        
+        # POGO/Surge frequency
+        if "POGO Frequency (Hz)" in df.columns and not df["POGO Frequency (Hz)"].isna().all():
+            stability_fig.add_trace(
+                go.Scatter(x=df["time"], y=df["POGO Frequency (Hz)"], mode='lines+markers', name='POGO', line=dict(color='purple')),
+                row=2, col=2
+            )
+        if "Surge Frequency (Hz)" in df.columns and not df["Surge Frequency (Hz)"].isna().all():
+            stability_fig.add_trace(
+                go.Scatter(x=df["time"], y=df["Surge Frequency (Hz)"], mode='lines+markers', name='Surge', line=dict(color='brown')),
+                row=2, col=2
+            )
+        
+        stability_fig.update_xaxes(title_text="Time [s]", row=2, col=1)
+        stability_fig.update_xaxes(title_text="Time [s]", row=2, col=2)
+        stability_fig.update_yaxes(title_text="Frequency [Hz]", row=1, col=1)
+        stability_fig.update_yaxes(title_text="Margin", row=1, col=2)
+        stability_fig.update_yaxes(title_text="Ratio", row=2, col=1)
+        stability_fig.update_yaxes(title_text="Frequency [Hz]", row=2, col=2)
+        stability_fig.update_layout(title="Stability Metrics vs Time", height=600, showlegend=True)
+        st.plotly_chart(stability_fig, width="stretch", key="ts_stability")
 
     if "Regen Heat Flux (kW/m²)" in df.columns and not df["Regen Heat Flux (kW/m²)"].isna().all():
         regen_fig = px.line(
@@ -1881,656 +2396,6 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
                 )
 
             st.success("Time-series evaluation complete.")
-
-
-def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, config_label: str) -> None:
-    if isinstance(runner, PintleEngineConfig):
-        runner = PintleEngineRunner(runner)
-    st.header("Flight Simulation")
-    st.write("Use engine performance to simulate a basic rocket flight and report apogee and velocity.")
-
-    source = st.radio("Performance source", ["Tank pressures (constant thrust)", "Dataset (time-varying)"], horizontal=True, key="flight_perf_source")
-
-    # Tank pressures inputs shown only for constant source
-    if source == "Tank pressures (constant thrust)":
-        col1, col2 = st.columns(2)
-        with col1:
-            P_tank_O_psi = st.number_input(
-                "LOX Tank Pressure [psi]",
-                min_value=50.0,
-                max_value=3000.0,
-                value=1305.0,
-                step=5.0,
-                key="flight_lox_tank_psi",
-            )
-        with col2:
-            P_tank_F_psi = st.number_input(
-                "Fuel Tank Pressure [psi]",
-                min_value=50.0,
-                max_value=3000.0,
-                value=974.0,
-                step=5.0,
-                key="flight_fuel_tank_psi",
-            )
-    else:
-        # Dataset selection and column mapping
-        datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
-        if not datasets:
-            st.warning("No datasets available. Run a time-series or forward analysis first to populate datasets.")
-            return
-        ds_names = list(datasets.keys())
-        default_ds = st.session_state.get("last_custom_dataset") or ds_names[0]
-        dataset_name = st.selectbox("Dataset for thrust and O/F", ds_names, index=ds_names.index(default_ds) if default_ds in ds_names else 0, key="flight_ds_select")
-        ds_df = datasets[dataset_name]
-        num_cols = ds_df.select_dtypes(include=[np.number]).columns.tolist()
-        # sensible defaults
-        time_col = "time" if "time" in ds_df.columns else num_cols[0]
-        thrust_candidates = [c for c in ds_df.columns if "Thrust" in c]
-        thrust_col = thrust_candidates[0] if thrust_candidates else num_cols[1 if len(num_cols) > 1 else 0]
-        mdot_o_col = "mdot_O (kg/s)" if "mdot_O (kg/s)" in ds_df.columns else None
-        mdot_f_col = "mdot_F (kg/s)" if "mdot_F (kg/s)" in ds_df.columns else None
-        mr_col = "MR" if "MR" in ds_df.columns else None
-        mdot_total_col = "mdot_total (kg/s)" if "mdot_total (kg/s)" in ds_df.columns else None
-
-        st.markdown("#### Map dataset columns")
-        colm = st.columns(4)
-        with colm[0]:
-            time_col = st.selectbox("Time column [s]", ds_df.columns.tolist(), index=ds_df.columns.tolist().index(time_col) if time_col in ds_df.columns else 0, key="flight_ds_time_col")
-        with colm[1]:
-            thrust_col = st.selectbox("Thrust column", ds_df.columns.tolist(), index=ds_df.columns.tolist().index(thrust_col) if thrust_col in ds_df.columns else 0, key="flight_ds_thrust_col")
-        with colm[2]:
-            mr_col = st.selectbox("MR (O/F) column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mr_col is None else ds_df.columns.tolist().index(mr_col)+1), key="flight_ds_mr_col")
-        with colm[3]:
-            mdot_total_col = st.selectbox("Total mdot column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mdot_total_col is None else ds_df.columns.tolist().index(mdot_total_col)+1), key="flight_ds_mdtot_col")
-        colm2 = st.columns(2)
-        with colm2[0]:
-            mdot_o_col = st.selectbox("mdot_O column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mdot_o_col is None else ds_df.columns.tolist().index(mdot_o_col)+1), key="flight_ds_mdot_o_col")
-        with colm2[1]:
-            mdot_f_col = st.selectbox("mdot_F column (optional)", ["None"] + ds_df.columns.tolist(), index=(0 if mdot_f_col is None else ds_df.columns.tolist().index(mdot_f_col)+1), key="flight_ds_mdot_f_col")
-
-    with st.form("flight_sim_form"):
-        if source == "Tank pressures (constant thrust)":
-            col3, col4, col5 = st.columns(3)
-            with col3:
-                default_burn = float(config_obj.thrust.burn_time) if getattr(config_obj, "thrust", None) and config_obj.thrust else 5.0
-                burn_time = st.number_input("Burn time [s]", min_value=0.5, value=default_burn, step=0.5, key="flight_burn_time")
-            with col4:
-                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
-                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox")
-            with col5:
-                default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
-                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel")
-
-            st.markdown("### Environment")
-            env_date = None
-            env_hour = 12
-            if getattr(config_obj, "environment", None) and config_obj.environment:
-                try:
-                    y, m, d, h = list(config_obj.environment.date)
-                    env_date = datetime(y, m, d).date()
-                    env_hour = int(h)
-                except Exception:
-                    env_date = datetime.now().date()
-                    env_hour = 12
-            else:
-                env_date = datetime.now().date()
-                env_hour = 12
-
-            cold1, cold2 = st.columns(2)
-            with cold1:
-                sel_date = st.date_input("Launch date", value=env_date, key="flight_env_date")
-            with cold2:
-                sel_hour = st.number_input("Launch hour [0-23]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour")
-        else:
-            # Dataset mode: user defines propellant fill; burn time comes from dataset
-            burn_time = None
-            colpf1, colpf2 = st.columns(2)
-            with colpf1:
-                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
-                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox_ds")
-            with colpf2:
-                default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
-                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel_ds")
-            sel_date = None
-            sel_hour = None
-
-        run_btn = st.form_submit_button("Run Flight Simulation", type="primary")
-
-    # Show editors regardless of whether the form is submitted; simulation will run only if run_btn is True.
-
-    # Create a working copy of config with overrides for flight-related fields
-    try:
-        working = copy.deepcopy(config_obj).model_dump()
-        if source == "Tank pressures (constant thrust)":
-            # ensure optional sections exist
-            working.setdefault("thrust", {"burn_time": burn_time})
-            working["thrust"]["burn_time"] = float(burn_time)
-            # update masses from user inputs (tanks now hold masses)
-            lox_tank_work = working.setdefault("lox_tank", {})
-            fuel_tank_work = working.setdefault("fuel_tank", {})
-            lox_tank_work["mass"] = float(m_lox)
-            fuel_tank_work["mass"] = float(m_fuel)
-            # update environment date
-            if "environment" not in working or working["environment"] is None:
-                working["environment"] = {}
-            working["environment"]["date"] = [int(sel_date.year), int(sel_date.month), int(sel_date.day), int(sel_hour)]
-        else:
-            # dataset mode: always use user-defined masses; burn time set later from dataset
-            lox_tank_work = working.setdefault("lox_tank", {})
-            fuel_tank_work = working.setdefault("fuel_tank", {})
-            lox_tank_work["mass"] = float(m_lox)
-            fuel_tank_work["mass"] = float(m_fuel)
-    except Exception as exc:
-        st.error(f"Invalid flight configuration: {exc}")
-        return
-
-    # Collapsible configuration editor
-    st.subheader("Flight configuration")
-    with st.expander("Environment", expanded=False):
-        env = working.get("environment", {}) or {}
-        env.setdefault("latitude", 35.0)
-        env.setdefault("longitude", -117.0)
-        env.setdefault("elevation", 0.0)
-        env.setdefault("p_amb", 101325.0)
-        colE1, colE2 = st.columns(2)
-        with colE1:
-            env_lat = st.number_input("Latitude [deg]", value=float(env.get("latitude", 35.0)), key="flight_env_lat")
-            env_elev = st.number_input("Elevation [m]", value=float(env.get("elevation", 0.0)), key="flight_env_elev")
-        with colE2:
-            env_lon = st.number_input("Longitude [deg]", value=float(env.get("longitude", -117.0)), key="flight_env_lon")
-            env_pamb = st.number_input("Ambient pressure [Pa]", value=float(env.get("p_amb", 101325.0)), key="flight_env_pamb")
-        env["latitude"] = float(env_lat)
-        env["longitude"] = float(env_lon)
-        env["elevation"] = float(env_elev)
-        env["p_amb"] = float(env_pamb)
-        working["environment"] = env
-
-    with st.expander("Rocket", expanded=False):
-        rocket = working.get("rocket") or {}
-        rocket.setdefault("mass", 90.72)
-        rocket.setdefault("inertia", [8.0, 8.0, 0.5])
-        rocket.setdefault("radius", 0.1)
-        rocket.setdefault("cm_wo_motor", 1.0)
-        rocket.setdefault("dry_mass", 12.0)
-        rocket.setdefault("motor_inertia", [0.1, 0.1, 0.1])
-        colR1, colR2, colR3 = st.columns(3)
-        with colR1:
-            r_mass = st.number_input("Rocket mass [kg]", value=float(rocket.get("mass", 90.72)), key="flight_rocket_mass")
-            r_radius = st.number_input("Rocket radius [m]", value=float(rocket.get("radius", 0.1)), key="flight_rocket_radius")
-        with colR2:
-            r_cm = st.number_input("CM without motor [m]", value=float(rocket.get("cm_wo_motor", 1.0)), key="flight_rocket_cm")
-            r_dry = st.number_input("Rocket dry mass [kg]", value=float(rocket.get("dry_mass", 12.0)), key="flight_rocket_dry")
-        with colR3:
-            mi_x = st.number_input("Motor inertia X", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[0]), key="flight_motor_inertia_x")
-            mi_y = st.number_input("Motor inertia Y", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[1]), key="flight_motor_inertia_y")
-            mi_z = st.number_input("Motor inertia Z", value=float(rocket.get("motor_inertia", [0.1, 0.1, 0.1])[2]), key="flight_motor_inertia_z")
-        rocket["mass"] = float(r_mass)
-        rocket["radius"] = float(r_radius)
-        rocket["cm_wo_motor"] = float(r_cm)
-        rocket["dry_mass"] = float(r_dry)
-        rocket["motor_inertia"] = [float(mi_x), float(mi_y), float(mi_z)]
-
-        # Fins
-        fins = (rocket.get("fins") or {})
-        fins.setdefault("no_fins", 3)
-        fins.setdefault("root_chord", 0.2)
-        fins.setdefault("tip_chord", 0.1)
-        fins.setdefault("fin_span", 0.3)
-        fins.setdefault("fin_position", 0.0)
-        colF1, colF2, colF3 = st.columns(3)
-        with colF1:
-            fins["no_fins"] = int(st.number_input("Fin count", value=int(fins["no_fins"]), min_value=1, step=1, key="flight_fins_count"))
-            fins["root_chord"] = float(st.number_input("Root chord [m]", value=float(fins["root_chord"]), key="flight_fins_root"))
-        with colF2:
-            fins["tip_chord"] = float(st.number_input("Tip chord [m]", value=float(fins["tip_chord"]), key="flight_fins_tip"))
-            fins["fin_span"] = float(st.number_input("Fin span [m]", value=float(fins["fin_span"]), key="flight_fins_span"))
-        with colF3:
-            fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fins["fin_position"]), key="flight_fins_pos"))
-        rocket["fins"] = fins
-        working["rocket"] = rocket
-
-    with st.expander("Tanks", expanded=False):
-        lox_tank = (working.get("lox_tank") or {})
-        fuel_tank = (working.get("fuel_tank") or {})
-        press_tank = (working.get("press_tank") or {})
-        # LOX
-        lox_tank.setdefault("lox_h", 1.14)
-        lox_tank.setdefault("lox_radius", 0.0762)
-        lox_tank.setdefault("ox_tank_pos", 0.6)
-        colL1, colL2, colL3 = st.columns(3)
-        with colL1:
-            lox_tank["lox_h"] = float(st.number_input("LOX tank height [m]", value=float(lox_tank["lox_h"]), key="flight_lox_h"))
-        with colL2:
-            lox_tank["lox_radius"] = float(st.number_input("LOX tank radius [m]", value=float(lox_tank["lox_radius"]), key="flight_lox_radius"))
-        with colL3:
-            lox_tank["ox_tank_pos"] = float(st.number_input("LOX tank position [m]", value=float(lox_tank["ox_tank_pos"]), key="flight_lox_pos"))
-        # Fuel
-        fuel_tank.setdefault("rp1_h", 0.609)
-        fuel_tank.setdefault("rp1_radius", 0.0762)
-        fuel_tank.setdefault("fuel_tank_pos", -0.2)
-        colFu1, colFu2, colFu3 = st.columns(3)
-        with colFu1:
-            fuel_tank["rp1_h"] = float(st.number_input("Fuel tank height [m]", value=float(fuel_tank["rp1_h"]), key="flight_rp1_h"))
-        with colFu2:
-            fuel_tank["rp1_radius"] = float(st.number_input("Fuel tank radius [m]", value=float(fuel_tank["rp1_radius"]), key="flight_rp1_radius"))
-        with colFu3:
-            fuel_tank["fuel_tank_pos"] = float(st.number_input("Fuel tank position [m]", value=float(fuel_tank["fuel_tank_pos"]), key="flight_rp1_pos"))
-        # Pressurant (optional)
-        if press_tank is None:
-            press_tank = {}
-        press_tank.setdefault("press_h", 0.457)
-        press_tank.setdefault("press_radius", 0.0762)
-        press_tank.setdefault("pres_tank_pos", 1.2)
-        colP1, colP2, colP3 = st.columns(3)
-        with colP1:
-            press_tank["press_h"] = float(st.number_input("Pressurant tank height [m]", value=float(press_tank["press_h"]), key="flight_press_h"))
-        with colP2:
-            press_tank["press_radius"] = float(st.number_input("Pressurant tank radius [m]", value=float(press_tank["press_radius"]), key="flight_press_radius"))
-        with colP3:
-            press_tank["pres_tank_pos"] = float(st.number_input("Pressurant tank position [m]", value=float(press_tank["pres_tank_pos"]), key="flight_press_pos"))
-        working["lox_tank"] = lox_tank
-        working["fuel_tank"] = fuel_tank
-        working["press_tank"] = press_tank
-
-    with st.expander("Nozzle", expanded=False):
-        nozzle = working.get("nozzle") or {}
-        nozzle.setdefault("A_throat", 0.00156235266901)
-        nozzle.setdefault("A_exit", 0.00831498636119)
-        nozzle.setdefault("expansion_ratio", 6.54)
-        nozzle.setdefault("efficiency", 0.98)
-        colN1, colN2 = st.columns(2)
-        with colN1:
-            nozzle["A_throat"] = float(st.number_input("Throat area [m²]", value=float(nozzle["A_throat"]), key="flight_noz_at"))
-            nozzle["expansion_ratio"] = float(st.number_input("Expansion ratio (Ae/At)", value=float(nozzle["expansion_ratio"]), key="flight_noz_er"))
-        with colN2:
-            nozzle["A_exit"] = float(st.number_input("Exit area [m²]", value=float(nozzle["A_exit"]), key="flight_noz_ae"))
-            nozzle["efficiency"] = float(st.number_input("Nozzle efficiency", value=float(nozzle["efficiency"]), key="flight_noz_eta"))
-        working["nozzle"] = nozzle
-
-    with st.expander("Fluids (properties)", expanded=False):
-        fluids = working.get("fluids") or {}
-        ox = fluids.get("oxidizer") or {}
-        fu = fluids.get("fuel") or {}
-        ox.setdefault("name", "LOX")
-        ox.setdefault("density", 1140.0)
-        ox.setdefault("temperature", 90.0)
-        fu.setdefault("name", "RP-1")
-        fu.setdefault("density", 780.0)
-        fu.setdefault("temperature", 293.0)
-        colOx1, colOx2, colOx3 = st.columns(3)
-        with colOx1:
-            ox["name"] = st.text_input("Oxidizer name", value=str(ox["name"]), key="flight_ox_name")
-        with colOx2:
-            ox["density"] = float(st.number_input("Oxidizer density [kg/m³]", value=float(ox["density"]), key="flight_ox_density"))
-        with colOx3:
-            ox["temperature"] = float(st.number_input("Oxidizer temperature [K]", value=float(ox["temperature"]), key="flight_ox_temp"))
-        colFu1, colFu2, colFu3 = st.columns(3)
-        with colFu1:
-            fu["name"] = st.text_input("Fuel name", value=str(fu["name"]), key="flight_fu_name")
-        with colFu2:
-            fu["density"] = float(st.number_input("Fuel density [kg/m³]", value=float(fu["density"]), key="flight_fu_density"))
-        with colFu3:
-            fu["temperature"] = float(st.number_input("Fuel temperature [K]", value=float(fu["temperature"]), key="flight_fu_temp"))
-        fluids["oxidizer"] = ox
-        fluids["fuel"] = fu
-        working["fluids"] = fluids
-
-    # Validate edited working config
-    try:
-        config_for_flight = PintleEngineConfig(**working)
-    except Exception as exc:
-        st.error(f"Edited flight configuration is invalid: {exc}")
-        return
-
-    if run_btn:
-        # If dataset-driven, build Functions and override burn time
-        if source == "Dataset (time-varying)":
-            try:
-                # Convert time column and thrust values
-                t_vals = to_elapsed_seconds(ds_df[time_col])
-                thrust_vals = np.asarray(ds_df[thrust_col], dtype=float)
-            except Exception as exc:
-                st.error(f"Invalid dataset columns: {exc}")
-                return
-            # Unit handling for thrust
-            if "(kN)" in thrust_col:
-                thrust_vals_SI = thrust_vals * 1000.0
-            elif "(N)" in thrust_col:
-                thrust_vals_SI = thrust_vals
-            else:
-                # Assume N if unitless; provide a toggle?
-                thrust_vals_SI = thrust_vals
-            # mdot handling
-            if mdot_o_col != "None" and mdot_f_col != "None":
-                mdot_O_vals = np.asarray(ds_df[mdot_o_col], dtype=float)
-                mdot_F_vals = np.asarray(ds_df[mdot_f_col], dtype=float)
-            elif mr_col != "None" and mdot_total_col != "None":
-                MR_vals = np.asarray(ds_df[mr_col], dtype=float)
-                mdot_total_vals = np.asarray(ds_df[mdot_total_col], dtype=float)
-                mdot_O_vals = mdot_total_vals * (MR_vals / (1.0 + MR_vals))
-                mdot_F_vals = mdot_total_vals * (1.0 / (1.0 + MR_vals))
-            else:
-                st.error("Provide either mdot_O and mdot_F columns, or MR and total mdot.")
-                return
-
-            # Sort by time and drop duplicates if needed
-            order = np.argsort(t_vals)
-            t_vals = t_vals[order]
-            thrust_vals_SI = thrust_vals_SI[order]
-            mdot_O_vals = mdot_O_vals[order]
-            mdot_F_vals = mdot_F_vals[order]
-            
-            # Store original arrays for later (before truncation)
-            t_vals_original = t_vals.copy()
-            thrust_vals_original = thrust_vals_SI.copy()
-            mdot_O_vals_original = mdot_O_vals.copy()
-            mdot_F_vals_original = mdot_F_vals.copy()
-
-            # Deduce burn time from dataset
-            if len(t_vals) < 2:
-                st.error("Dataset must contain at least two time samples to define a burn duration.")
-                return
-            burn_time_ds = float(np.max(t_vals) - np.min(t_vals))
-            if not np.isfinite(burn_time_ds) or burn_time_ds <= 0.0:
-                st.error("Dataset time axis must increase (duration must be > 0 s). Check the selected time column.")
-                return
-            
-            # Check for tank underfill and truncate dataset if needed
-            m_lox0 = float(m_lox)
-            m_fuel0 = float(m_fuel)
-            
-            # Normalize time to start at 0
-            t_min = float(np.min(t_vals))
-            t_vals_normalized = t_vals - t_min
-            
-            # Detect underfill by integrating mdot arrays
-            def detect_underfill_from_arrays(times, mdot_array, m_initial):
-                """Detect when tank would be depleted by integrating mdot array."""
-                if len(times) < 2:
-                    return None
-                # Use trapezoidal integration
-                cumulative_mass = np.zeros_like(times)
-                for i in range(1, len(times)):
-                    dt = times[i] - times[i-1]
-                    cumulative_mass[i] = cumulative_mass[i-1] + (mdot_array[i-1] + mdot_array[i]) * dt / 2.0
-                # Find where cumulative mass exceeds initial mass
-                depletion_idx = np.where(cumulative_mass >= m_initial)[0]
-                if len(depletion_idx) > 0:
-                    return float(times[depletion_idx[0]])
-                return None
-            
-            lox_cutoff = detect_underfill_from_arrays(t_vals_normalized, mdot_O_vals, m_lox0)
-            fuel_cutoff = detect_underfill_from_arrays(t_vals_normalized, mdot_F_vals, m_fuel0)
-            
-            # Find earliest cutoff time
-            cutoff_time = None
-            cutoff_reason = None
-            if lox_cutoff is not None and fuel_cutoff is not None:
-                if lox_cutoff <= fuel_cutoff:
-                    cutoff_time = lox_cutoff
-                    cutoff_reason = "LOX"
-                else:
-                    cutoff_time = fuel_cutoff
-                    cutoff_reason = "fuel"
-            elif lox_cutoff is not None:
-                cutoff_time = lox_cutoff
-                cutoff_reason = "LOX"
-            elif fuel_cutoff is not None:
-                cutoff_time = fuel_cutoff
-                cutoff_reason = "fuel"
-            
-            # Truncate arrays at cutoff time
-            if cutoff_time is not None:
-                # Find indices where time <= cutoff
-                valid_mask = t_vals_normalized <= cutoff_time
-                valid_indices = np.where(valid_mask)[0]
-                
-                if len(valid_indices) > 0:
-                    # Check if the last valid point is exactly at cutoff_time
-                    last_valid_idx = valid_indices[-1]
-                    last_valid_time = t_vals_normalized[last_valid_idx]
-                    
-                    if abs(last_valid_time - cutoff_time) < 1e-6:
-                        # Last point is already at cutoff, just set last values to 0
-                        t_vals_trunc = t_vals_normalized[:last_valid_idx+1].copy()
-                        thrust_vals_trunc = thrust_vals_SI[:last_valid_idx+1].copy()
-                        mdot_O_vals_trunc = mdot_O_vals[:last_valid_idx+1].copy()
-                        mdot_F_vals_trunc = mdot_F_vals[:last_valid_idx+1].copy()
-                        # Set last point to 0
-                        thrust_vals_trunc[-1] = 0.0
-                        mdot_O_vals_trunc[-1] = 0.0
-                        mdot_F_vals_trunc[-1] = 0.0
-                    else:
-                        # Need to add a point at cutoff_time with 0 values
-                        t_vals_trunc = np.concatenate([t_vals_normalized[:last_valid_idx+1], [cutoff_time]])
-                        thrust_vals_trunc = np.concatenate([thrust_vals_SI[:last_valid_idx+1], [0.0]])
-                        mdot_O_vals_trunc = np.concatenate([mdot_O_vals[:last_valid_idx+1], [0.0]])
-                        mdot_F_vals_trunc = np.concatenate([mdot_F_vals[:last_valid_idx+1], [0.0]])
-                    
-                    # Update arrays
-                    t_vals_normalized = t_vals_trunc
-                    thrust_vals_SI = thrust_vals_trunc
-                    mdot_O_vals = mdot_O_vals_trunc
-                    mdot_F_vals = mdot_F_vals_trunc
-                    
-                    # Show warning
-                    st.warning(f"{cutoff_reason.capitalize()} tank underfill detected at t={cutoff_time:.3f} s. Dataset truncated.")
-                    
-                    # Update burn time
-                    burn_time_ds = float(cutoff_time)
-            
-            # Restore original time offset for display
-            t_vals = t_vals_normalized + t_min
-            
-            # Always add truncated thrust column to original dataset
-            # (If no truncation occurred, it will just match the original thrust)
-            cutoff_time_original = (cutoff_time + t_min) if cutoff_time is not None else None
-            
-            # Create a function to interpolate truncated thrust at any time
-            def get_truncated_thrust(t_query):
-                """Get truncated thrust value at time t_query using interpolation."""
-                if cutoff_time_original is not None and t_query > cutoff_time_original:
-                    return 0.0
-                # Find the index in truncated data (or original if no truncation)
-                idx = np.searchsorted(t_vals, t_query, side='right') - 1
-                if idx < 0:
-                    return 0.0
-                if idx >= len(thrust_vals_SI) - 1:
-                    return thrust_vals_SI[-1] if len(thrust_vals_SI) > 0 else 0.0
-                # Linear interpolation
-                t1, t2 = t_vals[idx], t_vals[idx+1]
-                f1, f2 = thrust_vals_SI[idx], thrust_vals_SI[idx+1]
-                if abs(t2 - t1) > 1e-9:
-                    return f1 + (f2 - f1) * (t_query - t1) / (t2 - t1)
-                return f1
-            
-            # Add truncated thrust column to original dataset
-            ds_df_with_truncated = ds_df.copy()
-            # Apply truncated thrust function to each row's time value
-            ds_df_with_truncated["Thrust_truncated (N)"] = ds_df[time_col].apply(get_truncated_thrust)
-            
-            # Update the dataset in session state
-            datasets[dataset_name] = ds_df_with_truncated
-            st.session_state["custom_plot_datasets"] = datasets
-            if cutoff_time is not None:
-                st.info(f"Added 'Thrust_truncated (N)' column to dataset '{dataset_name}' (truncated at t={cutoff_time:.3f} s).")
-            else:
-                st.info(f"Added 'Thrust_truncated (N)' column to dataset '{dataset_name}' (no truncation needed).")
-            
-            working["thrust"]["burn_time"] = burn_time_ds
-            # Use user-defined propellant masses (set earlier in the form)
-            try:
-                config_for_flight = PintleEngineConfig(**working)
-            except Exception as exc:
-                st.error(f"Edited flight configuration is invalid: {exc}")
-                return
-
-            # Build RocketPy Functions from (potentially truncated) data
-            thrust_func = build_rp_function(t_vals, thrust_vals_SI)
-            mdot_O_func = build_rp_function(t_vals, mdot_O_vals)
-            mdot_F_func = build_rp_function(t_vals, mdot_F_vals)
-
-            # Run flight directly with dataset-driven inputs
-            # (Dataset is already truncated above if needed)
-            try:
-                sim_result = setup_flight(config_for_flight, thrust_func, mdot_O_func, mdot_F_func, plot_results=False)
-            except Exception as exc:
-                st.error(f"Flight simulation failed: {exc}")
-                return
-
-            apogee = sim_result.get("apogee")
-            max_v = sim_result.get("max_velocity")
-            flight = sim_result.get("flight")
-
-            colm1, colm2 = st.columns(2)
-            colm1.metric("Apogee", f"{apogee:.1f} m" if isinstance(apogee, (int, float)) else "N/A")
-            if isinstance(max_v, (int, float)) and max_v is not None:
-                colm2.metric("Max Velocity", f"{max_v:.1f} m/s")
-            else:
-                colm2.metric("Max Velocity", "N/A")
-
-            # Plot altitude/velocity
-            try:
-                t_series, z_series, vz_series = extract_flight_series(flight)
-                plot_flight_results(t_series, z_series, vz_series, key_suffix="_ds")
-                
-                # Add flight simulation data to dataset
-                if len(t_series) > 0 and len(z_series) > 0 and len(vz_series) > 0:
-                    # Get the current dataset (should already have truncated thrust column)
-                    ds_df_current = datasets.get(dataset_name)
-                    if ds_df_current is None:
-                        # Fallback to original if somehow not in session state
-                        ds_df_current = ds_df_with_truncated if 'ds_df_with_truncated' in locals() else ds_df
-                    
-                    # Get launch elevation for cumulative altitude (altitude above sea level)
-                    launch_elevation = float(config_for_flight.environment.elevation) if config_for_flight.environment else 0.0
-                    
-                    # Create interpolation functions for flight data
-                    # Use numpy interpolation for better performance and accuracy
-                    from scipy.interpolate import interp1d
-                    
-                    # Ensure time series are sorted and unique
-                    t_series_sorted, sort_idx = np.unique(t_series, return_index=True)
-                    z_series_sorted = z_series[sort_idx]
-                    vz_series_sorted = vz_series[sort_idx]
-                    
-                    # Create interpolation functions (extrapolate to constant values outside range)
-                    if len(t_series_sorted) > 1:
-                        # Use linear interpolation, extrapolate to boundary values
-                        interp_z = interp1d(t_series_sorted, z_series_sorted, kind='linear', 
-                                           bounds_error=False, fill_value=(z_series_sorted[0], z_series_sorted[-1]))
-                        interp_vz = interp1d(t_series_sorted, vz_series_sorted, kind='linear',
-                                            bounds_error=False, fill_value=(0.0, 0.0))
-                    else:
-                        # Fallback if insufficient data
-                        interp_z = lambda t: z_series_sorted[0] if len(z_series_sorted) > 0 else 0.0
-                        interp_vz = lambda t: 0.0
-                    
-                    def get_altitude(t_query):
-                        """Get cumulative altitude (height above sea level) at time t_query using interpolation."""
-                        if len(t_series_sorted) == 0:
-                            return launch_elevation
-                        # Get interpolated altitude above launch
-                        z_above_launch = float(interp_z(t_query))
-                        # Return cumulative: launch elevation + altitude above launch
-                        return launch_elevation + max(0.0, z_above_launch)
-                    
-                    def get_vertical_velocity(t_query):
-                        """Get vertical velocity at time t_query using interpolation."""
-                        if len(t_series_sorted) == 0:
-                            return 0.0
-                        # Get interpolated velocity (already handles bounds)
-                        return float(interp_vz(t_query))
-                    
-                    # Add flight data columns to dataset
-                    # Ensure dataset is sorted by time to avoid interpolation issues
-                    ds_df_flight = ds_df_current.copy()
-                    ds_df_flight = ds_df_flight.sort_values(by=time_col).reset_index(drop=True)
-                    
-                    # Apply interpolation to sorted dataset
-                    ds_df_flight["Altitude above sea level (m)"] = ds_df_flight[time_col].apply(get_altitude)
-                    ds_df_flight["Vertical Velocity (m/s)"] = ds_df_flight[time_col].apply(get_vertical_velocity)
-                    
-                    # Add scalar metrics as constant columns (for reference)
-                    if isinstance(apogee, (int, float)):
-                        ds_df_flight["Apogee (m)"] = apogee
-                    if isinstance(max_v, (int, float)) and max_v is not None:
-                        ds_df_flight["Max Velocity (m/s)"] = max_v
-                    
-                    # Update the dataset in session state
-                    datasets[dataset_name] = ds_df_flight
-                    st.session_state["custom_plot_datasets"] = datasets
-                    st.info(f"Added flight simulation data (altitude, velocity) to dataset '{dataset_name}'.")
-            except Exception as exc:
-                st.warning(f"Could not extract time series: {exc}")
-                return
-            with st.expander("Rocket view (render)"):
-                render_rocket_view(flight)
-            with st.expander("Additional rocket plots"):
-                plot_additional_rocket_plots(flight, t_series, key_suffix="_ds")
-            with st.expander("Thrust curve"):
-                thrust_df = pd.DataFrame({"time": t_vals, "Thrust (N)": thrust_vals_SI})
-                st.plotly_chart(px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (dataset)"), use_container_width=True, key="flight_thrust_plot_ds")
-            return
-
-        # Evaluate engine performance at specified tank pressures
-        try:
-            results = runner.evaluate(P_tank_O_psi * PSI_TO_PA, P_tank_F_psi * PSI_TO_PA)
-        except Exception as exc:
-            st.error(f"Engine performance evaluation failed: {exc}")
-            return
-
-        F = float(results.get("F", 0.0))
-        mdot_O = float(results.get("mdot_O", 0.0))
-        mdot_F = float(results.get("mdot_F", 0.0))
-
-        if F <= 0 or mdot_O <= 0 or mdot_F <= 0:
-            st.error("Non-physical engine outputs (thrust or mass flows <= 0). Check inputs.")
-            return
-
-        # Build constant thrust curve [(t, F)]
-        thrust_curve = [(0.0, F), (float(burn_time), F)]
-
-        try:
-            sim_result = setup_flight(config_for_flight, thrust_curve, mdot_O, mdot_F, plot_results=False)
-        except Exception as exc:
-            st.error(f"Flight simulation failed: {exc}")
-            return
-
-        # Display truncation info if tank underfill was detected
-        truncation_info = sim_result.get("truncation_info")
-        if truncation_info and truncation_info.get("truncated"):
-            st.warning(truncation_info.get("message", "Tank underfill detected and truncated."))
-
-        apogee = sim_result.get("apogee")
-        max_v = sim_result.get("max_velocity")
-        flight = sim_result.get("flight")
-
-        colm1, colm2 = st.columns(2)
-        colm1.metric("Apogee", f"{apogee:.1f} m" if isinstance(apogee, (int, float)) else "N/A")
-        if isinstance(max_v, (int, float)) and max_v is not None:
-            colm2.metric("Max Velocity", f"{max_v:.1f} m/s")
-        else:
-            colm2.metric("Max Velocity", "N/A")
-
-        # Extract and plot time series
-        try:
-            t_series, z_series, vz_series = extract_flight_series(flight)
-            plot_flight_results(t_series, z_series, vz_series)
-        except Exception as exc:
-            st.warning(f"Could not extract time series: {exc}")
-            return
-
-        with st.expander("Thrust curve"):
-            thrust_df = pd.DataFrame({"time": [0.0, float(burn_time)], "Thrust (N)": [F, F]})
-            thrust_fig = px.line(thrust_df, x="time", y="Thrust (N)", title="Thrust Curve (assumed constant)")
-            st.plotly_chart(thrust_fig, use_container_width=True, key="flight_thrust_plot")
-        with st.expander("Rocket view (render)"):
-            render_rocket_view(flight)
-        with st.expander("Additional rocket plots"):
-            plot_additional_rocket_plots(flight, t_series)
-    else:
-        st.info("Edit configuration above, then click Run Flight Simulation.")
 
 def detect_fluid_choice(fluid: Dict[str, Any]) -> str:
     name = fluid.get("name")
@@ -3847,24 +3712,19 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     st.code(traceback.format_exc())
         else:
             # Tank pressures mode: constant thrust
-            # Evaluate engine once to get actual mdot values
-            default_thrust = float(getattr(getattr(config_obj, "thrust", None), "thrust", None)) if getattr(getattr(config_obj, "thrust", None), "thrust", None) is not None else 1000.0
-            thrust_val = default_thrust
-            if hasattr(config_obj, "thrust") and config_obj.thrust:
-                thrust_val = float(config_obj.thrust.thrust)
-            
-            # Evaluate engine to get mdot values
+            # Evaluate engine at specified tank pressures to get actual thrust and mdot values
             try:
                 eval_result = runner.evaluate(
-                    P_tank_O=config_obj.P_tank_O,
-                    P_tank_F=config_obj.P_tank_F,
-                    F_target=thrust_val
+                    P_tank_O=P_tank_O_psi * PSI_TO_PA,
+                    P_tank_F=P_tank_F_psi * PSI_TO_PA
                 )
+                thrust_val = float(eval_result.get("F", 1000.0))
                 mdot_lox_actual = float(eval_result["mdot_O"])
                 mdot_fuel_actual = float(eval_result["mdot_F"])
             except Exception as exc:
-                st.warning(f"Could not evaluate engine for mdot values: {exc}. Using estimates.")
-                # Fallback to estimates based on mass and burn time
+                st.warning(f"Could not evaluate engine for thrust and mdot values: {exc}. Using estimates.")
+                # Fallback to estimates
+                thrust_val = 1000.0
                 mdot_lox_actual = float(m_lox) / float(burn_time) * 0.8
                 mdot_fuel_actual = float(m_fuel) / float(burn_time) * 0.2
             

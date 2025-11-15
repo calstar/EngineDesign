@@ -7,8 +7,6 @@ Reusable RocketPy-based liquid engine flight simulation module.
 import numpy as np
 import math
 import matplotlib.pyplot as plt
-from rocketpy.motors import LiquidMotor
-from rocketcea.cea_obj_w_units import CEA_Obj
 from rocketpy import Environment, Rocket, Flight, Function, Fluid
 from rocketpy.motors import LiquidMotor, CylindricalTank
 from rocketpy.motors.tank import MassBasedTank, MassFlowRateBasedTank
@@ -318,6 +316,8 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     rocket_inertia = config.rocket.inertia
     rocket_radius = config.rocket.radius
     cm_wo_motor = config.rocket.cm_wo_motor
+    if config.rocket.motor is None:
+        raise ValueError("Rocket configuration must include motor configuration")
     motor_dry_mass = config.rocket.motor.dry_mass
     motor_inertia = config.rocket.motor_inertia
 

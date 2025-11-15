@@ -103,7 +103,12 @@ class PintleInjector(InjectorModel):
                 mdot_O = mdot_O_guess
                 mdot_F = mdot_F_guess
 
+            # Initialize feed losses (will be updated in feed_iter loop)
+            delta_p_feed_O = 0.0
+            delta_p_feed_F = 0.0
+            
             for feed_iter in range(3):
+                # Calculate feed losses with current mass flows
                 delta_p_feed_O = delta_p_feed(mdot_O, rho_O, feed_O, P_tank_O)
 
                 delta_p_feed_F_base = delta_p_feed(mdot_F, rho_F, feed_F, P_tank_F)
@@ -262,6 +267,13 @@ class PintleInjector(InjectorModel):
                     "turbulence_intensity_mix": turbulence_intensity_mix,
                     "breakup_multiplier": breakup_multiplier,
                     "penetration_multiplier": penetration_multiplier,
+                    # Injector pressure diagnostics
+                    "P_injector_O": float(P_inj_O),
+                    "P_injector_F": float(P_inj_F),
+                    "delta_p_injector_O": float(delta_p_inj_O),
+                    "delta_p_injector_F": float(delta_p_inj_F),
+                    "delta_p_feed_O": float(delta_p_feed_O),
+                    "delta_p_feed_F": float(delta_p_feed_F),
                 }
             )
 

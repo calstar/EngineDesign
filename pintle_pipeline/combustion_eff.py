@@ -1,7 +1,12 @@
-"""Combustion efficiency models (L* correction)"""
+"""Combustion efficiency models (L* correction)
+
+This module provides both:
+1. Simple efficiency model (eta_cstar) - backward compatible
+2. Advanced physics-based model (via combustion_physics module)
+"""
 
 import numpy as np
-from typing import Optional
+from typing import Optional, Dict, Any
 from .config_schemas import CombustionEfficiencyConfig
 
 
@@ -43,14 +48,24 @@ def eta_cstar(
     config: CombustionEfficiencyConfig,
     spray_quality_good: bool = True,
     mixture_efficiency: float = 1.0,
-    cooling_efficiency: float = 1.0
+    cooling_efficiency: float = 1.0,
+    use_advanced_model: bool = False,
+    advanced_params: Optional[Dict[str, Any]] = None,
 ) -> float:
     """
     Calculate combustion efficiency based on characteristic length L*.
     
-    Model: η_c* = 1 - C × e^(-K×L*)
+    Can use either:
+    1. Simple model: η_c* = 1 - C × e^(-K×L*) (default, backward compatible)
+    2. Advanced model: Physics-based with kinetics, mixing, turbulence (if use_advanced_model=True)
     
     This corrects CEA's infinite-area equilibrium assumption for finite chambers.
+    
+    NOTE: CEA uses EQUILIBRIUM flow (not frozen). The correction accounts for:
+    - Finite residence time (L*)
+    - Incomplete mixing
+    - Finite-rate chemistry effects
+    - Heat losses
     
     Parameters:
     -----------
@@ -60,12 +75,69 @@ def eta_cstar(
         Efficiency configuration
     spray_quality_good : bool
         Whether spray constraints are satisfied (affects efficiency if enabled)
+    mixture_efficiency : float
+        Mixture efficiency factor (from spray diagnostics)
+    cooling_efficiency : float
+        Cooling efficiency factor (from heat transfer)
+    use_advanced_model : bool
+        If True, use advanced physics-based model
+    advanced_params : dict, optional
+        Parameters for advanced model:
+        - Pc: Chamber pressure [Pa]
+        - Tc: Chamber temperature [K]
+        - cstar_ideal: Ideal c* [m/s]
+        - gamma: Specific heat ratio
+        - R: Gas constant [J/(kg·K)]
+        - MR: Mixture ratio
+        - spray_diagnostics: Spray diagnostics dict
+        - turbulence_intensity: Turbulence intensity (0-1)
     
     Returns:
     --------
     eta : float
         Combustion efficiency (0-1)
     """
+    # Use advanced model if requested and parameters provided
+    if use_advanced_model and advanced_params is not None:
+        try:
+            from .combustion_physics import calculate_combustion_efficiency_advanced
+            
+            # Extract parameters
+            Pc = advanced_params.get("Pc", 4.0e6)
+            Tc = advanced_params.get("Tc", 3500.0)
+            cstar_ideal = advanced_params.get("cstar_ideal", 1800.0)
+            gamma = advanced_params.get("gamma", 1.2)
+            R = advanced_params.get("R", 400.0)
+            MR = advanced_params.get("MR", 2.5)
+            spray_diagnostics = advanced_params.get("spray_diagnostics", None)
+            turbulence_intensity = advanced_params.get("turbulence_intensity", 0.08)
+            
+            # Calculate advanced efficiency
+            results = calculate_combustion_efficiency_advanced(
+                Lstar, Pc, Tc, cstar_ideal, gamma, R, MR, config,
+                spray_diagnostics, turbulence_intensity
+            )
+            
+            eta = results["eta_total"]
+            
+            # Apply cooling efficiency (external factor)
+            cooling_eff = float(np.clip(cooling_efficiency, config.cooling_efficiency_floor, 1.0))
+            eta *= cooling_eff
+            
+            # Final clamp
+            lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
+            eta = np.clip(eta, lower_bound, 1.0)
+            
+            return float(eta)
+            
+        except ImportError:
+            # Fall back to simple model if advanced module not available
+            pass
+        except Exception:
+            # Fall back to simple model on any error
+            pass
+    
+    # Simple model (backward compatible)
     if config.model == "constant":
         eta = 1.0 - config.C
     elif config.model == "linear":

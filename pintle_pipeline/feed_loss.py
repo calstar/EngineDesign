@@ -45,16 +45,52 @@ def delta_p_feed(
     
     # Calculate area from inlet diameter if A_hydraulic not explicitly set
     # A_hydraulic should be calculated from d_inlet if not provided
-    if hasattr(config, 'd_inlet') and config.d_inlet > 0:
-        A_area = np.pi * (config.d_inlet / 2) ** 2
+    # Check both attribute access and dict access (config might be dict or object)
+    d_inlet = None
+    if hasattr(config, 'd_inlet'):
+        d_inlet = config.d_inlet
+    elif isinstance(config, dict) and 'd_inlet' in config:
+        d_inlet = config['d_inlet']
+    
+    if d_inlet is not None and d_inlet > 0:
+        A_area = np.pi * (d_inlet / 2) ** 2
     else:
-        A_area = config.A_hydraulic
+        # Use A_hydraulic if available
+        if hasattr(config, 'A_hydraulic'):
+            A_area = config.A_hydraulic
+        elif isinstance(config, dict) and 'A_hydraulic' in config:
+            A_area = config['A_hydraulic']
+        else:
+            # Fallback: calculate from d_inlet if it exists but wasn't caught above
+            raise ValueError(f"Feed system config must have either d_inlet > 0 or A_hydraulic > 0. Got: d_inlet={d_inlet}, config={config}")
+    
+    # Validate inputs
+    if A_area <= 0:
+        raise ValueError(f"Invalid feed system area: A_area={A_area:.6e} m². Must be > 0. Check d_inlet or A_hydraulic in config.")
+    if rho <= 0:
+        raise ValueError(f"Invalid fluid density: rho={rho:.2f} kg/m³. Must be > 0.")
+    if mdot < 0:
+        raise ValueError(f"Invalid mass flow: mdot={mdot:.4f} kg/s. Must be >= 0.")
     
     # Calculate velocity
     velocity = mdot / (rho * A_area)
     
     # Calculate pressure loss
+    # Δp_feed = K_eff × (ρ/2) × v²
+    # This is the standard form for minor losses in pipe flow
     delta_p = K_eff * (rho / 2) * velocity**2
+    
+    # Ensure non-negative (pressure loss can't be negative)
+    delta_p = max(0.0, delta_p)
+    
+    # Debug output for zero pressure drop
+    if delta_p == 0.0 and mdot > 0.01:  # Only warn if there's significant flow
+        import warnings
+        warnings.warn(
+            f"Feed system pressure drop is zero with mdot={mdot:.4f} kg/s, rho={rho:.2f} kg/m³, "
+            f"A_area={A_area:.6e} m², K_eff={K_eff:.2f}, velocity={velocity:.2f} m/s. "
+            f"Check feed system configuration."
+        )
     
     return float(delta_p)
 
