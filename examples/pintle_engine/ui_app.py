@@ -814,6 +814,28 @@ def custom_plot_builder() -> None:
             st.warning("Select at least one Y-axis variable.")
             return
 
+        # Secondary axis options
+        use_secondary = False
+        primary_y_cols = y_cols
+        secondary_y_cols = []
+        
+        if len(y_cols) > 1:
+            use_secondary = st.checkbox("Use secondary Y-axis", value=False, help="Assign some variables to a secondary Y-axis")
+            if use_secondary:
+                primary_y_cols = st.multiselect(
+                    "Primary Y-axis variables", 
+                    y_cols, 
+                    default=y_cols[:1],
+                    help="Variables plotted on the left Y-axis"
+                )
+                secondary_y_cols = [col for col in y_cols if col not in primary_y_cols]
+                if not primary_y_cols:
+                    st.warning("Select at least one variable for the primary Y-axis.")
+                    return
+                if not secondary_y_cols:
+                    st.warning("Select at least one variable for the secondary Y-axis, or uncheck 'Use secondary Y-axis'.")
+                    return
+
         color_options = ["None"] + [col for col in numeric_columns if col not in {x_col, *y_cols}]
         color_by = st.selectbox("Color by (optional)", color_options)
 
@@ -821,45 +843,117 @@ def custom_plot_builder() -> None:
             st.warning("When using a color grouping, select a single Y-axis variable.")
             return
 
-        log_x = st.checkbox("Logarithmic X-axis", value=False)
-        log_y = st.checkbox("Logarithmic Y-axis", value=False)
+        # Scaling options
+        st.subheader("Axis Scaling")
+        col1, col2 = st.columns(2)
+        with col1:
+            x_scale = st.selectbox("X-axis scale", ["linear", "log", "symlog"], index=0)
+        with col2:
+            y_scale = st.selectbox("Y-axis scale", ["linear", "log", "symlog"], index=0)
+            if use_secondary:
+                y2_scale = st.selectbox("Secondary Y-axis scale", ["linear", "log", "symlog"], index=0)
+        
         show_markers = st.checkbox("Show markers", value=(plot_type == "Scatter"))
 
-        if plot_type == "Line":
-            if len(y_cols) == 1:
-                fig = px.line(
+        # Create figure with or without secondary axis
+        if use_secondary:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            # Add primary Y-axis traces
+            for y_col in primary_y_cols:
+                if plot_type == "Line":
+                    trace = go.Scatter(
+                        x=df[x_col],
+                        y=df[y_col],
+                        name=y_col,
+                        mode="lines" + ("+markers" if show_markers else ""),
+                    )
+                else:  # Scatter
+                    trace = go.Scatter(
+                        x=df[x_col],
+                        y=df[y_col],
+                        name=y_col,
+                        mode="markers",
+                        marker=dict(size=8),
+                    )
+                fig.add_trace(trace, secondary_y=False)
+            
+            # Add secondary Y-axis traces
+            for y_col in secondary_y_cols:
+                if plot_type == "Line":
+                    trace = go.Scatter(
+                        x=df[x_col],
+                        y=df[y_col],
+                        name=y_col,
+                        mode="lines" + ("+markers" if show_markers else ""),
+                        line=dict(dash="dash"),
+                    )
+                else:  # Scatter
+                    trace = go.Scatter(
+                        x=df[x_col],
+                        y=df[y_col],
+                        name=y_col,
+                        mode="markers",
+                        marker=dict(size=8, symbol="diamond"),
+                    )
+                fig.add_trace(trace, secondary_y=True)
+            
+            # Update axis labels and scales
+            primary_label = ", ".join(primary_y_cols) if len(primary_y_cols) <= 2 else f"{len(primary_y_cols)} variables"
+            secondary_label = ", ".join(secondary_y_cols) if len(secondary_y_cols) <= 2 else f"{len(secondary_y_cols)} variables"
+            
+            fig.update_xaxes(title_text=x_col, type=x_scale if x_scale != "symlog" else "log")
+            fig.update_yaxes(title_text=primary_label, secondary_y=False, type=y_scale if y_scale != "symlog" else "log")
+            fig.update_yaxes(title_text=secondary_label, secondary_y=True, type=y2_scale if y2_scale != "symlog" else "log")
+            
+            fig.update_layout(
+                title="Multi-axis plot",
+                hovermode="x unified",
+            )
+            
+        else:
+            # Single axis plot
+            if plot_type == "Line":
+                if len(y_cols) == 1:
+                    fig = px.line(
+                        df,
+                        x=x_col,
+                        y=y_cols[0],
+                        color=None if color_by == "None" else color_by,
+                        markers=show_markers,
+                        title=f"{y_cols[0]} vs {x_col}",
+                    )
+                else:
+                    melted = df.melt(id_vars=x_col, value_vars=y_cols, var_name="Series", value_name="Value")
+                    fig = px.line(
+                        melted,
+                        x=x_col,
+                        y="Value",
+                        color="Series",
+                        markers=show_markers,
+                        title="Multi-series plot",
+                    )
+            else:  # Scatter
+                fig = px.scatter(
                     df,
                     x=x_col,
                     y=y_cols[0],
                     color=None if color_by == "None" else color_by,
-                    markers=show_markers,
                     title=f"{y_cols[0]} vs {x_col}",
                 )
-            else:
-                melted = df.melt(id_vars=x_col, value_vars=y_cols, var_name="Series", value_name="Value")
-                fig = px.line(
-                    melted,
-                    x=x_col,
-                    y="Value",
-                    color="Series",
-                    markers=show_markers,
-                    title="Multi-series plot",
-                )
-        else:  # Scatter
-            fig = px.scatter(
-                df,
-                x=x_col,
-                y=y_cols[0],
-                color=None if color_by == "None" else color_by,
-                title=f"{y_cols[0]} vs {x_col}",
-            )
-            if show_markers:
-                fig.update_traces(marker=dict(size=8))
-
-        if log_x:
-            fig.update_xaxes(type="log")
-        if log_y:
-            fig.update_yaxes(type="log")
+                if show_markers:
+                    fig.update_traces(marker=dict(size=8))
+            
+            # Apply scaling
+            if x_scale == "log":
+                fig.update_xaxes(type="log")
+            elif x_scale == "symlog":
+                fig.update_xaxes(type="log")
+            
+            if y_scale == "log":
+                fig.update_yaxes(type="log")
+            elif y_scale == "symlog":
+                fig.update_yaxes(type="log")
 
         st.plotly_chart(fig, width="stretch", key="custom_plot_builder")
 
@@ -2040,6 +2134,13 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
         chamber = config_dict["chamber"]
         if "Lstar" in chamber:
             l_star_default_metric = float(chamber["Lstar"])
+        # Use design parameters from config if available
+        if "design_pressure" in chamber and chamber["design_pressure"] is not None:
+            pc_design_default_metric = float(chamber["design_pressure"])
+        if "design_thrust" in chamber and chamber["design_thrust"] is not None:
+            thrust_design_default_metric = float(chamber["design_thrust"])
+        if "design_force_coefficient" in chamber and chamber["design_force_coefficient"] is not None:
+            force_coefficient_default = float(chamber["design_force_coefficient"])
     
     # Input section
     with st.form("chamber_design_form"):
@@ -2214,25 +2315,38 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                     # Skip if we can't parse it
                     pass
             
-            # Update config with calculated values (only if they exist in config)
+            # Also use the directly returned total_chamber_length as a fallback
+            if "Total Chamber Length" not in calculated_values and total_chamber_length is not None:
+                calculated_values["Total Chamber Length"] = total_chamber_length
+            
+            # Update config with calculated values
             config_dict = config_obj.model_dump()
             updated = False
             
-            # Update chamber section
-            if "chamber" in config_dict:
-                if "Chamber Volume" in calculated_values and "volume" in config_dict["chamber"]:
-                    config_dict["chamber"]["volume"] = calculated_values["Chamber Volume"]
-                    updated = True
-                if "Throat Area" in calculated_values and "A_throat" in config_dict["chamber"]:
-                    config_dict["chamber"]["A_throat"] = calculated_values["Throat Area"]
-                    updated = True
-                if "L*" in calculated_values and "Lstar" in config_dict["chamber"]:
-                    config_dict["chamber"]["Lstar"] = calculated_values["L*"]
-                    updated = True
-                # Update chamber length with total chamber length (cylindrical + contraction)
-                if "Total Chamber Length" in calculated_values:
-                    config_dict["chamber"]["length"] = calculated_values["Total Chamber Length"]
-                    updated = True
+            # Ensure chamber section exists
+            if "chamber" not in config_dict:
+                config_dict["chamber"] = {}
+            
+            # Update chamber section - always update these if calculated
+            if "Chamber Volume" in calculated_values:
+                config_dict["chamber"]["volume"] = calculated_values["Chamber Volume"]
+                updated = True
+            if "Throat Area" in calculated_values:
+                config_dict["chamber"]["A_throat"] = calculated_values["Throat Area"]
+                updated = True
+            if "L*" in calculated_values:
+                config_dict["chamber"]["Lstar"] = calculated_values["L*"]
+                updated = True
+            # Update chamber length with total chamber length (cylindrical + contraction)
+            if "Total Chamber Length" in calculated_values:
+                config_dict["chamber"]["length"] = calculated_values["Total Chamber Length"]
+                updated = True
+            
+            # Store design parameters used for geometry calculation
+            config_dict["chamber"]["design_pressure"] = pc_design_metric
+            config_dict["chamber"]["design_thrust"] = thrust_design_metric
+            config_dict["chamber"]["design_force_coefficient"] = force_coefficient
+            updated = True
             
             # Update nozzle section
             if "nozzle" in config_dict:
@@ -2459,14 +2573,20 @@ def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
         try:
             config_text = uploaded_file.getvalue().decode("utf-8")
             config_dict = yaml.safe_load(config_text)
+            # Validate the config
             PintleEngineConfig(**config_dict)
+            # Store the raw YAML dict to preserve all fields including optional ones
             st.session_state["config_dict"] = config_dict
             st.session_state["config_label"] = uploaded_file.name
         except Exception as exc:
             raise ValueError(f"Failed to load uploaded configuration: {exc}") from exc
 
     try:
+        # Create config object from the dict (this validates it)
         config_obj = PintleEngineConfig(**st.session_state["config_dict"])
+        # Update session state with the validated config to ensure all fields are present
+        # Use exclude_none=False to preserve all fields
+        st.session_state["config_dict"] = config_obj.model_dump(exclude_none=False)
     except Exception as exc:
         raise ValueError(f"Invalid configuration state: {exc}") from exc
 
@@ -2480,7 +2600,9 @@ def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
 
 
 def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
-    working_copy = copy.deepcopy(st.session_state.get("config_dict", config.model_dump()))
+    # Use exclude_none=False to preserve all fields including None values
+    config_dict_fallback = config.model_dump(exclude_none=False)
+    working_copy = copy.deepcopy(st.session_state.get("config_dict", config_dict_fallback))
     if "pintle_geometry" in working_copy and "injector" not in working_copy:
         working_copy["injector"] = {
             "type": "pintle",
@@ -2955,17 +3077,33 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         nozzle = working_copy["nozzle"]
         chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber.get("volume") or 1e-3), format="%.6f")
         chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber.get("A_throat") or 1e-4), format="%.6f")
+        # Get length value, handling None properly (length is Optional in schema)
+        chamber_length_value = chamber.get("length")
+        if chamber_length_value is None:
+            # If length is not set, try to calculate from volume and A_throat (L* = V/A)
+            if "volume" in chamber and "A_throat" in chamber and chamber["A_throat"]:
+                chamber_length_value = chamber["volume"] / chamber["A_throat"]
+            else:
+                chamber_length_value = 0.5  # Default fallback
         chamber["length"] = length_number_input(
             "Chamber length",
-            float(chamber.get("length") or 0.5),
+            float(chamber_length_value),
             min_m=0.01,
             max_m=3.0,
             step_m=0.01,
             key="chamber_length",
         )
+        # Get Lstar value, handling None properly
+        chamber_lstar_value = chamber.get("Lstar")
+        if chamber_lstar_value is None:
+            # If Lstar is not set, calculate from volume and A_throat
+            if "volume" in chamber and "A_throat" in chamber and chamber["A_throat"]:
+                chamber_lstar_value = chamber["volume"] / chamber["A_throat"]
+            else:
+                chamber_lstar_value = 1.0  # Default fallback
         chamber["Lstar"] = length_number_input(
             "Characteristic length L*",
-            float(chamber.get("Lstar") or 1.0),
+            float(chamber_lstar_value),
             min_m=0.1,
             max_m=5.0,
             step_m=0.05,
@@ -3036,7 +3174,8 @@ def main():
         st.sidebar.info("✓ Configuration updated from Chamber Design")
 
     config_obj = config_editor(config_obj)
-    config_dict = config_obj.model_dump()
+    # Use exclude_none=False to preserve all fields including None values
+    config_dict = config_obj.model_dump(exclude_none=False)
     st.session_state["config_dict"] = config_dict
     
     st.session_state["config_label"] = config_label
