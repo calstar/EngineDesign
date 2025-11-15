@@ -168,7 +168,8 @@ def load_default_runner() -> PintleEngineRunner:
 
 def get_default_config_dict() -> Dict[str, Any]:
     config = load_config(str(CONFIG_PATH))
-    return config.model_dump()
+    # Use exclude_none=False to preserve all fields including None values
+    return config.model_dump(exclude_none=False)
 
 
 def format_value(value: float, unit_type: str, unit_label: str) -> str:
@@ -3078,16 +3079,20 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber.get("volume") or 1e-3), format="%.6f")
         chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber.get("A_throat") or 1e-4), format="%.6f")
         # Get length value, handling None properly (length is Optional in schema)
+        # NOTE: Chamber length is a physical dimension, NOT L* (which is V/A_throat)
+        # If not set, use a reasonable default independent of L*
         chamber_length_value = chamber.get("length")
-        if chamber_length_value is None:
-            # If length is not set, try to calculate from volume and A_throat (L* = V/A)
-            if "volume" in chamber and "A_throat" in chamber and chamber["A_throat"]:
-                chamber_length_value = chamber["volume"] / chamber["A_throat"]
-            else:
-                chamber_length_value = 0.5  # Default fallback
+        # Check if length is None or 0 (invalid), but allow any positive value
+        if chamber_length_value is None or chamber_length_value == 0:
+            # Use a reasonable default for typical rocket chambers (0.3-0.5m)
+            # This is independent of L* - chamber length is a physical dimension
+            chamber_length_value = 0.4  # Default fallback [m]
+        else:
+            # Ensure we use the actual value from config, converting to float if needed
+            chamber_length_value = float(chamber_length_value)
         chamber["length"] = length_number_input(
-            "Chamber length",
-            float(chamber_length_value),
+            "Chamber length (physical dimension)",
+            chamber_length_value,
             min_m=0.01,
             max_m=3.0,
             step_m=0.01,

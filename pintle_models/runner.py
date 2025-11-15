@@ -69,8 +69,8 @@ class PintleEngineRunner:
         mdot_total = mdot_O + mdot_F
         MR = diagnostics["MR"]
         
-        # Get CEA properties for nozzle calculation
-        cea_props = self.cea_cache.eval(MR, Pc)
+        # CEA properties are already computed in solver.solve() and stored in diagnostics
+        # No need to call cea_cache.eval() again here - reuse from diagnostics
         cstar_actual = diagnostics["cstar_actual"]
         gamma = diagnostics["gamma"]
         R = diagnostics["R"]

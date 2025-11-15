@@ -9,9 +9,9 @@ from typing import Tuple, Optional
 from .config_schemas import CEAConfig
 
 
-def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
+def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float, float]:
     """
-    Extract Tc, gamma, R, and c* from NASA CEA text output (chamber values only).
+    Extract Tc, gamma, R, c*, and Isp from NASA CEA text output (chamber values only).
     
     Returns:
     --------
@@ -19,6 +19,8 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
     gamma : float
     R : float [J/(kg·K)]
     cstar : float [m/s]
+    M : float [kg/kmol]
+    Isp : float [s] (ambient Isp, or NaN if not found)
     """
     # Extract the main performance block
     block_match = re.search(r'THEORETICAL ROCKET PERFORMANCE[\s\S]+?MOLE FRACTIONS', out)
@@ -48,7 +50,15 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float]:
     if re.search(r'CSTAR.*FT/SEC', block, re.IGNORECASE):
         cstar *= 0.3048
 
-    return Tc, gamma, R, cstar, M
+    # Extract Isp (ambient Isp, typically appears as "Isp, M/SEC" or "Isp, SEC")
+    # Look for Isp in the performance block - it may appear in different formats
+    isp_match = re.search(r'Isp[, ]*(?:M/SEC|SEC|M/S)?\s+([\d.E+-]+)', block, re.IGNORECASE)
+    if not isp_match:
+        # Try alternative pattern: look for "Isp" followed by numbers
+        isp_match = re.search(r'Isp[:\s]+([\d.E+-]+)', block, re.IGNORECASE)
+    Isp = float(isp_match.group(1)) if isp_match else np.nan
+
+    return Tc, gamma, R, cstar, M, Isp
 
 
 class CEACache:
@@ -192,32 +202,38 @@ class CEACache:
             
             for j, MR in enumerate(self.MR_grid):
                 try:
-                    # Get full CEA output for detailed parsing
+                    # Get full CEA output for detailed parsing - this single call contains all needed info
                     out = chamber.get_full_cea_output(
                         Pc=Pc_psia,
                         MR=MR,
                         eps=self.config.expansion_ratio
                     )
-                    Tc, gamma, R, cstar, M = parse_cea_basic(out)
+                    Tc, gamma, R, cstar, M, Isp = parse_cea_basic(out)
                     
-                    # Get Isp and calculate Cf_ideal
-                    isp = chamber.estimate_Ambient_Isp(
-                        Pc=Pc_psia,
-                        MR=MR,
-                        eps=self.config.expansion_ratio
-                    )[0]
-                    
-                    # Cf_ideal from Isp: Cf = Isp * g0 / c*
-                    # But CEA can give Cf directly, so try that first
-                    try:
-                        Cf_ideal = chamber.get_PambCf(
-                            Pc=Pc_psia,
-                            MR=MR,
-                            eps=self.config.expansion_ratio
-                        )[0]
-                    except:
-                        # Fallback: Cf ≈ Isp * g0 / c* (approximate)
-                        Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
+                    # Calculate Cf_ideal from Isp and c*: Cf = Isp * g0 / c*
+                    # This avoids the need for a second CEA call (estimate_Ambient_Isp)
+                    if np.isfinite(Isp) and cstar > 0:
+                        Cf_ideal = Isp * 9.80665 / cstar
+                    else:
+                        # Fallback: try to get Cf directly from CEA (but this requires another call)
+                        # Only do this if Isp extraction failed
+                        try:
+                            Cf_ideal = chamber.get_PambCf(
+                                Pc=Pc_psia,
+                                MR=MR,
+                                eps=self.config.expansion_ratio
+                            )[0]
+                        except:
+                            # Last resort: try to get Isp via separate call
+                            try:
+                                isp = chamber.estimate_Ambient_Isp(
+                                    Pc=Pc_psia,
+                                    MR=MR,
+                                    eps=self.config.expansion_ratio
+                                )[0]
+                                Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
+                            except:
+                                Cf_ideal = np.nan
                     
                     self.cstar_table[i, j] = cstar
                     self.Cf_table[i, j] = Cf_ideal

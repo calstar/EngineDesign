@@ -492,11 +492,23 @@ class ChamberSolver:
         chamber_cfg = self.config.chamber
         regen_cfg = self.config.regen_cooling
 
+        # Use chamber.length if provided (this is the physical chamber length, NOT L*)
+        # NOTE: L* (characteristic length = V/A_throat) is stored separately in self.Lstar
+        # and used for combustion efficiency calculations. This function returns physical geometry.
         length = chamber_cfg.length
+        # Fallback to regen channel_length if chamber.length is not set
         if length is None and regen_cfg is not None and regen_cfg.channel_length > 0:
             length = regen_cfg.channel_length
+        # Last resort: use a rough geometric estimate (volume/A_throat happens to equal L*,
+        # but we're using it here only as a fallback estimate for physical length, not as L*)
+        # NOTE: L* itself is calculated separately in __init__ and stored in self.Lstar
         if length is None:
-            length = chamber_cfg.volume / max(chamber_cfg.A_throat, 1e-6)
+            # Rough geometric estimate: assume cylindrical chamber, length ≈ volume / cross_area
+            # Using volume/A_throat as a rough proxy (this equals L*, but we're not using it as L* here)
+            # This is a fallback only - actual chamber length should be specified in config
+            estimated_length = chamber_cfg.volume / max(chamber_cfg.A_throat, 1e-6)
+            # Use a reasonable minimum (0.1m) to avoid unrealistic values
+            length = max(estimated_length, 0.1)
         length = max(length, 1e-6)
 
         diameter = None
