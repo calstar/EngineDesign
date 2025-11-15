@@ -231,6 +231,9 @@ class CoaxialInjector(InjectorModel):
                     "D32_F": D32_F,
                     "x_star": x_star_combined,
                     "swirl_angle_deg": geometry.annulus.swirl_angle,
+                    # Discharge coefficients
+                    "Cd_O": float(Cd_O),
+                    "Cd_F": float(Cd_F),
                 }
             )
 

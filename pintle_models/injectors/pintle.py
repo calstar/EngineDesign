@@ -274,6 +274,9 @@ class PintleInjector(InjectorModel):
                     "delta_p_injector_F": float(delta_p_inj_F),
                     "delta_p_feed_O": float(delta_p_feed_O),
                     "delta_p_feed_F": float(delta_p_feed_F),
+                    # Discharge coefficients
+                    "Cd_O": float(Cd_O),
+                    "Cd_F": float(Cd_F),
                 }
             )
 

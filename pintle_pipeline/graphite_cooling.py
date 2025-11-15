@@ -55,11 +55,24 @@ def compute_graphite_recession(
             "surface_temperature": throat_temperature,
             "heat_removed": 0.0,
             "oxidation_rate": 0.0,
+            "q_oxidation": 0.0,
+            "q_radiation": 0.0,
+            "q_surface": 0.0,
         }
     
+    # Get optional config fields with safe defaults for backward compatibility
+    eps = getattr(graphite_config, "epsilon", 0.9)
+    Tamb = getattr(graphite_config, "ambient_temperature", 300.0)
+    include_qox = getattr(graphite_config, "include_oxidation_heat", True)
+    Fv = getattr(graphite_config, "view_factor", 1.0)
+    
     # Radiative cooling from surface
-    radiative_relief = SIGMA * (throat_temperature ** 4 - 300 ** 4)  # 300K ambient
-    radiative_relief = max(radiative_relief, 0.0)
+    # Radiation uses emissivity ε, view factor, and ambient temperature
+    # Radiation is wall-to-ambient (not wall-to-gas). Convective heat transfer from gas
+    # is handled by the caller through net_heat_flux. If gas_temperature > Tamb, the
+    # convective component should already be included in net_heat_flux.
+    # net_heat_flux is assumed to be incident non-radiative load from the caller
+    radiative_relief = max(eps * Fv * SIGMA * (throat_temperature**4 - Tamb**4), 0.0)
     
     # Oxidation recession (dominant mechanism for graphite)
     # Oxidation rate increases with temperature above oxidation threshold
@@ -78,14 +91,20 @@ def compute_graphite_recession(
         
         # Heat flux from oxidation (energy released per unit mass oxidized)
         # Graphite oxidation: C + O2 -> CO2, Δh ≈ 32 MJ/kg C
+        # Oxidation heat is exothermic and is added to the surface balance when include_oxidation_heat is True
         delta_h_oxidation = 32e6  # J/kg (approximate)
         q_oxidation = oxidation_rate * graphite_config.material_density * delta_h_oxidation
     else:
         oxidation_rate = 0.0
         q_oxidation = 0.0
     
-    # Net heat flux into graphite (after radiative cooling)
-    q_net = max(net_heat_flux - radiative_relief, 0.0)
+    # Surface heat balance: incident flux minus radiation, plus oxidation heat if enabled
+    # If the caller already included radiation or oxidation, they should disable include_oxidation_heat
+    # or pass a net that excludes it to avoid double counting
+    q_surface = net_heat_flux - radiative_relief
+    if include_qox:
+        q_surface += q_oxidation
+    q_net = max(q_surface, 0.0)
     
     # Thermal ablation component (heat-driven recession)
     # Energy required per unit mass ablated
@@ -125,5 +144,8 @@ def compute_graphite_recession(
         "recession_rate_thermal": float(recession_rate_thermal),
         "mass_flux_thermal": float(mass_flux_thermal),
         "coverage_area": float(throat_area * graphite_config.coverage_fraction),
+        "q_oxidation": float(q_oxidation),
+        "q_radiation": float(radiative_relief),
+        "q_surface": float(q_surface),
     }
 

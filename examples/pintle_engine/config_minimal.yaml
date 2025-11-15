@@ -1,152 +1,90 @@
-# Minimal Pintle Engine Configuration
-# Tank Pressure -> Thrust Pipeline
-#
-# WORKFLOW:
-#   INPUT:  P_tank_O, P_tank_F (tank pressures)
-#   SOLVE:  Pc (chamber pressure) from supply = demand
-#   OUTPUT: Thrust, mdot, MR, and all performance parameters
-#
-
-
-# Fluid Properties
 fluids:
   oxidizer:
-    name: "LOX"
-    density: 1140.0  # kg/m³
-    viscosity: 1.8e-4  # Pa·s
-    surface_tension: 0.013  # N/m
-    vapor_pressure: 101325.0  # Pa
-    specific_heat: 2300.0  # J/(kg·K)
-    thermal_conductivity: 0.15  # W/(m·K)
-    temperature: 90.0  # K - typical LOX tank temperature
-  
+    name: LOX
+    density: 1140.0
+    viscosity: 0.00018
+    surface_tension: 0.013
+    vapor_pressure: 101325.0
+    specific_heat: 2300.0
+    thermal_conductivity: 0.15
+    temperature: 90.0
   fuel:
-    name: "RP-1"
-    density: 780.0  # kg/m³
-    viscosity: 2.0e-3  # Pa·s
-    surface_tension: 0.025  # N/m
-    vapor_pressure: 1000.0  # Pa
-    specific_heat: 2000.0  # J/(kg·K)
-    thermal_conductivity: 0.13  # W/(m·K)
-    temperature: 293.0  # K - ambient
-
-# Injector Configuration
+    name: RP-1
+    density: 780.0
+    viscosity: 0.002
+    surface_tension: 0.025
+    vapor_pressure: 1000.0
+    specific_heat: 2000.0
+    thermal_conductivity: 0.13
+    temperature: 293.0
 injector:
   type: pintle
   geometry:
-    # LOX (Axial Flow - Through Orifices)
-    # LOX enters through single entry hole, flows through pintle tip,
-    # and exits through N orifices at angle theta_orifice
-    # From user: 16 orifices, each with area 0.00385154962 in² = 2.485 mm²
-    # Equivalent diameter: 1.779 mm
     lox:
-      n_orifices: 16  # Number of orifices on pintle tip
-      d_orifice: 0.003979  # m - Diameter of each orifice (1.779 mm, calculated from area)
-      theta_orifice: 30.01  # degrees - Angle of orifices from axis
-      A_entry: 0.00001  # m² - Single entry hole area
-      d_hydraulic: 0.003979  # m - Hydraulic diameter for Re calculation (same as orifice diameter)
-    
-    # Fuel (Radial Flow - Reservoir with Gap Spillage)
-    # Fuel enters reservoir through entry port, fills reservoir,
-    # then spills out through gap between pintle tip and reservoir wall
-    # From user: D_p = 0.750 in (19.05 mm), gap thickness = 0.313 mm, C_D,a = 0.65
-    # Area calculated using exact annulus formula: A = π × (R_outer² - R_inner²)
-    # where R_inner = d_pintle_tip/2, R_outer = R_inner + h_gap
+      n_orifices: 16
+      d_orifice: 0.003979
+      theta_orifice: 30.01
+      A_entry: 1.0e-05
+      d_hydraulic: 0.003979
     fuel:
-      d_pintle_tip: 0.019050  # m - Outer diameter of pintle tip (0.750 in = 19.05 mm)
-      d_reservoir_inner: 0.019676  # m - Inner diameter of fuel reservoir (D_p + 2×h_gap = 19.05 + 2×0.313 = 19.676 mm)
-      h_gap: 0.000313  # m - Gap height (0.313 mm from user)
-      A_entry: 0.000015  # m² - Entry port area into reservoir
-      d_hydraulic: 0.000626  # m - Gap hydraulic diameter (2×h_gap = 2×0.313 = 0.626 mm for annulus)
-
-# Example coaxial injector configuration (for future runs)
-# injector:
-#   type: coaxial
-#   geometry:
-#     core:
-#       n_ports: 12
-#       d_port: 0.0014
-#       length: 0.015
-#     annulus:
-#       inner_diameter: 0.005
-#       gap_thickness: 0.0008
-#       swirl_angle: 25.0
-
-# Example impinging injector configuration (for future runs)
-# injector:
-#   type: impinging
-#   geometry:
-#     oxidizer:
-#       n_elements: 8
-#       d_jet: 0.0012
-#       impingement_angle: 60.0
-#       spacing: 0.004
-#     fuel:
-#       n_elements: 8
-#       d_jet: 0.0012
-#       impingement_angle: 60.0
-#       spacing: 0.004
-
-# Feed System (Tank → Injector)
-# Calculates pressure losses: Δp_feed = K_eff(P) × (ρ/2) × (ṁ/(ρ×A_hyd))²
-# where K_eff(P) = K0 + K1 × φ(P)
+      d_pintle_tip: 0.01905
+      d_reservoir_inner: 0.019676
+      h_gap: 0.000313
+      A_entry: 1.5e-05
+      d_hydraulic: 0.000626
 feed_system:
   oxidizer:
-    d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (9.525 mm)
-    A_hydraulic: 0.0000713  # m² - Calculated from d_inlet (π × (d/2)²)
-    K0: 2.0  # Base loss coefficient (fittings, valves, bends)
-    K1: 0.0  # Pressure dependence coefficient (0 = constant K_eff)
-    phi_type: "none"  # Pressure function: "none", "sqrtP", or "logP"
-  
+    d_inlet: 0.009525
+    A_hydraulic: 7.13e-05
+    K0: 2.0
+    K1: 0.0
+    phi_type: none
   fuel:
-    d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (9.525 mm)
-    A_hydraulic: 0.0000713  # m² - Calculated from d_inlet (π × (d/2)²)
-    K0: 2.0  # Base loss coefficient
-    K1: 0.0  # Pressure dependence (0 = constant)
-    phi_type: "none"
-
-# Regenerative Cooling (Fuel Only)
-# Fuel path: Tank → 3/8" inlet → N parallel channels → merge → injector → annulus
-# Pressure drop through cooling channels is added to feed system loss
-# Small channels create significant pressure drop, especially at high flow rates
+    d_inlet: 0.009525
+    A_hydraulic: 7.13e-05
+    K0: 2.0
+    K1: 0.0
+    phi_type: none
 regen_cooling:
-  enabled: false  # Enable regen cooling model
-  d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (same as feed_system.fuel.d_inlet)
-  L_inlet: 0.5  # m - Length of inlet pipe (estimate)
-  n_channels: 100  # Number of parallel cooling channels (optimized for ~90 psi pressure drop)
-  channel_width: 0.0009  # m - Channel width (0.9 mm - optimized for target pressure drop)
-  channel_height: 0.001  # m - Channel height (1.0 mm - optimized for target pressure drop)
-  channel_length: 0.18162  # m - Channel length = chamber length (from engine specs: 181.62 mm)
-  d_outlet: null  # m - Outlet pipe diameter (null = same as inlet)
-  L_outlet: 0.1  # m - Length from merge to injector (estimate)
-  roughness: 0.0  # m - Surface roughness (0 = smooth)
-  K_manifold_split: 0.5  # Manifold split loss coefficient
-  K_manifold_merge: 0.3  # Manifold merge loss coefficient
-  # Dynamic discharge coefficients (vary with Reynolds number, like injector Cd)
-  Cd_entrance_inf: 0.8  # Asymptotic Cd at high Re for channel entrance
-  a_Re_entrance: 0.1  # Reynolds correction parameter for entrance
-  Cd_entrance_min: 0.6  # Minimum Cd for entrance
-  Cd_exit_inf: 0.9  # Asymptotic Cd at high Re for channel exit
-  a_Re_exit: 0.1  # Reynolds correction parameter for exit
-  Cd_exit_min: 0.7  # Minimum Cd for exit
+  enabled: false
+  d_inlet: 0.009525
+  L_inlet: 0.5
+  n_channels: 100
+  channel_width: 0.0009
+  channel_height: 0.001
+  channel_length: 0.18162
+  d_outlet: null
+  L_outlet: 0.1
+  roughness: 0.0
+  K_manifold_split: 0.5
+  K_manifold_merge: 0.3
+  Cd_entrance_inf: 0.8
+  a_Re_entrance: 0.1
+  Cd_entrance_min: 0.6
+  Cd_exit_inf: 0.9
+  a_Re_exit: 0.1
+  Cd_exit_min: 0.7
   use_heat_transfer: true
-  wall_thickness: 0.002  # m - wall between gas and coolant
-  wall_thermal_conductivity: 320.0  # W/(m·K) - copper alloy
-  chamber_inner_diameter: 0.08491  # m - from engine specs (Dc)
+  wall_thickness: 0.002
+  wall_thermal_conductivity: 320.0
+  chamber_inner_diameter: 0.08491
   hot_gas_prandtl: 0.7
-  hot_gas_viscosity: 4.0e-5  # Pa·s
-  hot_gas_thermal_conductivity: 0.12  # W/(m·K)
+  hot_gas_viscosity: 4.0e-05
+  hot_gas_thermal_conductivity: 0.12
   radiation_emissivity_hot: 0.85
   radiation_view_factor: 1.0
-
+  n_segments: 20
+  gas_turbulence_intensity: 0.1
+  coolant_turbulence_intensity: 0.05
+  hot_gas_cp: 2200.0
 film_cooling:
   enabled: false
   mass_fraction: 0.05
-  injection_temperature: null  # defaults to fuel temperature
+  injection_temperature: null
   effectiveness_ref: 0.45
   decay_length: 0.05
   apply_to_fraction_of_length: 0.6
-  slot_height: 0.00035  # m - approximate annular slot gap
+  slot_height: 0.00035
   reference_blowing_ratio: 0.6
   blowing_exponent: 0.62
   turbulence_reference_intensity: 0.08
@@ -156,130 +94,105 @@ film_cooling:
   reference_wall_temperature: 1100.0
   density_override: null
   cp_override: null
-
 ablative_cooling:
-  enabled: true  # ENABLE for 3D CEA cache testing!
-  material_density: 1600.0  # kg/m³ - Phenolic ablator typical
-  heat_of_ablation: 2.5e6  # J/kg - Effective heat of ablation
-  thermal_conductivity: 0.35  # W/(m·K)
-  specific_heat: 1500.0  # J/(kg·K)
-  initial_thickness: 0.01  # m - 10mm ablative liner
-  surface_temperature_limit: 1200.0  # K
-  coverage_fraction: 0.85  # 85% of chamber surface protected
-  pyrolysis_temperature: 950.0  # K - Characteristic pyrolysis temp
-  blowing_efficiency: 0.75  # Effectiveness of pyrolysis gases blocking heat
+  enabled: true
+  material_density: 1600.0
+  heat_of_ablation: 2500000.0
+  thermal_conductivity: 0.35
+  specific_heat: 1500.0
+  initial_thickness: 0.01
+  surface_temperature_limit: 1200.0
+  coverage_fraction: 0.85
+  pyrolysis_temperature: 950.0
+  blowing_efficiency: 0.75
   turbulence_reference_intensity: 0.08
   turbulence_sensitivity: 1.5
   turbulence_exponent: 1.0
   turbulence_max_multiplier: 3.0
-  # NEW: Geometry evolution parameters
-  throat_recession_multiplier: null  # null = calculate from physics (Bartz correlation)
-                                     # or specify 1.2-2.0 for fixed multiplier
-  char_layer_conductivity: 0.2  # W/(m·K) - Protective char layer
-  char_layer_thickness: 0.001  # m - 1mm char layer
-  track_geometry_evolution: true  # Enable time-varying L* tracking
-  nozzle_ablative: false  # Chamber ablator only (graphite insert is separate)
-
-# Graphite Throat Insert (separate from chamber ablator)
-# Graphite inserts prevent burn-through in nozzle throat/exit
+  throat_recession_multiplier: null
+  char_layer_conductivity: 0.2
+  char_layer_thickness: 0.001
+  track_geometry_evolution: true
+  nozzle_ablative: false
 graphite_insert:
-  enabled: true  # Enable graphite throat insert
-  material_density: 1800.0  # kg/m³ - Graphite (1800-2200 typical)
-  heat_of_ablation: 8.0e6  # J/kg - Graphite (~8-12 MJ/kg, much higher than ablator)
-  thermal_conductivity: 100.0  # W/(m·K) - Graphite (50-150 typical, much higher than ablator)
-  specific_heat: 710.0  # J/(kg·K) - Graphite
-  initial_thickness: 0.005  # m - 5mm graphite insert
-  surface_temperature_limit: 2500.0  # K - Graphite can handle very high temps
-  oxidation_temperature: 800.0  # K - Onset of oxidation
-  oxidation_rate: 1e-6  # m/s - Oxidation recession rate at reference conditions
-  recession_multiplier: null  # null = calculate from physics (Bartz correlation)
-                              # or specify 1.3-2.5 for fixed multiplier (throat recedes faster)
-  char_layer_conductivity: 5.0  # W/(m·K) - Protective layer
-  char_layer_thickness: 0.0005  # m - 0.5mm protective layer
-  coverage_fraction: 1.0  # Full coverage of throat/nozzle
-
-# Injector Discharge
-# Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]
-# Cd varies with:
-#   - Reynolds number: viscous effects (always active)
-#   - Pressure: compressibility effects (optional, for LOX at high pressure)
-#   - Temperature: viscosity changes (optional, for temperature-dependent fluids)
+  enabled: true
+  material_density: 2260.0
+  heat_of_ablation: 1.5e7 #J/kg
+  thermal_conductivity: 100.0
+  specific_heat: 710.0
+  initial_thickness: 0.005
+  surface_temperature_limit: 2500.0
+  oxidation_temperature: 800.0
+  oxidation_rate: 1.0e-06
+  recession_multiplier: null
+  char_layer_conductivity: 5.0
+  char_layer_thickness: 0.0005
+  coverage_fraction: 1.0
 discharge:
   oxidizer:
-    Cd_inf: 0.40  # Asymptotic Cd at high Re
-    a_Re: 0.15  # Re-dependent coefficient (dynamic Cd model)
-    Cd_min: 0.2  # Minimum Cd (clamping)
-    use_pressure_correction: false  # Enable if LOX compressibility effects are significant
-    P_ref: 5.0e6  # Pa - Reference pressure for pressure correction
-    a_P: 0.0  # Pressure correction coefficient (negative = compressibility reduces Cd)
-    use_temperature_correction: false  # Enable if temperature affects viscosity significantly
-    T_ref: 90.0  # K - Reference temperature (LOX cryogenic)
-    a_T: 0.0  # Temperature correction coefficient
-  
+    Cd_inf: 0.4
+    a_Re: 0.15
+    Cd_min: 0.15
+    use_pressure_correction: false
+    P_ref: 5000000.0
+    a_P: 0.0
+    use_temperature_correction: false
+    T_ref: 90.0
+    a_T: 0.0
   fuel:
-    Cd_inf: 0.65  # Asymptotic Cd at high Re
-    a_Re: 0.20  # Re-dependent coefficient (dynamic Cd model)
-    Cd_min: 0.2  # Minimum Cd (clamping)
-    use_pressure_correction: false  # RP-1 is less compressible, usually not needed
-    P_ref: 5.0e6  # Pa - Reference pressure
-    a_P: 0.0  # Pressure correction coefficient
-    use_temperature_correction: false  # Enable if regen heating affects viscosity
-    T_ref: 300.0  # K - Reference temperature (RP-1 ambient)
-    a_T: 0.0  # Temperature correction coefficient
-
-# Spray/Mixing Models
+    Cd_inf: 0.65
+    a_Re: 0.2
+    Cd_min: 0.2
+    use_pressure_correction: false
+    P_ref: 5000000.0
+    a_P: 0.0
+    use_temperature_correction: false
+    T_ref: 300.0
+    a_T: 0.0
 spray:
-  momentum_flux_ratio: true  # Enable momentum flux ratio calculation
-  
+  momentum_flux_ratio: true
   spray_angle:
-    model: "TMR"  # "J" or "TMR"
+    model: TMR
     k: 0.5
     n: 0.5
-  
   weber:
     We_min: 15.0
-  
   smd:
-    model: "lefebvre"
+    model: lefebvre
     C: 0.5
     m: 0.6
     p: 0.0
-  
   evaporation:
-    K: 3e5  # s/m²
-    x_star_limit: 0.05  # m
+    K: 300000.0
+    x_star_limit: 0.05
     use_constraint: true
-
-# Combustion
+  use_turbulence_corrections: false
+  turbulence_breakup_gain: 1.0
+  turbulence_penetration_gain: 0.5
 combustion:
-  # CEA (Chemical Equilibrium Analysis) - Lookup table for thermochemistry
-  # IMPORTANT: This builds a LOOKUP TABLE of c*, Cf, Tc, gamma, R vs (MR, Pc)
-  # The Pc_range here is ONLY for building the lookup table grid - it's NOT an input!
-  # The actual Pc is SOLVED from your tank pressures in the main pipeline.
-  # Think of this like a 2D lookup table: we pre-compute values at different (MR, Pc) points,
-  # then during the solve, we interpolate to get properties at the actual (MR, Pc) we're solving for.
   cea:
-    ox_name: "LOX"
-    fuel_name: "RP-1"
-    expansion_ratio: 6.54  # From engine specs: Ae/At = 6.54 (initial/default value)
-    cache_file: "cea_cache_LOX_RP1_3D.npz"  # 3D cache file (Pc, MR, eps)
-    Pc_range: [1.0e6, 9.0e6]  # Pa - Lookup table range (NOT pipeline input! Just for table grid)
-    MR_range: [1.6, 3.5]  # Mixture ratio range for lookup table (extended to capture peaks and falling edges)
-    eps_range: [4.0, 15.0]  # Expansion ratio range for 3D cache (covers throat growth from ablation)
-    n_points: 34  # Grid points per dimension (34³ ≈ 39,300 points, similar to old 2D cache with ~40k points)
-                  # Original 2D was 200² = 40,000 points
-                  # For 3D: 34³ ≈ 39,300 matches old 2D refinement
-                  # With parallel processing (8 workers): ~8-10 min build time
-  
-  # Combustion Efficiency (L* correction)
-  # CEA assumes infinite-area equilibrium, real chambers have finite volume
-  # η_c* = 1 - C × e^(-K×L*) where L* = V_chamber / A_throat
+    use_parallel_cea_build: true
+    cea_parallel_workers: null
+    ox_name: LOX
+    fuel_name: RP-1
+    expansion_ratio: 10.0953
+    cache_file: cea_cache_LOX_RP1_3D.npz
+    Pc_range:
+    - 1000000.0
+    - 9000000.0
+    MR_range:
+    - 1.6
+    - 3.5
+    eps_range:
+    - 4.0
+    - 15.0
+    n_points: 34
   efficiency:
-    model: "exponential"  # "exponential", "constant", or "linear"
-    C: 0.3  # Efficiency loss parameter (0.2-0.4 typical)
-    K: 0.15  # Recovery rate parameter (0.1-0.3 typical)
-    use_spray_correction: false  # Adjust efficiency based on spray quality
-    spray_penalty_factor: 0.8  # Penalty if spray constraints violated
+    model: exponential
+    C: 0.3
+    K: 0.15
+    use_spray_correction: false
+    spray_penalty_factor: 0.8
     use_mixture_coupling: true
     use_cooling_coupling: true
     use_turbulence_coupling: true
@@ -288,95 +201,90 @@ combustion:
     turbulence_efficiency_floor: 0.3
     target_turbulence_intensity: 0.08
     turbulence_penalty_exponent: 1.0
-
-# Chamber Geometry
-# From engine specs:
-#   Dc = 84.91 mm (chamber diameter)
-#   Dt = 33.05 mm (throat diameter) → At = π×(Dt/2)² = 0.000857892 m²
-#   L* = 1000.00 mm = 1.0 m (characteristic length)
-#   Lc = 181.62 mm (total chamber length)
-#   Lcyl = 107.45 mm (cylindrical length)
+    target_smd_microns: 50.0
+    xstar_limit_mm: 50.0
+    xstar_penalty_exponent: 2.0
+    we_reference: 100.0
+    we_penalty_exponent: 0.5
+    smd_penalty_exponent: 1.0
+    use_advanced_model: false
+    use_finite_rate_chemistry: true
+    use_shifting_equilibrium: true
 chamber:
-  volume: 0.001516  # m³ - Calculated from L*×At = 1.0 × 0.000857892
-  A_throat: 0.000857892377  # m² - From Dt = 33.05 mm (π × (33.05e-3/2)²)
-  Lstar: 0.97033149433  # m - From engine specs (1000.00 mm)
-
-# Nozzle
-# From engine specs:
-#   Dt = 33.05 mm → At = 0.000857892 m²
-#   De = 84.56 mm → Ae = 0.005615906 m²
-#   Ae/At = 6.546 (expansion ratio)
-# Thrust = F_momentum + F_pressure
-#   F_momentum = ṁ × v_exit
-#   F_pressure = (P_exit - Pa) × A_exit
+  volume: 0.005221309
+  A_throat: 0.002650007
+  length: 0.9214335
+  Lstar: 1.9703
+  chamber_inner_diameter: 0.08491
+  design_pressure: 2068000.0
+  design_thrust: 7672.3
+  design_force_coefficient: 1.4
 nozzle:
-  A_throat: 0.000857892377     # m² - From Dt = 33.05 mm (π × (33.05e-3/2)²)
-  A_exit: 0.005615906001     # m² - From De = 84.56 mm (π × (84.56e-3/2)²)
-  expansion_ratio: 6.546166103254    # From engine specs: Ae/At = 6.546
-  efficiency: 0.98  # Nozzle efficiency (accounts for losses)
-
-# Tanks
-# Geometric parameters of oxidizer, fuel, and pressurant tanks
-# These are used for RocketPy tank objects and center-of-mass modeling.
+  A_throat: 0.002650007
+  A_exit: 0.02675254
+  expansion_ratio: 10.0953
+  exit_diameter: 0.18456
+  efficiency: 0.98
+solver:
+  method: brentq
+  Pc_bounds:
+  - 100000.0
+  - 8000000.0
+  tolerance: 1.0e-06
+  max_iterations: 100
+  closure:
+    max_iterations: 6
+    Cd_reduction_factor: 0.95
+    tolerance: 0.0001
 lox_tank:
-  lox_h: 1.14          # [m] LOX tank height
-  lox_radius: 0.0762   # [m] LOX tank radius
-  ox_tank_pos: 0.6    # [m] Oxidizer tank position relative to motor center (above fuel)
-  mass: 22.0  # kg - mass of oxidizer (2.039 kg/s × 10.0 s = 20.39 kg required, with margin)  
-
+  lox_h: 1.14
+  lox_radius: 0.0762
+  ox_tank_pos: 0.6
+  mass: 22.0
 fuel_tank:
-  rp1_h: .609       # [m] RP-1 tank height
-  rp1_radius: 0.0762   # [m] RP-1 tank radius
-  fuel_tank_pos: -0.2  # [m] Fuel tank position relative to motor center (below LOX, above motor)
-  mass: 4.0         # kg - mass of fuel (0.321 kg/s × 10.0 s = 3.21 kg required, with margin)  
-
+  rp1_h: 0.609
+  rp1_radius: 0.0762
+  fuel_tank_pos: -0.2
+  mass: 4.0
 press_tank:
-  press_h: 0.457         # [m] Pressurant tank height
-  press_radius: 0.0762   # [m] Pressurant tank radius
-  pres_tank_pos: 1.2  # [m] Pressurant tank position relative to motor center (above LOX)
-
-
-# Rocket
+  press_h: 0.457
+  press_radius: 0.0762
+  pres_tank_pos: 1.2
+  mass: null
 rocket:
-  mass: 90.72  # [kg] Total rocket mass (200 lbs = 90.72 kg)
-  inertia: [8.0, 8.0, 0.5]
+  mass: 90.72
+  inertia:
+  - 8.0
+  - 8.0
+  - 0.5
   radius: 0.1015
   cm_wo_motor: 1.3
   dry_mass: 12.0
-  motor_inertia: [0.1, 0.1, 0.1]
+  motor_inertia:
+  - 0.1
+  - 0.1
+  - 0.1
   fins:
     no_fins: 3
     root_chord: 0.2
     tip_chord: 0.1
     fin_span: 0.3
-    fin_position: 0.0  # [m] Fins at bottom (tail) of rocket - will be set to 0.0 in code
-  motor: 
+    fin_position: 0.0
+  motor:
     dry_mass: 12.0
-    inertia: [0.1, 0.1, 0.1]
-
-# Environment
+    inertia:
+    - 0.1
+    - 0.1
+    - 0.1
 environment:
-  date: [2025, 11, 18, 18]
+  date:
+  - 2025
+  - 11
+  - 18
+  - 18
   latitude: 35.34722
   longitude: -117.8099547
   elevation: 626.67
-  p_amb: 101325.0 # Pa
-
+  p_amb: 101325.0
 thrust:
-  burn_time: 10.0 # seconds
-
-
-# Solver Settings
-# Solves: ṁ_supply(Pc) = ṁ_demand(Pc) to find Pc
-solver:
-  method: "brentq"  # Root finding method: "brentq" (safe), "secant", or "newton"
-  Pc_bounds: [100000.0, 8000000.0]  # Pa - Bounds for Pc solver (will be clamped to min(P_tank))
-  tolerance: 1e-6  # Root finding tolerance
-  max_iterations: 100  # Max iterations for root finder
-  
-  # Closure iterations (spray constraint enforcement)
-  closure:
-    max_iterations: 6  # Max iterations to satisfy spray constraints
-    Cd_reduction_factor: 0.95  # Reduce Cd by this factor if constraints violated
-    tolerance: 1e-4  # Convergence tolerance for closure
-
+  burn_time: 10.0

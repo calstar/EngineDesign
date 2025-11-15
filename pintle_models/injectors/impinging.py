@@ -218,6 +218,9 @@ class ImpingingInjector(InjectorModel):
                     "D32_F": D32_F,
                     "x_star": x_star,
                     "impingement_angle_deg": np.rad2deg(imp_angle_rad),
+                    # Discharge coefficients
+                    "Cd_O": float(Cd_O),
+                    "Cd_F": float(Cd_F),
                 }
             )
 

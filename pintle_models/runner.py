@@ -173,6 +173,10 @@ class PintleEngineRunner:
             "delta_p_feed_F": diagnostics.get("delta_p_feed_F"),
         }
         
+        # Extract discharge coefficients
+        Cd_O = diagnostics.get("Cd_O", np.nan)
+        Cd_F = diagnostics.get("Cd_F", np.nan)
+        
         # Calculate stability analysis if enabled
         stability_results = None
         try:
@@ -221,6 +225,8 @@ class PintleEngineRunner:
             "eta_cstar": diagnostics["eta_cstar"],
             "gamma": gamma,
             "R": R,
+            "Cd_O": Cd_O,
+            "Cd_F": Cd_F,
             "cooling": cooling_results,
             "stability": stability_results,
             "pressure_profile": pressure_profile,
@@ -278,6 +284,8 @@ class PintleEngineRunner:
             "Tc": np.full(n, np.nan),
             "gamma": np.full(n, np.nan),
             "R": np.full(n, np.nan),
+            "Cd_O": np.full(n, np.nan),
+            "Cd_F": np.full(n, np.nan),
             "diagnostics": [],
         }
         
@@ -293,7 +301,7 @@ class PintleEngineRunner:
                 for key in ["Pc", "mdot_O", "mdot_F", "mdot_total", "MR", "F", "Isp",
                            "v_exit", "P_exit", "eps", "A_throat", "A_exit",
                            "cstar_actual", "cstar_ideal", "eta_cstar",
-                           "Tc", "gamma", "R"]:
+                           "Tc", "gamma", "R", "Cd_O", "Cd_F"]:
                     results[key][i] = point_results[key]
                 
                 # Store diagnostics
@@ -378,6 +386,8 @@ class PintleEngineRunner:
             "Tc": np.full(n, np.nan),
             "gamma": np.full(n, np.nan),
             "R": np.full(n, np.nan),
+            "Cd_O": np.full(n, np.nan),
+            "Cd_F": np.full(n, np.nan),
             "Lstar": np.full(n, np.nan),
             "V_chamber": np.full(n, np.nan),
             "A_throat": np.full(n, np.nan),
@@ -459,13 +469,15 @@ class PintleEngineRunner:
                     "Tc": diagnostics["Tc"],
                     "gamma": diagnostics["gamma"],
                     "R": diagnostics["R"],
+                    "Cd_O": diagnostics.get("Cd_O", np.nan),
+                    "Cd_F": diagnostics.get("Cd_F", np.nan),
                     "diagnostics": diagnostics,
                 }
                 
                 # Store scalar results
                 for key in ["Pc", "mdot_O", "mdot_F", "mdot_total", "MR", "F", "Isp",
                            "v_exit", "P_exit", "cstar_actual", "cstar_ideal", "eta_cstar",
-                           "Tc", "gamma", "R"]:
+                           "Tc", "gamma", "R", "Cd_O", "Cd_F"]:
                     results[key][i] = point_results[key]
                 
                 # Store current geometry

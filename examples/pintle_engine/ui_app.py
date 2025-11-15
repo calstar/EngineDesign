@@ -930,6 +930,8 @@ def create_single_run_dataframe(results: Dict[str, Any], context: str) -> pd.Dat
         "Injector Turbulence Mix": diag.get("turbulence_intensity_mix", np.nan),
         "Film Turbulence Multiplier": film.get("turbulence_multiplier", np.nan) if film else np.nan,
         "Ablative Turbulence Multiplier": ablative.get("turbulence_multiplier", np.nan) if ablative else np.nan,
+        "Cd_O": results.get("Cd_O", diag.get("Cd_O", np.nan)),
+        "Cd_F": results.get("Cd_F", diag.get("Cd_F", np.nan)),
     }
 
     return pd.DataFrame([row])
@@ -973,6 +975,8 @@ def compute_timeseries_dataframe(
         "mdot_total (kg/s)": np.asarray(results["mdot_total"], dtype=float),
         "cstar_actual (m/s)": np.asarray(results["cstar_actual"], dtype=float),
         "gamma": np.asarray(results["gamma"], dtype=float),
+        "Cd_O": np.asarray(results.get("Cd_O", np.full(len(times), np.nan)), dtype=float),
+        "Cd_F": np.asarray(results.get("Cd_F", np.full(len(times), np.nan)), dtype=float),
     }
 
     regen_heat_flux = []
