@@ -9,6 +9,8 @@ from nozzle_solver import rao
 theta_default = np.pi/4
 force_coeffcient_default = 1.4
 diameter_exit_default = 4 / 39.37
+l_star_default = 1.27
+chamber_diameter_default = 3.4 / 39.37
 
 def area_exit_calc(diameter_exit=diameter_exit_default):
     """
@@ -40,15 +42,14 @@ def area_throat_calc(pc_design, thrust_design, force_coeffcient=force_coeffcient
     """
     return thrust_design / (pc_design * force_coeffcient)
 
-def chamber_volume_calc(area_throat, l_star = None):
+def chamber_volume_calc(area_throat, l_star = l_star_default):
     """
     Parameters:
     - l_star: The characteristic length of the chamber. (Get from config)
     - area_throat: The area of the throat of the chamber.
     Calculate the volume of the chamber.
     """
-    if l_star is None:
-        l_star = 1.27
+
 
     return l_star * area_throat
 
@@ -65,7 +66,7 @@ def contraction_ratio_calc(area_chamber, area_throat):
     """
     return area_chamber / area_throat
 
-def area_chamber_calc(diameter_inner=3.4 / 39.37):
+def area_chamber_calc(diameter_inner=chamber_diameter_default):
     """
     Calculate the area of the chamber.
     Parameters:
@@ -100,28 +101,11 @@ def chamber_length_calc(chamber_volume, area_throat, contraction_ratio, theta = 
     return t4
 
 
-def contraction_length_calc(area_chamber, area_throat, theta=theta_default):
-    """
-    Calculate the horizontal length of the conical contraction section
-    from the end of the cylindrical chamber to the throat.
-    
-    Parameters:
-    -----------
-    area_chamber : float
-        Chamber area [m²]
-    area_throat : float
-        Throat area [m²]
-    theta : float
-        Half-angle of conical contraction [rad]
-    
-    Returns:
-    --------
-    L_cone : float
-        Horizontal length of contraction section [m]
-    """
-    R_c = np.sqrt(area_chamber / np.pi)
-    R_t = np.sqrt(area_throat / np.pi)
-    L_cone = (R_c - R_t) / np.tan(theta)
+def contraction_length_calc(area_chamber, entrance_arc_start_y, theta=theta_default):
+  
+    R_start = np.sqrt(area_chamber / np.pi)
+    R_end = entrance_arc_start_y
+    L_cone = (R_start - R_end) * np.tan(np.pi/2 - theta)
     return L_cone
 
 def contraction_length_actual_calc(length, entrance_arc_offset):
@@ -131,9 +115,18 @@ def contraction_length_actual_calc(length, entrance_arc_offset):
     return length - entrance_arc_offset
 
 
-def generate_chamber_contour(area_chamber, area_throat, length_cylindrical, contraction_length, theta=theta_default, steps=200):
+def generate_nozzle(area_throat, area_exit, steps=200):
+    return rao(area_throat, area_exit, method="top", do_plot=False, steps=steps)
+
+
+def generate_chamber_contour(area_chamber, area_throat, length_cylindrical, 
+                             entrance_arc_start_x, entrance_arc_start_y, 
+                             theta=theta_default, steps=200):
     """
-    Generate chamber contour points (cylindrical + conical contraction sections).
+    Generate chamber contour points going backwards from the nozzle entrance arc start.
+    The chamber consists of:
+    1. A cylindrical section
+    2. A 45deg line connecting to the entrance arc start point
     
     Parameters:
     -----------
@@ -143,37 +136,61 @@ def generate_chamber_contour(area_chamber, area_throat, length_cylindrical, cont
         Throat area [m²]
     length_cylindrical : float
         Length of cylindrical section [m]
-    contraction_length : float
-        Horizontal length of conical contraction section [m]
+    entrance_arc_start_x : float
+        x coordinate where entrance arc starts (negative value)
+    entrance_arc_start_y : float
+        y coordinate where entrance arc starts
     theta : float
-        Half-angle of conical contraction [rad]
+        Angle of the 45deg line [rad] (should be pi/4)
     steps : int
         Number of points for each section
     
     Returns:
     --------
     pts_chamber : ndarray
-        Array of (x, y) points for chamber contour
+        Array of (x, y) points for chamber contour (going backwards, so x decreases)
     """
     R_c = np.sqrt(area_chamber / np.pi)
-    R_t = np.sqrt(area_throat / np.pi)
     
-    # Cylindrical section (from injector face)
-    x_cyl = np.linspace(0, length_cylindrical, steps)
+    # The 45deg line connects from the entrance arc start to the cylindrical section
+    # At the entrance arc start: (entrance_arc_start_x, entrance_arc_start_y)
+    # At the cylindrical section start: (x_cyl_start, R_c)
+    # 
+    # The 45deg line has slope = -1 (going backwards and up)
+    # Equation: y = y_start + slope * (x - x_start)
+    # With slope = -1: y = y_start - (x - x_start) = y_start + x_start - x
+    #
+    # At the cylindrical section, y = R_c, so:
+    # R_c = y_start + x_start - x_cyl_start
+    # x_cyl_start = y_start + x_start - R_c
+    
+    x_cyl_start = entrance_arc_start_x + entrance_arc_start_y - R_c
+    
+    # Generate 45deg line (going backwards from entrance arc start)
+    # x decreases from entrance_arc_start_x to x_cyl_start
+    x_line = np.linspace(entrance_arc_start_x, x_cyl_start, steps)
+    # y = y_start + x_start - x (45deg line going backwards and up, slope = -1)
+    y_line = entrance_arc_start_y + entrance_arc_start_x - x_line
+    pts_line = np.column_stack((x_line, y_line))
+    
+    # Generate cylindrical section (going further backwards)
+    x_cyl_end = x_cyl_start - length_cylindrical
+    x_cyl = np.linspace(x_cyl_start, x_cyl_end, steps)
     y_cyl = np.full(steps, R_c)
     pts_cyl = np.column_stack((x_cyl, y_cyl))
     
-    # Conical contraction section
-    x_cone_start = length_cylindrical
-    x_cone = np.linspace(x_cone_start, x_cone_start + contraction_length, steps)
-    # Linear interpolation from R_c to R_t
-    y_cone = R_c - (R_c - R_t) * (x_cone - x_cone_start) / contraction_length
-    pts_cone = np.column_stack((x_cone, y_cone))
+    # Combine: cylindrical, then 45deg line (going backwards, so reverse order)
+    # Reverse order so we go from injector face (most negative x) to entrance arc
+    pts_cyl_reversed = pts_cyl[::-1]
+    pts_line_reversed = pts_line[::-1]
+    pts_chamber = np.vstack([pts_cyl_reversed, pts_line_reversed[1:]])
     
-    # Combine (skip first point of cone to avoid duplicate)
-    pts_chamber = np.vstack([pts_cyl, pts_cone[1:]])
+    # Return the chamber points and the index where the 45deg line starts
+    # The 45deg line starts after the cylindrical section
+    cyl_end_idx = len(pts_cyl_reversed)
+    line_start_idx = cyl_end_idx
     
-    return pts_chamber
+    return pts_chamber, cyl_end_idx, line_start_idx
 
 
 def chamber_solver(pc_design, thrust_design, force_coeffcient=force_coeffcient_default, 
@@ -207,10 +224,8 @@ def chamber_solver(pc_design, thrust_design, force_coeffcient=force_coeffcient_d
         - area_chamber: Chamber area [m²]
         - contraction_ratio: Contraction ratio
         - length: Cylindrical section length [m]
-        - contraction_length: Conical contraction length [m]
-        - contraction_length_actual: Actual contraction length accounting for arc [m]
         - pts_chamber: Chamber contour points (Nx2 array)
-        - pts_nozzle: Nozzle contour points (Nx2 array)
+        - pts_nozzle: Nozzle contour points (Nx2 array, x=0 at throat)
         - pts_full: Full contour points (chamber + nozzle) (Nx2 array)
     """
     # Calculate geometry
@@ -221,33 +236,23 @@ def chamber_solver(pc_design, thrust_design, force_coeffcient=force_coeffcient_d
     area_chamber = area_chamber_calc()
     contraction_ratio = contraction_ratio_calc(area_chamber, area_throat)
     length_cylindrical = chamber_length_calc(volume_chamber, area_throat, contraction_ratio, theta)
-    contraction_length = contraction_length_calc(area_chamber, area_throat, theta)
     
-    # Get nozzle contour (without plotting)
+    # Get nozzle contour (without plotting) - keep it unchanged, x=0 at throat
     nozzle_pts, x_first_nozzle = rao(area_throat, area_exit, method="top", do_plot=False, steps=steps)
-    arc_offset = x_first_nozzle
-    contraction_length_actual = contraction_length_actual_calc(contraction_length, arc_offset)
     
-    # Generate chamber contour
-    pts_chamber = generate_chamber_contour(
-        area_chamber, area_throat, length_cylindrical, 
-        contraction_length_actual, theta, steps
+    # Get the entrance arc start point (where chamber should connect)
+    entrance_arc_start_x, entrance_arc_start_y, tangent_slope = get_nozzle_entrance_arc_start(area_throat)
+    
+    # Generate chamber contour going backwards from entrance arc start
+    pts_chamber, cyl_end_idx, line_start_idx = generate_chamber_contour(
+        area_chamber, area_throat, length_cylindrical,
+        entrance_arc_start_x, entrance_arc_start_y, theta, steps
     )
     
-    # Find split point between cylindrical and conical sections
-    # The cylindrical section ends where x = length_cylindrical
-    split_idx = np.searchsorted(pts_chamber[:, 0], length_cylindrical)
-    if split_idx >= len(pts_chamber):
-        split_idx = len(pts_chamber) // 2
-    
-    # Shift nozzle points to connect with chamber
-    # The nozzle starts at x=0, we need to shift it to start where chamber ends
-    x_chamber_end = pts_chamber[-1, 0]
-    nozzle_pts_shifted = nozzle_pts.copy()
-    nozzle_pts_shifted[:, 0] += x_chamber_end
-    
-    # Combine full contour
-    pts_full = np.vstack([pts_chamber, nozzle_pts_shifted[1:]])  # Skip first nozzle point to avoid duplicate
+    # Nozzle is unchanged (x=0 at throat)
+    # Combine full contour: chamber (going backwards) + nozzle (starting at entrance arc)
+    # The last point of chamber should connect to the first point of nozzle
+    pts_full = np.vstack([pts_chamber, nozzle_pts[1:]])  # Skip first nozzle point to avoid duplicate
     
     # Plot if requested
     if do_plot:
@@ -255,13 +260,13 @@ def chamber_solver(pc_design, thrust_design, force_coeffcient=force_coeffcient_d
         
         if color_segments:
             # Chamber cylindrical section
-            plt.plot(pts_chamber[:split_idx, 0], pts_chamber[:split_idx, 1], 
+            plt.plot(pts_chamber[:cyl_end_idx, 0], pts_chamber[:cyl_end_idx, 1], 
                     label='Chamber (cylindrical)', color='purple', linewidth=2)
-            # Chamber conical section
-            plt.plot(pts_chamber[split_idx:, 0], pts_chamber[split_idx:, 1], 
-                    label='Chamber (conical)', color='orange', linewidth=2)
-            # Nozzle
-            plt.plot(nozzle_pts_shifted[:, 0], nozzle_pts_shifted[:, 1], 
+            # Chamber 45deg line section
+            plt.plot(pts_chamber[line_start_idx:, 0], pts_chamber[line_start_idx:, 1], 
+                    label='Chamber (45° line)', color='orange', linewidth=2)
+            # Nozzle (unchanged, x=0 at throat)
+            plt.plot(nozzle_pts[:, 0], nozzle_pts[:, 1], 
                     label='Nozzle', color='blue', linewidth=2)
             plt.legend()
         else:
@@ -287,10 +292,8 @@ def chamber_solver(pc_design, thrust_design, force_coeffcient=force_coeffcient_d
         'area_chamber': area_chamber,
         'contraction_ratio': contraction_ratio,
         'length': length_cylindrical,
-        'contraction_length': contraction_length,
-        'contraction_length_actual': contraction_length_actual,
         'pts_chamber': pts_chamber,
-        'pts_nozzle': nozzle_pts_shifted,
+        'pts_nozzle': nozzle_pts,  # Nozzle unchanged, x=0 at throat
         'pts_full': pts_full
     }
 
@@ -303,4 +306,5 @@ results = chamber_solver(
 )
 
 # Access full contour points
+print(results)
 pts_full = results['pts_full']  # Nx2 array of (x, y) points

@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import root
+from nozzle_angles import lookup_angles_interp_bell
 
 
 # -----------------------------
@@ -91,8 +92,6 @@ def generate_rao_moc_contour(Nx, Ny, Ex, Ey, theta_n, theta_e,
 def rao(area_throat,
         area_exit,
         bell_percent=0.8,
-        theta_n_degree=23.3,
-        theta_e_degree=12.5,
         steps=200,
         do_plot=True,
         color_segments=False,
@@ -108,6 +107,10 @@ def rao(area_throat,
     eps = area_exit / area_throat
     deg2rad = lambda d: d * np.pi / 180.0
 
+    # Look up angles using interpolation
+    theta_n_degree, theta_e_degree = lookup_angles_interp_bell(
+        area_throat, area_exit, bell_percent
+    )
     theta_n = deg2rad(theta_n_degree)
     theta_e = deg2rad(theta_e_degree)
 
@@ -238,8 +241,9 @@ def rao(area_throat,
 
     # Get x value of first point
     x_first = pts[0, 0]
+    y_first = pts[0, 1]
     
-    return pts, x_first
+    return pts, x_first, y_first
 
 
 # Example usage (commented out to avoid running on import)
