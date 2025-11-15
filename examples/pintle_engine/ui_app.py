@@ -2187,7 +2187,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             
             # Calculate chamber geometry
             with st.spinner("Calculating chamber geometry..."):
-                pts, table_data = chamber_geometry_calc(
+                pts, table_data, total_chamber_length = chamber_geometry_calc(
                     pc_design=pc_design_metric,
                     thrust_design=thrust_design_metric,
                     force_coeffcient=force_coefficient,
@@ -2229,6 +2229,10 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 if "L*" in calculated_values and "Lstar" in config_dict["chamber"]:
                     config_dict["chamber"]["Lstar"] = calculated_values["L*"]
                     updated = True
+                # Update chamber length with total chamber length (cylindrical + contraction)
+                if "Total Chamber Length" in calculated_values:
+                    config_dict["chamber"]["length"] = calculated_values["Total Chamber Length"]
+                    updated = True
             
             # Update nozzle section
             if "nozzle" in config_dict:
@@ -2249,22 +2253,14 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                     updated = True
             
             # Store calculation results in session state so they persist after rerun
+            # Note: config_dict contains the updated values but they are NOT automatically loaded
             st.session_state["chamber_calc_results"] = {
                 "pts": pts,
                 "table_data": table_data,
                 "calculated_values": calculated_values,
                 "config_dict": config_dict,
-                "updated": updated
+                "updated": updated  # This just indicates values were calculated, not that they're loaded
             }
-            
-            if updated:
-                st.success("Configuration updated with calculated values!")
-                # Update session state
-                st.session_state["config_dict"] = config_dict
-                # Recreate config object
-                config_obj = PintleEngineConfig(**config_dict)
-                # Mark that config was updated so runner gets recreated
-                st.session_state["config_updated"] = True
             
             # Generate DXF file for download
             dxf_bytes = None
@@ -2277,7 +2273,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                     tmp_dxf_path = tmp_file.name
                 
                 # Generate DXF using chamber_geometry_calc
-                chamber_geometry_calc(
+                _, _, _ = chamber_geometry_calc(
                     pc_design=pc_design_metric,
                     thrust_design=thrust_design_metric,
                     force_coeffcient=force_coefficient,
@@ -2316,11 +2312,6 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             # Display results using helper function
             _display_chamber_results(results_for_display)
             
-            # If config was updated, trigger a rerun to recreate the runner
-            # This happens after displaying results so user can see them
-            if updated:
-                st.rerun()
-            
         except Exception as e:
             st.error(f"Error calculating chamber geometry: {str(e)}")
             import traceback
@@ -2337,8 +2328,6 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             display_results["dxf_bytes"] = None
         
         _display_chamber_results(display_results)
-        # Update config_obj with the stored config_dict
-        config_obj = PintleEngineConfig(**stored_results["config_dict"])
     
     return config_obj
 
@@ -2349,10 +2338,6 @@ def _display_chamber_results(results: dict) -> None:
     table_data = results["table_data"]
     config_dict = results["config_dict"]
     updated = results["updated"]
-    
-    # Display the stored results
-    if updated:
-        st.success("Configuration updated with calculated values!")
     
     # Display results
     st.subheader("Chamber Contour")
@@ -2405,14 +2390,27 @@ def _display_chamber_results(results: dict) -> None:
     )
     st.dataframe(df_table, use_container_width=True, hide_index=True)
     
-    # Download buttons
+    # Load Config button and Downloads
+    st.subheader("Configuration")
+    
+    # Button to explicitly load the calculated config into the active config
+    if updated:
+        if st.button("Load Calculated Config into Active Config", type="primary", key="load_chamber_config"):
+            # Load the calculated config into session state
+            st.session_state["config_dict"] = config_dict
+            # Mark that config was updated so runner gets recreated
+            st.session_state["config_updated"] = True
+            st.success("✓ Calculated configuration loaded! The runner will be recreated with the new values.")
+            st.rerun()
+        st.caption("Click the button above to load the calculated values into your active configuration.")
+    
     st.subheader("Downloads")
     col1, col2 = st.columns(2)
     
     with col1:
         # Download Config button
         config_yaml = yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
-        button_label = "Download Updated Config (YAML)" if updated else "Download Config (YAML)"
+        button_label = "Download Calculated Config (YAML)" if updated else "Download Config (YAML)"
         st.download_button(
             button_label,
             data=config_yaml,
@@ -2421,7 +2419,7 @@ def _display_chamber_results(results: dict) -> None:
             key="download_config_chamber"
         )
         if updated:
-            st.caption("✓ Config has been updated with calculated values")
+            st.caption("Download the calculated configuration as a YAML file")
     
     with col2:
         # Download DXF button

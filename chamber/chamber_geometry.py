@@ -146,6 +146,9 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
     cylindrical_length = chamber_length_calc(volume_chamber, area_throat, contraction_ratio, theta_default)
     contraction_length_horizontal = contraction_length_horizontal_calc(area_chamber, nozzle_y_first, theta_default)
     
+    # Calculate total chamber length (cylindrical + contraction) from injector face to throat
+    total_chamber_length = cylindrical_length + contraction_length_horizontal
+    
     # Calculate chamber radius
     r_c = np.sqrt(area_chamber / np.pi)
     
@@ -196,6 +199,8 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
     diameter_exit_in = diameter_exit_calc * m_to_in
     l_star_in = l_star * m_to_in
     cylindrical_length_in = cylindrical_length * m_to_in
+    contraction_length_horizontal_in = contraction_length_horizontal * m_to_in
+    total_chamber_length_in = total_chamber_length * m_to_in
     pc_design_psi = pc_design * pa_to_psi
     thrust_design_lbf = thrust_design * n_to_lbf
     
@@ -215,6 +220,8 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         ['Contraction Ratio', f'{contraction_ratio:.4f}', '', f'{contraction_ratio:.4f}', ''],
         ['L*', f'{l_star:.4f}', 'm', f'{l_star_in:.4f}', 'in'],
         ['Cylindrical Length', f'{cylindrical_length:.6e}', 'm', f'{cylindrical_length_in:.4f}', 'in'],
+        ['Contraction Length', f'{contraction_length_horizontal:.6e}', 'm', f'{contraction_length_horizontal_in:.4f}', 'in'],
+        ['Total Chamber Length', f'{total_chamber_length:.6e}', 'm', f'{total_chamber_length_in:.4f}', 'in'],
     ]
     
     # Plot if requested
@@ -320,7 +327,8 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         doc.saveas(export_dxf)
         print(f"Chamber contour exported to {export_dxf}")
     
-    return chamber_pts, table_data
+    # Also return the total chamber length as a separate value for easy access
+    return chamber_pts, table_data, total_chamber_length
 
-pts, data = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
+pts, data, total_length = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
  
