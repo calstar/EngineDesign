@@ -2142,6 +2142,32 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             thrust_design_default_metric = float(chamber["design_thrust"])
         if "design_force_coefficient" in chamber and chamber["design_force_coefficient"] is not None:
             force_coefficient_default = float(chamber["design_force_coefficient"])
+        
+        # Get diameter_inner from regen_cooling or calculate from volume/length
+        if "regen_cooling" in config_dict and config_dict["regen_cooling"] is not None:
+            regen = config_dict["regen_cooling"]
+            if "chamber_inner_diameter" in regen and regen["chamber_inner_diameter"] is not None:
+                diameter_inner_default_metric = float(regen["chamber_inner_diameter"])
+        # If not in regen, try to calculate from volume and length
+        if diameter_inner_default_metric == 0.08636:  # Still using default
+            if "volume" in chamber and "length" in chamber:
+                volume = float(chamber["volume"])
+                length = float(chamber["length"])
+                if volume > 0 and length > 0:
+                    area = volume / length
+                    diameter_inner_default_metric = np.sqrt(4.0 * area / np.pi)
+        
+        # Get diameter_exit from nozzle A_exit or calculate from expansion_ratio
+        if "nozzle" in config_dict:
+            nozzle = config_dict["nozzle"]
+            if "A_exit" in nozzle and nozzle["A_exit"] is not None:
+                A_exit = float(nozzle["A_exit"])
+                diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
+            elif "expansion_ratio" in nozzle and "A_throat" in chamber:
+                expansion_ratio = float(nozzle["expansion_ratio"])
+                A_throat = float(chamber["A_throat"])
+                A_exit = expansion_ratio * A_throat
+                diameter_exit_default_metric = np.sqrt(4.0 * A_exit / np.pi)
     
     # Input section
     with st.form("chamber_design_form"):
@@ -2601,9 +2627,14 @@ def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
 
 
 def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
-    # Use exclude_none=False to preserve all fields including None values
-    config_dict_fallback = config.model_dump(exclude_none=False)
-    working_copy = copy.deepcopy(st.session_state.get("config_dict", config_dict_fallback))
+    # Always use session_state["config_dict"] if it exists, as it's the source of truth
+    # This ensures values loaded from YAML files are properly displayed
+    if "config_dict" in st.session_state:
+        working_copy = copy.deepcopy(st.session_state["config_dict"])
+    else:
+        # Fallback to the config object passed in (shouldn't normally happen)
+        config_dict_fallback = config.model_dump(exclude_none=False)
+        working_copy = copy.deepcopy(config_dict_fallback)
     if "pintle_geometry" in working_copy and "injector" not in working_copy:
         working_copy["injector"] = {
             "type": "pintle",
@@ -3090,13 +3121,17 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         else:
             # Ensure we use the actual value from config, converting to float if needed
             chamber_length_value = float(chamber_length_value)
+        # Make keys dynamic based on config_label so widgets update when config changes
+        # This matches how volume and A_throat work (they don't have keys, so they always update)
+        config_label = st.session_state.get("config_label", "default")
+        # Use config_label in key so it changes when a new config is loaded
         chamber["length"] = length_number_input(
             "Chamber length (physical dimension)",
             chamber_length_value,
             min_m=0.01,
             max_m=3.0,
             step_m=0.01,
-            key="chamber_length",
+            key=f"chamber_length_{config_label}",
         )
         # Get Lstar value, handling None properly
         chamber_lstar_value = chamber.get("Lstar")
@@ -3112,7 +3147,7 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             min_m=0.1,
             max_m=5.0,
             step_m=0.05,
-            key="chamber_lstar",
+            key=f"chamber_lstar_{config_label}",
         )
         nozzle["expansion_ratio"] = st.number_input("Expansion ratio (Ae/At)", min_value=1.0, max_value=200.0, value=float(nozzle.get("expansion_ratio") or 10.0), format="%.4f")
 
