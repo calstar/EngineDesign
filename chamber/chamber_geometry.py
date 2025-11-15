@@ -2,7 +2,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import sys
 
-
+try:
+    import ezdxf
+    HAS_EZDXF = True
+except ImportError:
+    HAS_EZDXF = False
 
 from nozzle_solver import rao 
 
@@ -114,14 +118,24 @@ def generate_nozzle(area_throat, area_exit, steps=200):
     return rao(area_throat, area_exit, method="top", do_plot=False, steps=steps)
 
 
-def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeffcient_default, diameter_inner=chamber_diameter_default, diameter_exit=diameter_exit_default, l_star = l_star_default, do_plot=False, color_segments=False, steps=200):
+def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeffcient_default, diameter_inner=chamber_diameter_default, diameter_exit=diameter_exit_default, l_star = l_star_default, do_plot=False, color_segments=False, steps=200, export_dxf=None):
     """
     Calculate the full chamber geometry including cylindrical section, contraction, and nozzle.
+    
+    Parameters:
+    -----------
+    export_dxf : str or None
+        If provided, exports the contour to a DXF file at the specified path.
+        Example: 'chamber/chamber_contour.dxf'
     
     Returns:
     --------
     pts : numpy array
         Array of (x, y) points representing the full chamber contour
+    data : list of lists
+        Table data with metric and imperial units. First row contains headers:
+        ['Parameter', 'Metric Value', 'Metric Units', 'Imperial Value', 'Imperial Units']
+        Subsequent rows contain parameter data.
     """
     area_throat = area_throat_calc(pc_design, thrust_design, force_coeffcient)
     area_exit = area_exit_calc(diameter_exit)
@@ -158,6 +172,50 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         np.column_stack((x_contraction[1:], y_contraction[1:])),  # Skip first point to avoid duplicate
         nozzle_pts  # Nozzle already starts at the connection point
     ])
+    
+    # Calculate additional diameters for table data
+    diameter_chamber = chamber_diameter_calc(area_chamber)
+    diameter_throat = np.sqrt(4 * area_throat / np.pi)
+    diameter_exit_calc = np.sqrt(4 * area_exit / np.pi)
+    expansion_ratio = expansion_ratio_calc(area_exit, area_throat)
+    
+    # Conversion factors
+    m_to_in = 39.37
+    m2_to_in2 = 1550.0031
+    m3_to_in3 = 61023.7441
+    pa_to_psi = 0.000145038  # 1 Pa = 0.000145038 PSI
+    n_to_lbf = 0.224809  # 1 N = 0.224809 lbf
+    
+    # Convert to imperial
+    volume_chamber_in3 = volume_chamber * m3_to_in3
+    area_chamber_in2 = area_chamber * m2_to_in2
+    diameter_chamber_in = diameter_chamber * m_to_in
+    area_throat_in2 = area_throat * m2_to_in2
+    diameter_throat_in = diameter_throat * m_to_in
+    area_exit_in2 = area_exit * m2_to_in2
+    diameter_exit_in = diameter_exit_calc * m_to_in
+    l_star_in = l_star * m_to_in
+    cylindrical_length_in = cylindrical_length * m_to_in
+    pc_design_psi = pc_design * pa_to_psi
+    thrust_design_lbf = thrust_design * n_to_lbf
+    
+    # Create table data with metric and imperial units
+    table_data = [
+        ['Parameter', 'Metric Value', 'Metric Units', 'Imperial Value', 'Imperial Units'],
+        ['Design Pressure', f'{pc_design:.2e}', 'Pa', f'{pc_design_psi:.2f}', 'PSI'],
+        ['Design Thrust', f'{thrust_design:.2f}', 'N', f'{thrust_design_lbf:.2f}', 'lbf'],
+        ['Chamber Volume', f'{volume_chamber:.6e}', 'm³', f'{volume_chamber_in3:.4f}', 'in³'],
+        ['Chamber Area', f'{area_chamber:.6e}', 'm²', f'{area_chamber_in2:.4f}', 'in²'],
+        ['Chamber Diameter', f'{diameter_chamber:.6e}', 'm', f'{diameter_chamber_in:.4f}', 'in'],
+        ['Throat Area', f'{area_throat:.6e}', 'm²', f'{area_throat_in2:.6f}', 'in²'],
+        ['Throat Diameter', f'{diameter_throat:.6e}', 'm', f'{diameter_throat_in:.6f}', 'in'],
+        ['Exit Area', f'{area_exit:.6e}', 'm²', f'{area_exit_in2:.4f}', 'in²'],
+        ['Exit Diameter', f'{diameter_exit_calc:.6e}', 'm', f'{diameter_exit_in:.4f}', 'in'],
+        ['Expansion Ratio', f'{expansion_ratio:.4f}', '', f'{expansion_ratio:.4f}', ''],
+        ['Contraction Ratio', f'{contraction_ratio:.4f}', '', f'{contraction_ratio:.4f}', ''],
+        ['L*', f'{l_star:.4f}', 'm', f'{l_star_in:.4f}', 'in'],
+        ['Cylindrical Length', f'{cylindrical_length:.6e}', 'm', f'{cylindrical_length_in:.4f}', 'in'],
+    ]
     
     # Plot if requested
     if do_plot:
@@ -198,50 +256,6 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         ax.grid(True, alpha=0.3)
         ax.set_title("Full Chamber Contour", fontsize=14, fontweight='bold')
         
-        # Calculate additional diameters
-        diameter_chamber = chamber_diameter_calc(area_chamber)
-        diameter_throat = np.sqrt(4 * area_throat / np.pi)
-        diameter_exit_calc = np.sqrt(4 * area_exit / np.pi)
-        expansion_ratio = expansion_ratio_calc(area_exit, area_throat)
-        
-        # Conversion factors
-        m_to_in = 39.37
-        m2_to_in2 = 1550.0031
-        m3_to_in3 = 61023.7441
-        pa_to_psi = 0.000145038  # 1 Pa = 0.000145038 PSI
-        n_to_lbf = 0.224809  # 1 N = 0.224809 lbf
-        
-        # Convert to imperial
-        volume_chamber_in3 = volume_chamber * m3_to_in3
-        area_chamber_in2 = area_chamber * m2_to_in2
-        diameter_chamber_in = diameter_chamber * m_to_in
-        area_throat_in2 = area_throat * m2_to_in2
-        diameter_throat_in = diameter_throat * m_to_in
-        area_exit_in2 = area_exit * m2_to_in2
-        diameter_exit_in = diameter_exit_calc * m_to_in
-        l_star_in = l_star * m_to_in
-        cylindrical_length_in = cylindrical_length * m_to_in
-        pc_design_psi = pc_design * pa_to_psi
-        thrust_design_lbf = thrust_design * n_to_lbf
-        
-        # Create table data with metric and imperial units
-        table_data = [
-            ['Parameter', 'Metric Value', 'Metric Units', 'Imperial Value', 'Imperial Units'],
-            ['Design Pressure', f'{pc_design:.2e}', 'Pa', f'{pc_design_psi:.2f}', 'PSI'],
-            ['Design Thrust', f'{thrust_design:.2f}', 'N', f'{thrust_design_lbf:.2f}', 'lbf'],
-            ['Chamber Volume', f'{volume_chamber:.6e}', 'm³', f'{volume_chamber_in3:.4f}', 'in³'],
-            ['Chamber Area', f'{area_chamber:.6e}', 'm²', f'{area_chamber_in2:.4f}', 'in²'],
-            ['Chamber Diameter', f'{diameter_chamber:.6e}', 'm', f'{diameter_chamber_in:.4f}', 'in'],
-            ['Throat Area', f'{area_throat:.6e}', 'm²', f'{area_throat_in2:.6f}', 'in²'],
-            ['Throat Diameter', f'{diameter_throat:.6e}', 'm', f'{diameter_throat_in:.6f}', 'in'],
-            ['Exit Area', f'{area_exit:.6e}', 'm²', f'{area_exit_in2:.4f}', 'in²'],
-            ['Exit Diameter', f'{diameter_exit_calc:.6e}', 'm', f'{diameter_exit_in:.4f}', 'in'],
-            ['Expansion Ratio', f'{expansion_ratio:.4f}', '', f'{expansion_ratio:.4f}', ''],
-            ['Contraction Ratio', f'{contraction_ratio:.4f}', '', f'{contraction_ratio:.4f}', ''],
-            ['L*', f'{l_star:.4f}', 'm', f'{l_star_in:.4f}', 'in'],
-            ['Cylindrical Length', f'{cylindrical_length:.6e}', 'm', f'{cylindrical_length_in:.4f}', 'in'],
-        ]
-        
         # Bottom subplot for table
         ax_table = fig.add_subplot(gs[1])
         ax_table.axis('off')
@@ -279,6 +293,34 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         plt.savefig('chamber/chamber_full_contour.png', dpi=150, bbox_inches='tight')
         plt.close()
     
-    return chamber_pts
+    # Export to DXF if requested
+    if export_dxf is not None:
+        if not HAS_EZDXF:
+            raise ImportError(
+                "ezdxf library is required for DXF export. "
+                "Install it with: pip install ezdxf"
+            )
+        
+        # Create a new DXF document
+        doc = ezdxf.new('R2010')  # Use AutoCAD 2010 format
+        msp = doc.modelspace()
+        
+        # Create polyline points (x, y) for the upper half contour only
+        points = [(pt[0], pt[1]) for pt in chamber_pts]
+        
+        # Create polyline for the contour
+        msp.add_lwpolyline(points)
+        
+        # Add centerline (x-axis) as a reference
+        x_min = chamber_pts[:, 0].min()
+        x_max = chamber_pts[:, 0].max()
+        msp.add_line((x_min, 0), (x_max, 0))
+        
+        # Save the DXF file
+        doc.saveas(export_dxf)
+        print(f"Chamber contour exported to {export_dxf}")
+    
+    return chamber_pts, table_data
 
-pts = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True)
+pts, data = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
+ 
