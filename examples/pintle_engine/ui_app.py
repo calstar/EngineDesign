@@ -46,6 +46,12 @@ chamber_path = project_root / "chamber"
 if str(chamber_path) not in sys.path:
     sys.path.insert(0, str(chamber_path))
 from chamber_geometry import chamber_geometry_calc
+# Import chamber geometry solver with CEA
+try:
+    from chamber.chamber_geometry_solver import solve_chamber_geometry_with_cea
+except ImportError:
+    # Fallback if import fails
+    solve_chamber_geometry_with_cea = None
 # Import graphite geometry sizing
 from pintle_pipeline.graphite_geometry import size_graphite_insert
 from pintle_pipeline.graphite_cooling import compute_graphite_recession, calculate_throat_recession_multiplier
@@ -995,6 +1001,12 @@ def compute_timeseries_dataframe(
     ablative_heat_flux = []
     injector_turbulence_mix = []
     
+    # Graphite insert recession data
+    graphite_recession_rate = []
+    graphite_oxidation_rate = []
+    graphite_ablation_rate = []
+    graphite_surface_temp = []
+    
     # Injector pressure diagnostics
     P_injector_O = []
     P_injector_F = []
@@ -1016,8 +1028,12 @@ def compute_timeseries_dataframe(
     
     diag_list = results.get("diagnostics", [])
     errors: list[str] = []
+    
+    # Get graphite config for computing recession if not in diagnostics
+    graphite_cfg = runner.config.graphite_insert if hasattr(runner, 'config') else None
+    use_graphite = graphite_cfg is not None and graphite_cfg.enabled
 
-    for diag in diag_list:
+    for i, diag in enumerate(diag_list):
         if isinstance(diag, dict) and "error" in diag:
             errors.append(str(diag["error"]))
         cooling = diag.get("cooling", {}) if isinstance(diag, dict) else {}
@@ -1037,6 +1053,80 @@ def compute_timeseries_dataframe(
         ablative_heat_removed.append(ablative.get("heat_removed", np.nan) / 1000.0 if ablative else np.nan)
         ablative_heat_flux.append(ablative.get("effective_heat_flux", np.nan) / 1000.0 if ablative else np.nan)
         injector_turbulence_mix.append(diag.get("turbulence_intensity_mix", np.nan) if isinstance(diag, dict) else np.nan)
+        
+        # Graphite insert recession data
+        graphite = cooling.get("graphite", {}) if cooling else {}
+        if graphite and graphite.get("enabled", False):
+            # Extract from diagnostics if available
+            graphite_recession_rate.append(graphite.get("recession_rate", np.nan) * 1e6)  # Convert to µm/s
+            graphite_oxidation_rate.append(graphite.get("oxidation_rate", np.nan) * 1e6)  # Convert to µm/s
+            graphite_ablation_rate.append(graphite.get("recession_rate_thermal", np.nan) * 1e6)  # Convert to µm/s
+            graphite_surface_temp.append(graphite.get("surface_temperature", np.nan))
+        elif use_graphite and i < len(results.get("Pc", [])):
+            # Compute graphite recession if not in diagnostics but graphite is enabled
+            try:
+                from pintle_pipeline.graphite_cooling import compute_graphite_recession, calculate_throat_recession_multiplier
+                
+                Pc = float(results["Pc"][i]) if i < len(results["Pc"]) else 2e6
+                Tc = float(results["Tc"][i]) if i < len(results["Tc"]) else 3000.0
+                gamma = float(results["gamma"][i]) if i < len(results["gamma"]) else 1.2
+                R = float(results["R"][i]) if i < len(results["R"]) else 300.0
+                mdot_total = float(results["mdot_total"][i]) if i < len(results["mdot_total"]) else 0.1
+                
+                # Get throat area
+                if "A_throat" in results:
+                    throat_area = float(results["A_throat"][i])
+                else:
+                    throat_area = runner.config.chamber.A_throat if hasattr(runner.config, 'chamber') else 0.000857892
+                
+                # Estimate chamber heat flux
+                if ablative and ablative.get("enabled", False):
+                    chamber_heat_flux = ablative.get("incident_heat_flux", 1e6)
+                else:
+                    # Estimate from chamber conditions
+                    chamber_heat_flux = 1e6 * (Pc / 2e6) ** 0.8
+                
+                # Calculate throat heat flux multiplier
+                rho_chamber = Pc / (R * Tc) if R > 0 and Tc > 0 else 1.0
+                D_throat = np.sqrt(4.0 * throat_area / np.pi) if throat_area > 0 else 0.033
+                A_chamber = np.pi * (D_throat * 3) ** 2 / 4.0  # Approximate chamber area
+                v_chamber = mdot_total / (rho_chamber * A_chamber) if rho_chamber > 0 and A_chamber > 0 else 50.0
+                v_throat = np.sqrt(gamma * R * Tc / (gamma + 1)) if gamma > 0 and R > 0 and Tc > 0 else 1000.0
+                
+                throat_mult = calculate_throat_recession_multiplier(
+                    Pc, v_chamber, v_throat, chamber_heat_flux, gamma
+                )
+                peak_heat_flux = chamber_heat_flux * throat_mult
+                
+                # Estimate surface temperature
+                surface_temp = Tc * 0.85
+                
+                # Compute graphite recession
+                graphite_results = compute_graphite_recession(
+                    net_heat_flux=peak_heat_flux,
+                    throat_temperature=surface_temp,
+                    gas_temperature=Tc,
+                    graphite_config=graphite_cfg,
+                    throat_area=throat_area,
+                    pressure=Pc,
+                )
+                
+                graphite_recession_rate.append(graphite_results.get("recession_rate", 0.0) * 1e6)  # Convert to µm/s
+                graphite_oxidation_rate.append(graphite_results.get("oxidation_rate", 0.0) * 1e6)  # Convert to µm/s
+                graphite_ablation_rate.append(graphite_results.get("recession_rate_thermal", 0.0) * 1e6)  # Convert to µm/s
+                graphite_surface_temp.append(graphite_results.get("surface_temperature", surface_temp))
+            except Exception as e:
+                # If computation fails, use NaN
+                graphite_recession_rate.append(np.nan)
+                graphite_oxidation_rate.append(np.nan)
+                graphite_ablation_rate.append(np.nan)
+                graphite_surface_temp.append(np.nan)
+        else:
+            # No graphite data available
+            graphite_recession_rate.append(np.nan)
+            graphite_oxidation_rate.append(np.nan)
+            graphite_ablation_rate.append(np.nan)
+            graphite_surface_temp.append(np.nan)
         
         # Injector pressure diagnostics
         P_injector_O.append(diag.get("P_injector_O", np.nan) if isinstance(diag, dict) else np.nan)
@@ -1059,6 +1149,25 @@ def compute_timeseries_dataframe(
         df_dict["Ablative Recession (µm/s)"] = np.asarray(ablative_recession, dtype=float)
         df_dict["Ablative Heat Removed (kW)"] = np.asarray(ablative_heat_removed, dtype=float)
         df_dict["Ablative Heat Flux (kW/m²)"] = np.asarray(ablative_heat_flux, dtype=float)
+    
+    # Add graphite insert recession data
+    if graphite_recession_rate and any(np.isfinite(graphite_recession_rate)):
+        df_dict["Graphite Recession Rate (µm/s)"] = np.asarray(graphite_recession_rate, dtype=float)
+        df_dict["Graphite Oxidation Rate (µm/s)"] = np.asarray(graphite_oxidation_rate, dtype=float)
+        df_dict["Graphite Ablation Rate (µm/s)"] = np.asarray(graphite_ablation_rate, dtype=float)
+        df_dict["Graphite Surface Temperature (K)"] = np.asarray(graphite_surface_temp, dtype=float)
+        
+        # Calculate cumulative recession if time data is available
+        times_array = np.asarray(times)
+        if len(times_array) == len(graphite_recession_rate):
+            dt = np.diff(times_array, prepend=times_array[0])
+            cumulative_oxidation = np.cumsum(np.asarray(graphite_oxidation_rate, dtype=float) * dt * 1e-6)  # Convert µm/s to m/s, then integrate
+            cumulative_ablation = np.cumsum(np.asarray(graphite_ablation_rate, dtype=float) * dt * 1e-6)  # Convert µm/s to m/s, then integrate
+            cumulative_total = np.cumsum(np.asarray(graphite_recession_rate, dtype=float) * dt * 1e-6)  # Convert µm/s to m/s, then integrate
+            
+            df_dict["Cumulative Graphite Oxidation Recession (mm)"] = cumulative_oxidation * 1000.0
+            df_dict["Cumulative Graphite Ablation Recession (mm)"] = cumulative_ablation * 1000.0
+            df_dict["Cumulative Graphite Total Recession (mm)"] = cumulative_total * 1000.0
 
     # Add injector pressure drop data
     if P_injector_O and any(np.isfinite(P_injector_O)):
@@ -3779,7 +3888,7 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
     return PintleEngineConfig(**st.session_state["config_dict"])
 
 
-def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
+def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner] = None) -> PintleEngineConfig:
     """Chamber Design tab - calculates chamber geometry and updates config."""
     st.header("Chamber Design")
     st.markdown("Calculate chamber geometry from design parameters and update configuration.")
@@ -3818,6 +3927,7 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
     diameter_inner_default_metric = 0.08636  # m (3.4 inches)
     diameter_exit_default_metric = 0.1016  # m (4 inches)
     l_star_default_metric = 1.27  # m
+    MR_default = 2.5  # Default mixture ratio
     
     # Extract values from config
     chamber = config_dict.get("chamber", {})
@@ -3874,23 +3984,56 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
     # Note: Streamlit forms submit on Enter by default - user must click button to calculate
     st.info("💡 **Tip:** Press Enter in any field to update values, but click the button below to calculate geometry.")
     
-    # Create hash of config values to make form keys unique per config
-    # This ensures form inputs update when config changes (like length/Lstar in config_editor)
-    # Include all form input values in hash so keys change when any value changes
+    # Move radio buttons outside form so they trigger immediate reruns
+    # Read current values first (with defaults) to use in hash
     import hashlib
-    chamber_design_config_str = f"{pc_design_default_metric}_{thrust_design_default_metric}_{force_coefficient_default}_{diameter_inner_default_metric}_{diameter_exit_default_metric}_{l_star_default_metric}"
+    base_config_str = f"{pc_design_default_metric}_{thrust_design_default_metric}_{force_coefficient_default}_{diameter_inner_default_metric}_{diameter_exit_default_metric}_{l_star_default_metric}"
+    base_hash = hashlib.md5(f"{config_label}_{base_config_str}".encode()).hexdigest()[:8]
+    
+    st.subheader("Calculation Method")
+    
+    # Method selector: Manual Force Coefficient vs CEA-Based Solver
+    calculation_method = st.radio(
+        "Calculation Method",
+        ["Manual Force Coefficient", "CEA-Based Solver (Automatic Cf)"],
+        horizontal=True,
+        help="Manual: Specify force coefficient directly. CEA-Based: Automatically calculates optimal Cf from thermochemistry.",
+        key=f"chamber_calc_method_{config_label}_{base_hash}"
+    )
+    
+    # Check if CEA solver is available
+    use_cea_solver = (calculation_method == "CEA-Based Solver (Automatic Cf)" and 
+                     solve_chamber_geometry_with_cea is not None and 
+                     runner is not None and 
+                     hasattr(runner, 'cea_cache'))
+    
+    if calculation_method == "CEA-Based Solver (Automatic Cf)":
+        if solve_chamber_geometry_with_cea is None:
+            st.error("⚠️ CEA-based solver not available. Please use 'Manual Force Coefficient' method.")
+            calculation_method = "Manual Force Coefficient"
+            use_cea_solver = False
+        elif runner is None or not hasattr(runner, 'cea_cache'):
+            st.warning("⚠️ Runner or CEA cache not available. Please ensure engine is configured. Falling back to manual method.")
+            calculation_method = "Manual Force Coefficient"
+            use_cea_solver = False
+        else:
+            st.info("ℹ️ CEA-based solver will automatically calculate the optimal thrust coefficient (Cf) from thermochemistry.")
+    
+    st.subheader("Design Parameters")
+    
+    # Unit system toggle - outside form for immediate updates
+    unit_system = st.radio(
+        "Unit System",
+        ["Metric", "Imperial"],
+        horizontal=True,
+        key=f"chamber_unit_system_{config_label}_{base_hash}"
+    )
+    
+    # Create hash that includes unit system and calculation method so form inputs reset when these change
+    chamber_design_config_str = f"{base_config_str}_{calculation_method}_{unit_system}"
     config_hash = hashlib.md5(f"{config_label}_{chamber_design_config_str}".encode()).hexdigest()[:8]
     
     with st.form(f"chamber_design_form_{config_label}_{config_hash}", clear_on_submit=False):
-        st.subheader("Design Parameters")
-        
-        # Unit system toggle
-        unit_system = st.radio(
-            "Unit System",
-            ["Metric", "Imperial"],
-            horizontal=True,
-            key=f"chamber_unit_system_{config_label}_{config_hash}"
-        )
         
         # Convert defaults based on unit system
         if unit_system == "Imperial":
@@ -3967,15 +4110,33 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 format="%.2f" if unit_system == "Imperial" else "%.1f",
                 key=f"chamber_thrust_design_{config_label}_{config_hash}"
             )
-            force_coefficient = st.number_input(
-                "Force Coefficient",
-                min_value=1.0,
-                max_value=2.0,
-                value=force_coefficient_default,
-                step=0.1,
-                format="%.2f",
-                key=f"chamber_force_coefficient_{config_label}_{config_hash}"
-            )
+            
+            # Show force coefficient input only for manual method
+            if not use_cea_solver:
+                force_coefficient = st.number_input(
+                    "Force Coefficient",
+                    min_value=1.0,
+                    max_value=2.0,
+                    value=force_coefficient_default,
+                    step=0.1,
+                    format="%.2f",
+                    help="Thrust coefficient (Cf) - typically 1.2-1.8 for rocket nozzles",
+                    key=f"chamber_force_coefficient_{config_label}_{config_hash}"
+                )
+                MR_input = MR_default  # Not used, but initialize for consistency
+            else:
+                # For CEA solver, we need mixture ratio instead
+                MR_input = st.number_input(
+                    "Mixture Ratio (O/F)",
+                    min_value=1.0,
+                    max_value=10.0,
+                    value=MR_default,
+                    step=0.1,
+                    format="%.2f",
+                    help="Oxidizer-to-fuel mass ratio for CEA thermochemistry lookup",
+                    key=f"chamber_MR_{config_label}_{config_hash}"
+                )
+                force_coefficient = None  # Will be calculated by CEA solver
         
         with col2:
             diameter_inner = st.number_input(
@@ -4025,17 +4186,52 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 l_star_metric = l_star
             
             # Calculate chamber geometry
-            with st.spinner("Calculating chamber geometry..."):
-                pts, table_data, total_chamber_length = chamber_geometry_calc(
-                    pc_design=pc_design_metric,
-                    thrust_design=thrust_design_metric,
-                    force_coeffcient=force_coefficient,
-                    diameter_inner=diameter_inner_metric,
-                    diameter_exit=diameter_exit_metric,
-                    l_star=l_star_metric,
-                    do_plot=False,
-                    steps=200
-                )
+            solver_info = None
+            # MR_input is already defined in the form section above
+            if use_cea_solver:
+                # Use CEA-based solver
+                with st.spinner("Calculating chamber geometry with CEA solver (this may take a moment)..."):
+                    try:
+                        # Get nozzle efficiency from config to use corrected Cf
+                        nozzle_efficiency = runner.config.nozzle.efficiency if runner and runner.config else 0.98
+                        pts, table_data, total_chamber_length, solver_info = solve_chamber_geometry_with_cea(
+                            pc_design=pc_design_metric,
+                            thrust_design=thrust_design_metric,
+                            cea_cache=runner.cea_cache,
+                            MR=MR_input,
+                            diameter_inner=diameter_inner_metric,
+                            diameter_exit=diameter_exit_metric,
+                            l_star=l_star_metric,
+                            nozzle_efficiency=nozzle_efficiency,
+                            do_plot=False,
+                            steps=200,
+                            verbose=False
+                        )
+                        # Extract calculated Cf from solver info (this is now the corrected Cf)
+                        force_coefficient = solver_info.get('final_Cf', force_coefficient_default)
+                        Cf_ideal = solver_info.get('final_Cf_ideal', force_coefficient)
+                        st.success(f"✓ CEA solver converged: Cf = {force_coefficient:.4f} (corrected, with efficiency={nozzle_efficiency:.3f})")
+                        st.caption(f"Cf_ideal = {Cf_ideal:.4f} (from CEA)")
+                    except Exception as e:
+                        st.error(f"CEA solver failed: {e}")
+                        st.info("Falling back to manual force coefficient method...")
+                        use_cea_solver = False
+                        # Fall back to manual method
+                        force_coefficient = force_coefficient_default
+            
+            if not use_cea_solver:
+                # Use manual force coefficient method (original behavior)
+                with st.spinner("Calculating chamber geometry..."):
+                    pts, table_data, total_chamber_length = chamber_geometry_calc(
+                        pc_design=pc_design_metric,
+                        thrust_design=thrust_design_metric,
+                        force_coeffcient=force_coefficient,
+                        diameter_inner=diameter_inner_metric,
+                        diameter_exit=diameter_exit_metric,
+                        l_star=l_star_metric,
+                        do_plot=False,
+                        steps=200
+                    )
             
             # Extract calculated values from table_data
             # table_data format: [headers, row1, row2, ...]
@@ -4084,6 +4280,16 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             config_dict["chamber"]["design_pressure"] = pc_design_metric
             config_dict["chamber"]["design_thrust"] = thrust_design_metric
             config_dict["chamber"]["design_force_coefficient"] = force_coefficient
+            if use_cea_solver and solver_info:
+                # Store CEA solver info
+                config_dict["chamber"]["design_MR"] = MR_input
+                config_dict["chamber"]["design_cea_solver_used"] = True
+                config_dict["chamber"]["design_cea_solver_info"] = {
+                    "converged": solver_info.get("converged", False),
+                    "iterations": solver_info.get("iterations", 0),
+                    "final_Cf": solver_info.get("final_Cf", force_coefficient),
+                    "final_eps": solver_info.get("final_eps", 0.0),
+                }
             # Also update chamber_inner_diameter and exit_diameter from form inputs
             config_dict["chamber"]["chamber_inner_diameter"] = diameter_inner_metric
             updated = True
@@ -4174,7 +4380,9 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
                 "calculated_values": calculated_values,
                 "config_dict": config_dict,
                 "updated": updated,
-                "dxf_bytes": dxf_bytes
+                "dxf_bytes": dxf_bytes,
+                "solver_info": solver_info,
+                "use_cea_solver": use_cea_solver
             }
             if dxf_bytes:
                 st.session_state["chamber_dxf_bytes"] = dxf_bytes
@@ -4187,6 +4395,8 @@ def chamber_design_view(config_obj: PintleEngineConfig) -> PintleEngineConfig:
             st.session_state["config_updated_from_chamber_design"] = True
             
             # Display results immediately after calculation
+            results_for_display["solver_info"] = solver_info
+            results_for_display["use_cea_solver"] = use_cea_solver
             _display_chamber_results(results_for_display)
             
             # Show success message
@@ -4247,8 +4457,32 @@ def _display_chamber_results(results: dict) -> None:
     """Helper function to display chamber calculation results."""
     pts = results["pts"]
     table_data = results["table_data"]
-    config_dict = results["config_dict"]
-    updated = results["updated"]
+    config_dict = results.get("config_dict", {})
+    updated = results.get("updated", False)
+    solver_info = results.get("solver_info", None)
+    use_cea_solver = results.get("use_cea_solver", False)
+    
+    # Display CEA solver info if used
+    if use_cea_solver and solver_info:
+        st.subheader("CEA Solver Results")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Converged", "✓ Yes" if solver_info.get("converged", False) else "✗ No")
+        with col2:
+            st.metric("Iterations", solver_info.get("iterations", 0))
+        with col3:
+            st.metric("Final Cf (Ideal)", f"{solver_info.get('final_Cf', 0):.4f}")
+        with col4:
+            st.metric("Final Expansion Ratio", f"{solver_info.get('final_eps', 0):.2f}")
+        
+        # Show convergence history if available
+        if solver_info.get("convergence_history"):
+            conv_history = solver_info["convergence_history"]
+            if len(conv_history) > 1:
+                with st.expander("Convergence History"):
+                    conv_df = pd.DataFrame(conv_history)
+                    st.dataframe(conv_df[['iteration', 'A_throat', 'Cf', 'eps', 'residual']], 
+                               use_container_width=True, hide_index=True)
     
     # Display results
     st.subheader("Chamber Contour")
@@ -4332,41 +4566,57 @@ def graphite_insert_view(config_obj: PintleEngineConfig, runner: Optional[Pintle
     if config_dict.get("thrust") and config_dict["thrust"].get("burn_time"):
         burn_time = float(config_dict["thrust"]["burn_time"])
     
+    # Input method selection - OUTSIDE the form so it updates immediately
+    st.subheader("Input Method")
+    input_method = st.radio(
+        "How to get design point values?",
+        ["From Engine Run", "Manual Input"],
+        horizontal=True,
+        key=f"graphite_input_method_{config_label}",
+        help="'From Engine Run' will use a time-series dataset to evaluate the engine over the full burn. 'Manual Input' lets you enter values directly."
+    )
+    
+    # Handle dataset selection for "From Engine Run"
+    df_selected: Optional[pd.DataFrame] = None
+    dataset_name: Optional[str] = None
+    
+    if input_method == "From Engine Run":
+        if runner is None:
+            st.warning("⚠️ Runner not available. Please use 'Manual Input' mode or ensure engine is configured.")
+            input_method = "Manual Input"  # Force manual mode
+        else:
+            # Get available datasets (like COPV does)
+            datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
+            required_cols = {"time", "P_tank_O (psi)", "P_tank_F (psi)"}
+            eligible = {name: df for name, df in datasets.items() if required_cols.issubset(df.columns)}
+            
+            if not eligible:
+                st.info(
+                    "No eligible time-series datasets found. Run a time-series evaluation (generated or uploaded) so the "
+                    "resulting dataframe includes time and tank pressure columns. Alternatively, use 'Manual Input' mode."
+                )
+                input_method = "Manual Input"  # Fall back to manual
+            else:
+                dataset_names = list(eligible.keys())
+                default_dataset = st.session_state.get("last_custom_dataset")
+                default_index = dataset_names.index(default_dataset) if default_dataset in dataset_names else 0
+                
+                dataset_name = st.selectbox(
+                    "Time-Series Dataset (must include time and tank pressure columns)",
+                    dataset_names,
+                    index=default_index,
+                    key=f"graphite_dataset_{config_label}",
+                )
+                df_selected = eligible[dataset_name].copy().sort_values("time").reset_index(drop=True)
+                if df_selected.empty:
+                    st.warning("Selected dataset is empty. Choose a different dataset or use 'Manual Input' mode.")
+                    input_method = "Manual Input"
+                else:
+                    duration = float(df_selected["time"].iloc[-1] - df_selected["time"].iloc[0])
+                    st.caption(f"Dataset: {dataset_name} | {len(df_selected)} samples | duration ≈ {duration:.2f} s")
+    
     # Create form for input
     with st.form(f"graphite_insert_form_{config_label}", clear_on_submit=False):
-        st.subheader("Input Method")
-        input_method = st.radio(
-            "How to get design point values?",
-            ["From Engine Run", "Manual Input"],
-            horizontal=True,
-            help="'From Engine Run' will evaluate the engine at specified tank pressures to get heat flux and recession rate. 'Manual Input' lets you enter values directly."
-        )
-        
-        if input_method == "From Engine Run":
-            st.subheader("Design Point (Tank Pressures)")
-            col1, col2 = st.columns(2)
-            with col1:
-                P_tank_O_psi = st.number_input(
-                    "LOX Tank Pressure [psi]",
-                    min_value=50.0,
-                    max_value=3000.0,
-                    value=1305.0,
-                    step=5.0,
-                    key=f"graphite_P_tank_O_{config_label}"
-                )
-            with col2:
-                P_tank_F_psi = st.number_input(
-                    "Fuel Tank Pressure [psi]",
-                    min_value=50.0,
-                    max_value=3000.0,
-                    value=974.0,
-                    step=5.0,
-                    key=f"graphite_P_tank_F_{config_label}"
-                )
-            
-            if runner is None:
-                st.warning("⚠️ Runner not available. Please use 'Manual Input' mode or ensure engine is configured.")
-                input_method = "Manual Input"  # Force manual mode
         
         st.subheader("Graphite Material Properties")
         col1, col2, col3 = st.columns(3)
@@ -4513,67 +4763,143 @@ def graphite_insert_view(config_obj: PintleEngineConfig, runner: Optional[Pintle
             safety_factor_frac = safety_factor / 100.0  # Convert % to fraction
             
             # Get design point values
-            if input_method == "From Engine Run" and runner is not None:
-                # Run engine to get design point
-                P_tank_O = P_tank_O_psi * PSI_TO_PA
-                P_tank_F = P_tank_F_psi * PSI_TO_PA
-                
-                with st.spinner("Running engine to get design point..."):
-                    results = runner.evaluate(P_tank_O, P_tank_F)
-                
-                # Extract values from results
-                diagnostics = results.get("diagnostics", {})
-                cooling = diagnostics.get("cooling", {})
-                
-                # Get chamber heat flux (from ablative or estimate)
-                ablative = cooling.get("ablative", {})
-                if ablative.get("enabled", False):
-                    chamber_heat_flux = ablative.get("incident_heat_flux", 1e6)
-                else:
-                    # Estimate from chamber conditions
-                    Pc = results.get("Pc", 2e6)
-                    Tc = results.get("Tc", 3000.0)
-                    # Rough estimate: q'' ~ 0.026 * Pr^0.4 * (rho*u)^0.8 * (T_g - T_w)
-                    # Simplified: use typical value scaled by pressure
-                    chamber_heat_flux = 1e6 * (Pc / 2e6) ** 0.8
-                
-                # Calculate throat heat flux multiplier
-                gamma = results.get("gamma", 1.2)
-                R = results.get("R", 300.0)
-                mdot_total = results.get("mdot_total", 0.1)
-                
-                # Estimate velocities
-                rho_chamber = Pc / (R * Tc)
-                A_chamber = np.pi * (throat_diameter_m * 3) ** 2 / 4.0  # Approximate chamber area
-                v_chamber = mdot_total / (rho_chamber * A_chamber) if rho_chamber > 0 else 50.0
-                v_throat = np.sqrt(gamma * R * Tc / (gamma + 1))  # Sonic velocity
-                
-                throat_mult = calculate_throat_recession_multiplier(
-                    Pc, v_chamber, v_throat, chamber_heat_flux, gamma
-                )
-                peak_heat_flux = chamber_heat_flux * throat_mult
-                
-                # Get surface temperature (estimate from throat conditions)
-                surface_temp = Tc * 0.85  # Approximate throat temperature
-                
-                # Get recession rate from graphite cooling model
-                graphite_cfg_temp = config_obj.graphite_insert
-                if graphite_cfg_temp and graphite_cfg_temp.enabled:
-                    graphite_results = compute_graphite_recession(
-                        net_heat_flux=peak_heat_flux,
-                        throat_temperature=surface_temp,
-                        gas_temperature=Tc,
-                        graphite_config=graphite_cfg_temp,
-                        throat_area=np.pi * (throat_diameter_m / 2) ** 2,
-                        pressure=Pc,
-                    )
-                    recession_rate = graphite_results.get("recession_rate", 6e-5)
-                else:
-                    # Default estimate
-                    recession_rate = 6e-5  # m/s
-                
-                st.success(f"✓ Engine run complete: Pc = {results.get('Pc', 0)/6894.76:.1f} psi, "
-                          f"Thrust = {results.get('F', 0)/1000:.2f} kN")
+            if input_method == "From Engine Run" and runner is not None and df_selected is not None:
+                # Process time series dataset
+                with st.spinner("Running engine over time series..."):
+                    times = df_selected["time"].values
+                    P_tank_O_psi_array = df_selected["P_tank_O (psi)"].values
+                    P_tank_F_psi_array = df_selected["P_tank_F (psi)"].values
+                    
+                    # Convert to Pa
+                    P_tank_O_pa = P_tank_O_psi_array * PSI_TO_PA
+                    P_tank_F_pa = P_tank_F_psi_array * PSI_TO_PA
+                    
+                    # Run engine for all time steps
+                    results_dict = runner.evaluate_arrays(P_tank_O_pa, P_tank_F_pa)
+                    diagnostics_list = results_dict.get("diagnostics", [])
+                    
+                    # Extract time series of heat flux, surface temp, and recession rate
+                    heat_flux_series = []
+                    surface_temp_series = []
+                    recession_rate_series = []
+                    oxidation_rate_series = []
+                    ablation_rate_series = []
+                    
+                    graphite_cfg_temp = config_obj.graphite_insert
+                    throat_area = np.pi * (throat_diameter_m / 2) ** 2
+                    
+                    for i in range(len(times)):
+                        # Get diagnostics for this time step
+                        if i < len(diagnostics_list) and isinstance(diagnostics_list[i], dict):
+                            diagnostics = diagnostics_list[i]
+                        else:
+                            diagnostics = {}
+                        
+                        cooling = diagnostics.get("cooling", {})
+                        
+                        # Get results for this time step
+                        Pc = float(results_dict["Pc"][i]) if i < len(results_dict["Pc"]) else 2e6
+                        Tc = float(results_dict["Tc"][i]) if i < len(results_dict["Tc"]) else 3000.0
+                        gamma = float(results_dict["gamma"][i]) if i < len(results_dict["gamma"]) else 1.2
+                        R = float(results_dict["R"][i]) if i < len(results_dict["R"]) else 300.0
+                        mdot_total = float(results_dict["mdot_total"][i]) if i < len(results_dict["mdot_total"]) else 0.1
+                        
+                        # Get chamber heat flux (from ablative or estimate)
+                        ablative = cooling.get("ablative", {})
+                        if ablative.get("enabled", False):
+                            chamber_heat_flux = ablative.get("incident_heat_flux", 1e6)
+                        else:
+                            # Estimate from chamber conditions
+                            # Rough estimate: q'' ~ 0.026 * Pr^0.4 * (rho*u)^0.8 * (T_g - T_w)
+                            # Simplified: use typical value scaled by pressure
+                            chamber_heat_flux = 1e6 * (Pc / 2e6) ** 0.8
+                        
+                        # Calculate throat heat flux multiplier
+                        
+                        # Estimate velocities
+                        rho_chamber = Pc / (R * Tc)
+                        A_chamber = np.pi * (throat_diameter_m * 3) ** 2 / 4.0  # Approximate chamber area
+                        v_chamber = mdot_total / (rho_chamber * A_chamber) if rho_chamber > 0 else 50.0
+                        v_throat = np.sqrt(gamma * R * Tc / (gamma + 1))  # Sonic velocity
+                        
+                        throat_mult = calculate_throat_recession_multiplier(
+                            Pc, v_chamber, v_throat, chamber_heat_flux, gamma
+                        )
+                        peak_heat_flux_i = chamber_heat_flux * throat_mult
+                        
+                        # Get surface temperature (estimate from throat conditions)
+                        surface_temp_i = Tc * 0.85  # Approximate throat temperature
+                        
+                        # Get recession rate from graphite cooling model
+                        if graphite_cfg_temp and graphite_cfg_temp.enabled:
+                            graphite_results = compute_graphite_recession(
+                                net_heat_flux=peak_heat_flux_i,
+                                throat_temperature=surface_temp_i,
+                                gas_temperature=Tc,
+                                graphite_config=graphite_cfg_temp,
+                                throat_area=throat_area,
+                                pressure=Pc,
+                            )
+                            recession_rate_i = graphite_results.get("recession_rate", 6e-5)
+                            oxidation_rate_i = graphite_results.get("oxidation_rate", 0.0)
+                            ablation_rate_i = graphite_results.get("recession_rate_thermal", 0.0)
+                        else:
+                            # Default estimate
+                            recession_rate_i = 6e-5  # m/s
+                            oxidation_rate_i = 0.0
+                            ablation_rate_i = 0.0
+                        
+                        heat_flux_series.append(peak_heat_flux_i)
+                        surface_temp_series.append(surface_temp_i)
+                        recession_rate_series.append(recession_rate_i)
+                        oxidation_rate_series.append(oxidation_rate_i)
+                        ablation_rate_series.append(ablation_rate_i)
+                    
+                    # Convert to numpy arrays
+                    heat_flux_series = np.array(heat_flux_series)
+                    surface_temp_series = np.array(surface_temp_series)
+                    recession_rate_series = np.array(recession_rate_series)
+                    oxidation_rate_series = np.array(oxidation_rate_series)
+                    ablation_rate_series = np.array(ablation_rate_series)
+                    
+                    # Use actual burn time from dataset
+                    actual_burn_time = float(times[-1] - times[0])
+                    if actual_burn_time > 0:
+                        burn_time_input = actual_burn_time
+                    
+                    # Integrate recession rate over time to get total recession allowance
+                    # This is more accurate than assuming constant max rate
+                    dt = np.diff(times, prepend=times[0])
+                    total_recession_allowance = float(np.sum(recession_rate_series * dt))
+                    
+                    # Calculate effective average recession rate for sizing function
+                    # (sizing function expects recession_rate * burn_time, so we back-calculate)
+                    if actual_burn_time > 0:
+                        effective_recession_rate = total_recession_allowance / actual_burn_time
+                    else:
+                        effective_recession_rate = float(np.max(recession_rate_series))
+                    
+                    # Use peak values for sizing (heat flux and surface temp)
+                    peak_heat_flux = float(np.max(heat_flux_series))
+                    surface_temp = float(surface_temp_series[np.argmax(heat_flux_series)])  # Surface temp at peak heat flux
+                    
+                    # Use the effective recession rate (which represents the integrated total)
+                    recession_rate = effective_recession_rate
+                    
+                    st.success(f"✓ Time series analysis complete: {len(times)} time steps, "
+                              f"Peak heat flux = {peak_heat_flux/1e6:.2f} MW/m², "
+                              f"Integrated total recession = {total_recession_allowance*1000:.2f} mm, "
+                              f"Effective recession rate = {recession_rate*1e6:.2f} µm/s")
+                    
+                    # Store time series for verification
+                    st.session_state["graphite_timeseries"] = {
+                        "time": times,
+                        "heat_flux": heat_flux_series,
+                        "surface_temp": surface_temp_series,
+                        "recession_rate": recession_rate_series,
+                        "oxidation_rate": oxidation_rate_series,
+                        "ablation_rate": ablation_rate_series,
+                    }
             else:
                 # Use manual input values
                 if peak_heat_flux_manual is not None:
@@ -4635,6 +4961,177 @@ def graphite_insert_view(config_obj: PintleEngineConfig, runner: Optional[Pintle
                 st.warning(f"⚠️ {sizing.integrity_note}")
             else:
                 st.success("✓ All integrity checks passed")
+            
+            # Time series verification (if available)
+            if "graphite_timeseries" in st.session_state and input_method == "From Engine Run":
+                from pintle_pipeline.graphite_geometry import verify_transient_thickness
+                
+                st.subheader("Time Series Verification")
+                ts_data = st.session_state["graphite_timeseries"]
+                times = ts_data["time"]
+                recession_rate_series = ts_data["recession_rate"]
+                oxidation_rate_series = ts_data.get("oxidation_rate", np.zeros_like(recession_rate_series))
+                ablation_rate_series = ts_data.get("ablation_rate", np.zeros_like(recession_rate_series))
+                
+                # Verify thickness throughout burn
+                verification = verify_transient_thickness(
+                    time=times,
+                    recession_rate=recession_rate_series,
+                    initial_thickness=sizing.initial_thickness,
+                    mechanical_thickness=mechanical_thickness_m,
+                )
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Consumed", f"{verification['consumed']*1000:.2f} mm")
+                    st.metric("Remaining at End", f"{verification['remaining']*1000:.2f} mm")
+                with col2:
+                    st.metric("Minimum Remaining", f"{verification['min_remaining']*1000:.2f} mm")
+                    status_color = "normal" if verification['meets_mechanical'] else "inverse"
+                    st.metric("Meets Mechanical", "✓ Yes" if verification['meets_mechanical'] else "✗ No", 
+                             delta=None if verification['meets_mechanical'] else "Below minimum")
+                with col3:
+                    required_min = mechanical_thickness_m * 1000.0
+                    margin = (verification['min_remaining'] * 1000.0) - required_min
+                    st.metric("Safety Margin", f"{margin:.2f} mm")
+                
+                # Calculate cumulative recession due to oxidation vs ablation
+                dt = np.diff(times, prepend=times[0])
+                cumulative_oxidation = np.cumsum(oxidation_rate_series * dt)
+                cumulative_ablation = np.cumsum(ablation_rate_series * dt)
+                cumulative_total = cumulative_oxidation + cumulative_ablation
+                
+                # Create dataframe showing recession breakdown over time
+                recession_df = pd.DataFrame({
+                    "Time [s]": times,
+                    "Oxidation Recession [mm]": cumulative_oxidation * 1000.0,
+                    "Ablation Recession [mm]": cumulative_ablation * 1000.0,
+                    "Total Recession [mm]": cumulative_total * 1000.0,
+                    "Oxidation Rate [µm/s]": oxidation_rate_series * 1e6,
+                    "Ablation Rate [µm/s]": ablation_rate_series * 1e6,
+                    "Total Rate [µm/s]": recession_rate_series * 1e6,
+                })
+                
+                st.subheader("Recession Breakdown Over Burn")
+                st.caption("Cumulative recession due to oxidation vs thermal ablation")
+                st.dataframe(recession_df, use_container_width=True, height=400)
+                
+                # Summary metrics
+                total_oxidation = float(cumulative_oxidation[-1]) * 1000.0  # mm
+                total_ablation = float(cumulative_ablation[-1]) * 1000.0  # mm
+                total_recession = float(cumulative_total[-1]) * 1000.0  # mm
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Oxidation Recession", f"{total_oxidation:.3f} mm",
+                             delta=f"{(total_oxidation/total_recession*100):.1f}%" if total_recession > 0 else None)
+                with col2:
+                    st.metric("Total Ablation Recession", f"{total_ablation:.3f} mm",
+                             delta=f"{(total_ablation/total_recession*100):.1f}%" if total_recession > 0 else None)
+                with col3:
+                    st.metric("Total Recession", f"{total_recession:.3f} mm")
+                
+                # Plot time series
+                import plotly.graph_objects as go
+                from plotly.subplots import make_subplots
+                
+                fig = make_subplots(
+                    rows=3, cols=1,
+                    subplot_titles=("Heat Flux & Surface Temperature", "Recession Rate Breakdown", "Cumulative Recession"),
+                    vertical_spacing=0.12,
+                    specs=[[{"secondary_y": True}], [{}], [{}]],
+                )
+                
+                # Heat flux and surface temp
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=ts_data["heat_flux"] / 1e6,  # Convert to MW/m²
+                        name="Heat Flux",
+                        line=dict(color="red"),
+                    ),
+                    row=1, col=1,
+                    secondary_y=False,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=ts_data["surface_temp"],
+                        name="Surface Temp",
+                        line=dict(color="orange"),
+                    ),
+                    row=1, col=1,
+                    secondary_y=True,
+                )
+                
+                # Recession rate breakdown
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=recession_rate_series * 1e6,  # Convert to µm/s
+                        name="Total Rate",
+                        line=dict(color="blue", width=2),
+                    ),
+                    row=2, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=oxidation_rate_series * 1e6,  # Convert to µm/s
+                        name="Oxidation Rate",
+                        line=dict(color="green"),
+                    ),
+                    row=2, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=ablation_rate_series * 1e6,  # Convert to µm/s
+                        name="Ablation Rate",
+                        line=dict(color="purple"),
+                    ),
+                    row=2, col=1,
+                )
+                
+                # Cumulative recession
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=cumulative_total * 1000.0,  # Convert to mm
+                        name="Total Cumulative",
+                        line=dict(color="blue", width=2),
+                    ),
+                    row=3, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=cumulative_oxidation * 1000.0,  # Convert to mm
+                        name="Oxidation Cumulative",
+                        line=dict(color="green"),
+                    ),
+                    row=3, col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=times,
+                        y=cumulative_ablation * 1000.0,  # Convert to mm
+                        name="Ablation Cumulative",
+                        line=dict(color="purple"),
+                    ),
+                    row=3, col=1,
+                )
+                
+                fig.update_xaxes(title_text="Time [s]", row=3, col=1)
+                fig.update_xaxes(title_text="Time [s]", row=2, col=1)
+                fig.update_xaxes(title_text="Time [s]", row=1, col=1)
+                fig.update_yaxes(title_text="Heat Flux [MW/m²]", row=1, col=1, secondary_y=False)
+                fig.update_yaxes(title_text="Temperature [K]", row=1, col=1, secondary_y=True)
+                fig.update_yaxes(title_text="Recession Rate [µm/s]", row=2, col=1)
+                fig.update_yaxes(title_text="Cumulative Recession [mm]", row=3, col=1)
+                fig.update_layout(height=800, showlegend=True)
+                
+                st.plotly_chart(fig, use_container_width=True)
             
             # Update config button
             st.subheader("Update Configuration")
@@ -5360,7 +5857,7 @@ def main():
     # Run chamber design tab - it updates st.session_state["config_dict"] when Calculate is pressed
     # The download button uses st.session_state["config_dict"] which is the source of truth
     with tab8:
-        config_obj = chamber_design_view(config_obj)
+        config_obj = chamber_design_view(config_obj, runner)
         # chamber_design_view updates st.session_state["config_dict"] with calculated values
     
     # Run graphite insert tab - it updates st.session_state["config_dict"] when Calculate is pressed
