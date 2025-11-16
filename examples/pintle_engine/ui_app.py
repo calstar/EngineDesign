@@ -642,12 +642,19 @@ def summarize_results(results: Dict[str, Any]) -> None:
         ablative = cooling.get("ablative")
         if ablative and ablative.get("enabled", False):
             st.caption("Ablative cooling")
+            # Use cooling_power if available, fallback to heat_removed for backward compatibility
+            cooling_power = ablative.get("cooling_power", ablative.get("heat_removed", 0.0))
             st.write(
-                f"Recession rate: {ablative['recession_rate']*1e6:.3f} µm/s | Effective heat flux: {ablative['effective_heat_flux']/1000:.1f} kW/m²"
+                f"Recession rate: {ablative['recession_rate']*1e6:.3f} µm/s | Effective heat flux: {ablative['effective_heat_flux']/1000:.1f} kW/m² | Cooling power: {cooling_power/1000:.1f} kW"
             )
             if ablative.get("turbulence_multiplier") is not None:
                 st.write(
                     f"Turbulence multiplier: {ablative['turbulence_multiplier']:.2f} | Incident heat flux: {ablative.get('incident_heat_flux', np.nan)/1000:.1f} kW/m²"
+                )
+            if ablative.get("below_pyrolysis") is not None:
+                below_pyro = ablative.get("below_pyrolysis", False)
+                st.write(
+                    f"Status: {'Below pyrolysis (no ablation)' if below_pyro else 'Above pyrolysis (ablating)'}"
                 )
 
         metadata = cooling.get("metadata", {})
@@ -923,7 +930,7 @@ def create_single_run_dataframe(results: Dict[str, Any], context: str) -> pd.Dat
         "Regen Outlet Temp (K)": regen.get("coolant_outlet_temperature", np.nan) if regen else np.nan,
         "Film Heat Removed (kW)": film.get("heat_removed", np.nan) / 1000.0 if film else np.nan,
         "Film Effectiveness": film.get("effectiveness", np.nan) if film else np.nan,
-        "Ablative Heat Removed (kW)": ablative.get("heat_removed", np.nan) / 1000.0 if ablative else np.nan,
+        "Ablative Cooling Power (kW)": ablative.get("cooling_power", ablative.get("heat_removed", np.nan)) / 1000.0 if ablative else np.nan,
         "Ablative Recession (µm/s)": ablative.get("recession_rate", np.nan) * 1e6 if ablative and ablative.get("recession_rate") is not None else np.nan,
         "Injector Turbulence O": diag.get("turbulence_intensity_O", np.nan),
         "Injector Turbulence F": diag.get("turbulence_intensity_F", np.nan),
@@ -1027,7 +1034,9 @@ def compute_timeseries_dataframe(
         film_heat_factor.append(film.get("heat_flux_factor", np.nan) if film else np.nan)
         film_turbulence_multiplier.append(film.get("turbulence_multiplier", np.nan) if film else np.nan)
         ablative_recession.append(ablative.get("recession_rate", np.nan) * 1e6 if ablative else np.nan)
-        ablative_heat_removed.append(ablative.get("heat_removed", np.nan) / 1000.0 if ablative else np.nan)
+        # Use cooling_power if available, fallback to heat_removed for backward compatibility
+        ablative_cooling_power = ablative.get("cooling_power", ablative.get("heat_removed", np.nan)) if ablative else np.nan
+        ablative_heat_removed.append(ablative_cooling_power / 1000.0 if not np.isnan(ablative_cooling_power) else np.nan)
         ablative_heat_flux.append(ablative.get("effective_heat_flux", np.nan) / 1000.0 if ablative else np.nan)
         injector_turbulence_mix.append(diag.get("turbulence_intensity_mix", np.nan) if isinstance(diag, dict) else np.nan)
         
@@ -1050,7 +1059,7 @@ def compute_timeseries_dataframe(
         df_dict["Injector Turbulence Mix"] = np.asarray(injector_turbulence_mix, dtype=float)
     if ablative_recession:
         df_dict["Ablative Recession (µm/s)"] = np.asarray(ablative_recession, dtype=float)
-        df_dict["Ablative Heat Removed (kW)"] = np.asarray(ablative_heat_removed, dtype=float)
+        df_dict["Ablative Cooling Power (kW)"] = np.asarray(ablative_heat_removed, dtype=float)
         df_dict["Ablative Heat Flux (kW/m²)"] = np.asarray(ablative_heat_flux, dtype=float)
 
     # Add injector pressure drop data
@@ -1285,13 +1294,13 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
         )
         st.plotly_chart(abl_fig, width="stretch", key="ts_ablative")
 
-    if "Ablative Heat Removed (kW)" in df.columns and not df["Ablative Heat Removed (kW)"].isna().all():
+    if "Ablative Cooling Power (kW)" in df.columns and not df["Ablative Cooling Power (kW)"].isna().all():
         abl_heat_fig = px.line(
             df,
             x="time",
-            y="Ablative Heat Removed (kW)",
+            y="Ablative Cooling Power (kW)",
             markers=False,
-            title="Ablative Heat Removal",
+            title="Ablative Cooling Power",
         )
         st.plotly_chart(abl_heat_fig, width="stretch", key="ts_abl_heat")
 
@@ -3450,6 +3459,13 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             "coverage_fraction": 1.0,
             "pyrolysis_temperature": 900.0,
             "blowing_efficiency": 0.8,
+            "use_physics_based_blowing": True,
+            "blowing_coefficient": 0.5,
+            "blowing_min_reduction_factor": 0.1,
+            "surface_emissivity": 0.85,
+            "ambient_temperature": 300.0,
+            "radiative_sink_minimum_threshold": 400.0,
+            "radiative_sink_fallback_temperature": 600.0,
             "turbulence_reference_intensity": 0.08,
             "turbulence_sensitivity": 1.5,
             "turbulence_exponent": 1.0,
@@ -3471,7 +3487,82 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         ablative_cfg["surface_temperature_limit"] = st.number_input("Surface temperature limit [K]", min_value=500.0, max_value=2500.0, value=float(ablative_cfg.get("surface_temperature_limit", 1200.0)), key="ablative_surface_temp")
         ablative_cfg["coverage_fraction"] = st.number_input("Surface coverage fraction", min_value=0.1, max_value=1.0, value=float(ablative_cfg.get("coverage_fraction", 1.0)), key="ablative_coverage_fraction")
         ablative_cfg["pyrolysis_temperature"] = st.number_input("Pyrolysis temperature [K]", min_value=300.0, max_value=2000.0, value=float(ablative_cfg.get("pyrolysis_temperature", 900.0)), key="ablative_pyrolysis_temperature")
-        ablative_cfg["blowing_efficiency"] = st.number_input("Blowing efficiency", min_value=0.0, max_value=1.0, value=float(ablative_cfg.get("blowing_efficiency", 0.8)), key="ablative_blowing_efficiency")
+        st.markdown("**Blowing Effect (Pyrolysis Gas Protection):**")
+        ablative_cfg["use_physics_based_blowing"] = st.checkbox(
+            "Use physics-based blowing (B = m_dot_pyrolysis/m_dot_external)",
+            value=bool(ablative_cfg.get("use_physics_based_blowing", True)),
+            help="If enabled, computes blowing parameter B from actual pyrolysis mass flux. If disabled, uses constant blowing_efficiency factor.",
+            key="ablative_use_physics_blowing"
+        )
+        
+        if ablative_cfg["use_physics_based_blowing"]:
+            ablative_cfg["blowing_coefficient"] = st.number_input(
+                "Blowing coefficient c",
+                min_value=0.1,
+                max_value=2.0,
+                value=float(ablative_cfg.get("blowing_coefficient", 0.5)),
+                step=0.1,
+                help="Coefficient in f(B) = 1/(1 + c*B). Typical range: 0.3-0.8. Higher = stronger blowing effect.",
+                key="ablative_blowing_coefficient"
+            )
+            ablative_cfg["blowing_min_reduction_factor"] = st.number_input(
+                "Minimum reduction factor (max blowing effectiveness)",
+                min_value=0.01,
+                max_value=0.5,
+                value=float(ablative_cfg.get("blowing_min_reduction_factor", 0.1)),
+                step=0.01,
+                help="Minimum fraction of convective heat that remains (max reduction = 1 - this value). Default 0.1 = max 90% reduction.",
+                key="ablative_blowing_min_reduction"
+            )
+        else:
+            ablative_cfg["blowing_efficiency"] = st.number_input(
+                "Blowing efficiency (legacy constant factor)",
+                min_value=0.0,
+                max_value=1.0,
+                value=float(ablative_cfg.get("blowing_efficiency", 0.8)),
+                help="Constant effectiveness factor (used when physics-based blowing is disabled)",
+                key="ablative_blowing_efficiency"
+            )
+        
+        st.markdown("**Radiative Heat Transfer:**")
+        ablative_cfg["surface_emissivity"] = st.number_input(
+            "Surface emissivity",
+            min_value=0.0,
+            max_value=1.0,
+            value=float(ablative_cfg.get("surface_emissivity", 0.85)),
+            step=0.05,
+            help="Emissivity for radiative heat transfer (0-1, typical 0.8-0.9 for charred ablators)",
+            key="ablative_surface_emissivity"
+        )
+        ablative_cfg["ambient_temperature"] = st.number_input(
+            "Ambient temperature [K]",
+            min_value=100.0,
+            max_value=1000.0,
+            value=float(ablative_cfg.get("ambient_temperature", 300.0)),
+            step=10.0,
+            help="Ambient/surrounding temperature for radiative heat transfer. For radiation to space, use ~300K.",
+            key="ablative_ambient_temp"
+        )
+        ablative_cfg["radiative_sink_minimum_threshold"] = st.number_input(
+            "Radiative sink minimum threshold [K]",
+            min_value=200.0,
+            max_value=600.0,
+            value=float(ablative_cfg.get("radiative_sink_minimum_threshold", 400.0)),
+            step=10.0,
+            help="If ambient_temperature is below this, uses fallback temperature (heated steel layer)",
+            key="ablative_rad_sink_min"
+        )
+        ablative_cfg["radiative_sink_fallback_temperature"] = st.number_input(
+            "Radiative sink fallback temperature [K]",
+            min_value=400.0,
+            max_value=1000.0,
+            value=float(ablative_cfg.get("radiative_sink_fallback_temperature", 600.0)),
+            step=10.0,
+            help="Fallback temperature when ambient is too low (represents heated steel layer behind ablator)",
+            key="ablative_rad_sink_fallback"
+        )
+        
+        st.markdown("**Turbulence Effects:**")
         ablative_cfg["turbulence_reference_intensity"] = st.number_input("Reference turbulence intensity", min_value=0.01, max_value=0.5, value=float(ablative_cfg.get("turbulence_reference_intensity", 0.08)), step=0.01, key="ablative_turbulence_reference")
         ablative_cfg["turbulence_sensitivity"] = st.number_input("Turbulence sensitivity", min_value=0.0, max_value=5.0, value=float(ablative_cfg.get("turbulence_sensitivity", 1.5)), step=0.1, key="ablative_turbulence_sensitivity")
         ablative_cfg["turbulence_exponent"] = st.number_input("Turbulence exponent", min_value=0.1, max_value=3.0, value=float(ablative_cfg.get("turbulence_exponent", 1.0)), step=0.1, key="ablative_turbulence_exponent")

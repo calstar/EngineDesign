@@ -8,6 +8,15 @@ This module provides both:
 import numpy as np
 from typing import Optional, Dict, Any
 from .config_schemas import CombustionEfficiencyConfig
+from .constants import (
+    DEFAULT_CHAMBER_PRESS_PA,
+    DEFAULT_CHAMBER_TEMP_K,
+    DEFAULT_CSTAR_IDEAL_M_S,
+    DEFAULT_GAMMA_ND,
+    DEFAULT_GAS_CONST_J_KG_K,
+    DEFAULT_MIXTURE_RATIO_ND,
+    DEFAULT_TURBULENCE_INTENSITY_ND,
+)
 
 
 def calculate_Lstar(
@@ -103,14 +112,14 @@ def eta_cstar(
             from .combustion_physics import calculate_combustion_efficiency_advanced
             
             # Extract parameters
-            Pc = advanced_params.get("Pc", 4.0e6)
-            Tc = advanced_params.get("Tc", 3500.0)
-            cstar_ideal = advanced_params.get("cstar_ideal", 1800.0)
-            gamma = advanced_params.get("gamma", 1.2)
-            R = advanced_params.get("R", 400.0)
-            MR = advanced_params.get("MR", 2.5)
+            Pc = advanced_params.get("Pc", DEFAULT_CHAMBER_PRESS_PA)
+            Tc = advanced_params.get("Tc", DEFAULT_CHAMBER_TEMP_K)
+            cstar_ideal = advanced_params.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S)
+            gamma = advanced_params.get("gamma", DEFAULT_GAMMA_ND)
+            R = advanced_params.get("R", DEFAULT_GAS_CONST_J_KG_K)
+            MR = advanced_params.get("MR", DEFAULT_MIXTURE_RATIO_ND)
             spray_diagnostics = advanced_params.get("spray_diagnostics", None)
-            turbulence_intensity = advanced_params.get("turbulence_intensity", 0.08)
+            turbulence_intensity = advanced_params.get("turbulence_intensity", DEFAULT_TURBULENCE_INTENSITY_ND)
             
             # Calculate advanced efficiency
             results = calculate_combustion_efficiency_advanced(

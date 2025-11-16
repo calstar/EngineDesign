@@ -167,12 +167,22 @@ ablative_cooling:
   surface_temperature_limit: 1200.0  # K
   coverage_fraction: 0.85  # 85% of chamber surface protected
   pyrolysis_temperature: 950.0  # K - Characteristic pyrolysis temp
-  blowing_efficiency: 0.75  # Effectiveness of pyrolysis gases blocking heat
+  # Blowing effect (pyrolysis gas protection)
+  use_physics_based_blowing: true  # If true, computes B = m_dot_pyrolysis/m_dot_external
+  blowing_coefficient: 0.5  # Coefficient c in f(B) = 1/(1 + c*B). Typical range: 0.3-0.8
+  blowing_min_reduction_factor: 0.1  # Minimum fraction of convective heat that remains (max reduction = 1 - this). Default 0.1 = max 90% reduction
+  blowing_efficiency: 0.75  # Legacy constant factor (used if use_physics_based_blowing=false)
+  # Radiative heat transfer
+  surface_emissivity: 0.85  # Emissivity for radiative heat transfer (0-1, typical 0.8-0.9 for charred ablators)
+  ambient_temperature: 300.0  # K - Ambient/surrounding temperature for radiative heat transfer
+  radiative_sink_minimum_threshold: 400.0  # K - If ambient_temperature is below this, uses fallback temperature
+  radiative_sink_fallback_temperature: 600.0  # K - Fallback temperature when ambient is too low (represents heated steel layer)
+  # Turbulence effects
   turbulence_reference_intensity: 0.08
   turbulence_sensitivity: 1.5
   turbulence_exponent: 1.0
   turbulence_max_multiplier: 3.0
-  # NEW: Geometry evolution parameters
+  # Geometry evolution parameters
   throat_recession_multiplier: null  # null = calculate from physics (Bartz correlation)
                                      # or specify 1.2-2.0 for fixed multiplier
   char_layer_conductivity: 0.2  # W/(m·K) - Protective char layer

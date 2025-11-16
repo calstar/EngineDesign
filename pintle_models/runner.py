@@ -19,6 +19,7 @@ from pintle_pipeline.ablative_geometry import (
     calculate_local_recession_rate,
 )
 from pintle_pipeline.graphite_cooling import compute_graphite_recession
+from pintle_pipeline.constants import DEFAULT_GAMMA_ND
 
 
 class PintleEngineRunner:
@@ -510,7 +511,7 @@ class PintleEngineRunner:
                         
                         # Estimate throat heat flux (higher than chamber due to sonic conditions)
                         # Use Bartz correlation multiplier
-                        gamma = point_results.get("gamma", 1.2)
+                        gamma = point_results.get("gamma", DEFAULT_GAMMA_ND)
                         throat_heat_flux_mult = calculate_throat_recession_multiplier(
                             Pc, 50.0, 1000.0, chamber_heat_flux, gamma  # Approximate velocities
                         )
