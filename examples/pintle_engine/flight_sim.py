@@ -316,10 +316,15 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     rocket_inertia = config.rocket.inertia
     rocket_radius = config.rocket.radius
     cm_wo_motor = config.rocket.cm_wo_motor
+<<<<<<< HEAD
     if config.rocket.motor is None:
         raise ValueError("Rocket configuration must include motor configuration")
     motor_dry_mass = config.rocket.motor.dry_mass
     motor_inertia = config.rocket.motor_inertia
+=======
+    motor_dry_mass = config.rocket.dry_mass
+    motor_inertia = config.rocket.inertia
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
 
     # Environment
     env = Environment(
@@ -346,9 +351,15 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     # Convert mdot_lox and mdot_fuel to Functions if they're constants
     # (MassFlowRateBasedTank expects Functions)
+    # Note: Truncation is now handled in ui_app.py, so we use full burn_time here
     if not isinstance(mdot_lox, Function):
         times_mdot = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+<<<<<<< HEAD
         mdot_lox_vals = np.array([float(mdot_lox) if t <= effective_burn_time else 0.0 for t in times_mdot])
+=======
+        mdot_lox_vals = np.array([float(mdot_lox) for t in times_mdot])
+
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
         # Ensure sorted (times should already be sorted, but just to be safe)
         order = np.argsort(times_mdot)
         times_sorted = times_mdot[order]
@@ -359,7 +370,12 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     
     if not isinstance(mdot_fuel, Function):
         times_mdot = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+<<<<<<< HEAD
         mdot_fuel_vals = np.array([float(mdot_fuel) if t <= effective_burn_time else 0.0 for t in times_mdot])
+=======
+        mdot_fuel_vals = np.array([float(mdot_fuel) for t in times_mdot])
+
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
         # Ensure sorted (times should already be sorted, but just to be safe)
         order = np.argsort(times_mdot)
         times_sorted = times_mdot[order]
@@ -367,11 +383,15 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
         source = np.column_stack((times_sorted, vals_sorted))
         mdot_fuel = Function(source)
-
+    """
     oxidizer_tank = MassFlowRateBasedTank(
         name="LOX Tank",
         geometry=lox_geom,
+<<<<<<< HEAD
         flux_time=burn_time,
+=======
+        flux_time=burn_time,  # Truncation is now handled in ui_app.py
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
         liquid=lox,
         gas=pressurant,
         initial_liquid_mass=m_lox0,
@@ -397,20 +417,30 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         gas_mass_flow_rate_out=0.0,
         discretize=100,
     )
+    """
 
+    lox_tank = CylindricalTank(radius=config.lox_tank.lox_radius, height=config.lox_tank.lox_h, spherical_caps=False)
+    fuel_tank = CylindricalTank(radius=config.fuel_tank.rp1_radius, height=config.fuel_tank.rp1_h, spherical_caps=False)
+    pressurant_tank = CylindricalTank(radius=config.press_tank.press_radius, height = config.press_tank.press_h, spherical_caps=True)
+
+<<<<<<< HEAD
 
     times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
     # thrust_curve is already set above (may have been truncated)
+=======
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
 
     # Liquid motor - use effective_burn_time for burn_time
     liquid_motor = LiquidMotor(
         thrust_source=thrust_curve,
-        center_of_dry_mass_position=0.0,
-        dry_inertia=motor_inertia,
-        dry_mass=motor_dry_mass,
-        burn_time=(0.0, effective_burn_time),
-        nozzle_radius=math.sqrt(A_e / math.pi),
-        nozzle_position=-0.6,
+        center_of_dry_mass_position=getattr(config.rocket.motor, 'center_of_dry_mass_position', 0.0),
+        dry_inertia=config.rocket.motor.inertia,
+        dry_mass=config.rocket.motor.dry_mass,
+        burn_time=config.rocket.motor.burn_time,
+        nozzle_radius=config.rocket.motor.nozzle_radius,
+        nozzle_position=config.rocket.motor.nozzle_position,
+        reshape_thrust_curve=False,
+        interpolation_method="linear",
         coordinate_system_orientation="nozzle_to_combustion_chamber",
     )
 
@@ -424,18 +454,25 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     # Fuel tank below LOX (negative relative to motor center)
     liquid_motor.add_tank(fuel_tank, position=config.fuel_tank.fuel_tank_pos)
     # LOX tank above fuel (positive relative to motor center)
-    liquid_motor.add_tank(oxidizer_tank, position=config.lox_tank.ox_tank_pos)
+    liquid_motor.add_tank(lox_tank, position=config.lox_tank.ox_tank_pos)
 
     rocket = Rocket(
-        radius=rocket_radius,
-        mass=rocket_mass,
-        inertia=rocket_inertia,
-        center_of_mass_without_motor=cm_wo_motor,
+        radius=config.rocket.radius,
+        mass=config.rocket.mass,
+        inertia=config.rocket.inertia,
+        center_of_mass_without_motor=config.rocket.cm_wo_motor,
         coordinate_system_orientation="tail_to_nose",
-        power_off_drag=0.45,
-        power_on_drag=0.45,
+        power_off_drag=config.rocket.power_off_drag,
+        power_on_drag=config.rocket.power_on_drag,
     )
+<<<<<<< HEAD
     
+=======
+
+    rocket.add_motor(liquid_motor, position=config.motor.motor_position)
+
+    NoseCone = rocket.add_nose(length=config.rocket.nose_cone.length, kind="vonKarman", position=config.rocket.nose_cone.position)  
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
     # Fins at bottom (tail) - position 0.0
     rocket.add_trapezoidal_fins(
         n=config.rocket.fins.no_fins,
@@ -444,6 +481,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         span=config.rocket.fins.fin_span,
         position=0.3  # Bottom of rocket
     )
+<<<<<<< HEAD
     
     # Motor above fins
     rocket.add_motor(liquid_motor, position=motor_position)
@@ -463,6 +501,41 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     max_height = max(lox_top, fuel_top, press_top, motor_position)
     nose_position = max_height + 4  # Small gap, then nose
     rocket.add_nose(length=0.6, kind="vonKarman", position=nose_position)
+=======
+
+    railButtons = rocket.set_rail_buttons(
+        upper_button_position=config.rocket.rail_buttons.upper_button_position,
+        lower_button_position=config.rocket.rail_buttons.lower_button_position,
+        angular_position=config.rocket.rail_buttons.angular_position,
+    )
+
+    big_main = rocket.add_parachute(
+        name="big main", #168''d
+        cd_s=config.rocket.parachutes.big_main.cd_s,
+        trigger=config.rocket.parachutes.big_main.trigger,  # ejection altitude: 1200ft
+        sampling_rate=105,
+        lag=config.rocket.parachutes.big_main.lag,
+        noise=(config.rocket.parachutes.big_main.noise[0], config.rocket.parachutes.big_main.noise[1], config.rocket.parachutes.big_main.noise[2]),
+    )
+
+    small_main = rocket.add_parachute(
+        name="small main", #96''d
+        cd_s=config.rocket.parachutes.small_main.cd_s,
+        trigger=config.rocket.parachutes.small_main.trigger,  # ejection altitude: 3000ft
+        sampling_rate=105,
+        lag=config.rocket.parachutes.small_main.lag,
+        noise=(config.rocket.parachutes.small_main.noise[0], config.rocket.parachutes.small_main.noise[1], config.rocket.parachutes.small_main.noise[2]),
+    )
+
+    drogue = rocket.add_parachute(
+        name="drogue", #60''d
+        cd_s=config.rocket.parachutes.drogue.cd_s,
+        trigger=config.rocket.parachutes.drogue.trigger,  # ejection at apogee
+        sampling_rate=105,
+        lag=config.rocket.parachutes.drogue.lag,
+        noise=(config.rocket.parachutes.drogue.noise[0], config.rocket.parachutes.drogue.noise[1], config.rocket.parachutes.drogue.noise[2]),
+    ) 
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)
 
     # Flight simulation
     flight = Flight(
@@ -491,5 +564,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         "thrust_curve": thrust_curve,
         "flight": flight,
         "params": config,
+<<<<<<< HEAD
         "truncation_info": truncation_info,
     }
+=======
+    }
+>>>>>>> 4b24efb (config integration with flight_sim  is still fucked but the values are accurate)

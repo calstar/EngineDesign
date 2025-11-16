@@ -1,0 +1,215 @@
+# Minimal Pintle Engine Configuration
+# Tank Pressure -> Thrust Pipeline
+#
+# WORKFLOW:
+#   INPUT:  P_tank_O, P_tank_F (tank pressures)
+#   SOLVE:  Pc (chamber pressure) from supply = demand
+#   OUTPUT: Thrust, mdot, MR, and all performance parameters
+#
+# Pc is NEVER an input - it's always solved from tank pressures!
+
+# Fluid Properties
+fluids:
+  oxidizer:
+    name: "LOX"
+    density: 1140.0  # kg/m³
+    viscosity: 1.8e-4  # Pa·s
+    surface_tension: 0.013  # N/m
+    vapor_pressure: 101325.0  # Pa
+  
+  fuel:
+    name: "RP-1"
+    density: 780.0  # kg/m³
+    viscosity: 2.0e-3  # Pa·s
+    surface_tension: 0.025  # N/m
+    vapor_pressure: 1000.0  # Pa
+
+# Pintle Geometry (Fixed - no variable stroke)
+pintle_geometry:
+  # LOX (Axial Flow - Through Orifices)
+  # LOX enters through single entry hole, flows through pintle tip,
+  # and exits through N orifices at angle theta_orifice
+  # From user: 16 orifices, each with area 0.00385154962 in² = 2.485 mm²
+  # Equivalent diameter: 1.779 mm
+  lox:
+    n_orifices: 16  # Number of orifices on pintle tip
+    d_orifice: 0.001779  # m - Diameter of each orifice (1.779 mm, calculated from area)
+    theta_orifice: 30.0  # degrees - Angle of orifices from axis
+    A_entry: 0.00001  # m² - Single entry hole area
+    d_hydraulic: 0.001779  # m - Hydraulic diameter for Re calculation (same as orifice diameter)
+  
+  # Fuel (Radial Flow - Reservoir with Gap Spillage)
+  # Fuel enters reservoir through entry port, fills reservoir,
+  # then spills out through gap between pintle tip and reservoir wall
+  # From user: D_p = 0.750 in (19.05 mm), gap thickness = 0.313 mm, C_D,a = 0.65
+  # Area calculated using exact annulus formula: A = π × (R_outer² - R_inner²)
+  # where R_inner = d_pintle_tip/2, R_outer = R_inner + h_gap
+  fuel:
+    d_pintle_tip: 0.019050  # m - Outer diameter of pintle tip (0.750 in = 19.05 mm)
+    d_reservoir_inner: 0.019676  # m - Inner diameter of fuel reservoir (D_p + 2×h_gap = 19.05 + 2×0.313 = 19.676 mm)
+    h_gap: 0.000313  # m - Gap height (0.313 mm from user)
+    A_entry: 0.000015  # m² - Entry port area into reservoir
+    d_hydraulic: 0.000626  # m - Gap hydraulic diameter (2×h_gap = 2×0.313 = 0.626 mm for annulus)
+
+# Feed System (Tank → Injector)
+# Calculates pressure losses: Δp_feed = K_eff(P) × (ρ/2) × (ṁ/(ρ×A_hyd))²
+# where K_eff(P) = K0 + K1 × φ(P)
+feed_system:
+  oxidizer:
+    d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (9.525 mm)
+    A_hydraulic: 0.0000713  # m² - Calculated from d_inlet (π × (d/2)²)
+    K0: 2.0  # Base loss coefficient (fittings, valves, bends)
+    K1: 0.0  # Pressure dependence coefficient (0 = constant K_eff)
+    phi_type: "none"  # Pressure function: "none", "sqrtP", or "logP"
+  
+  fuel:
+    d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (9.525 mm)
+    A_hydraulic: 0.0000713  # m² - Calculated from d_inlet (π × (d/2)²)
+    K0: 2.0  # Base loss coefficient
+    K1: 0.0  # Pressure dependence (0 = constant)
+    phi_type: "none"
+
+# Regenerative Cooling (Fuel Only)
+# Fuel path: Tank → 3/8" inlet → N parallel channels → merge → injector → annulus
+# Pressure drop through cooling channels is added to feed system loss
+# Small channels create significant pressure drop, especially at high flow rates
+regen_cooling:
+  enabled: true  # Enable regen cooling model
+  d_inlet: 0.009525  # m - 3/8" diameter inlet pipe (same as feed_system.fuel.d_inlet)
+  L_inlet: 0.5  # m - Length of inlet pipe (estimate)
+  n_channels: 100  # Number of parallel cooling channels (optimized for ~90 psi pressure drop)
+  channel_width: 0.0009  # m - Channel width (0.9 mm - optimized for target pressure drop)
+  channel_height: 0.001  # m - Channel height (1.0 mm - optimized for target pressure drop)
+  channel_length: 0.18162  # m - Channel length = chamber length (from engine specs: 181.62 mm)
+  d_outlet: null  # m - Outlet pipe diameter (null = same as inlet)
+  L_outlet: 0.1  # m - Length from merge to injector (estimate)
+  roughness: 0.0  # m - Surface roughness (0 = smooth)
+  K_manifold_split: 0.5  # Manifold split loss coefficient
+  K_manifold_merge: 0.3  # Manifold merge loss coefficient
+  # Dynamic discharge coefficients (vary with Reynolds number, like injector Cd)
+  Cd_entrance_inf: 0.8  # Asymptotic Cd at high Re for channel entrance
+  a_Re_entrance: 0.1  # Reynolds correction parameter for entrance
+  Cd_entrance_min: 0.6  # Minimum Cd for entrance
+  Cd_exit_inf: 0.9  # Asymptotic Cd at high Re for channel exit
+  a_Re_exit: 0.1  # Reynolds correction parameter for exit
+  Cd_exit_min: 0.7  # Minimum Cd for exit
+
+# Injector Discharge
+# Enhanced Cd model: Cd(Re, P_inlet, T_inlet) = [Cd_inf - a_Re/√Re] × [1 + a_P×(P/P_ref-1)] × [1 + a_T×(T/T_ref-1)]
+# Cd varies with:
+#   - Reynolds number: viscous effects (always active)
+#   - Pressure: compressibility effects (optional, for LOX at high pressure)
+#   - Temperature: viscosity changes (optional, for temperature-dependent fluids)
+discharge:
+  oxidizer:
+    Cd_inf: 0.40  # Asymptotic Cd at high Re
+    a_Re: 0.15  # Re-dependent coefficient (dynamic Cd model)
+    Cd_min: 0.2  # Minimum Cd (clamping)
+    use_pressure_correction: false  # Enable if LOX compressibility effects are significant
+    P_ref: 5.0e6  # Pa - Reference pressure for pressure correction
+    a_P: 0.0  # Pressure correction coefficient (negative = compressibility reduces Cd)
+    use_temperature_correction: false  # Enable if temperature affects viscosity significantly
+    T_ref: 90.0  # K - Reference temperature (LOX cryogenic)
+    a_T: 0.0  # Temperature correction coefficient
+  
+  fuel:
+    Cd_inf: 0.65  # Asymptotic Cd at high Re
+    a_Re: 0.20  # Re-dependent coefficient (dynamic Cd model)
+    Cd_min: 0.2  # Minimum Cd (clamping)
+    use_pressure_correction: false  # RP-1 is less compressible, usually not needed
+    P_ref: 5.0e6  # Pa - Reference pressure
+    a_P: 0.0  # Pressure correction coefficient
+    use_temperature_correction: false  # Enable if regen heating affects viscosity
+    T_ref: 300.0  # K - Reference temperature (RP-1 ambient)
+    a_T: 0.0  # Temperature correction coefficient
+
+# Spray/Mixing Models
+spray:
+  momentum_flux_ratio: true  # Enable momentum flux ratio calculation
+  
+  spray_angle:
+    model: "TMR"  # "J" or "TMR"
+    k: 0.5
+    n: 0.5
+  
+  weber:
+    We_min: 15.0
+  
+  smd:
+    model: "lefebvre"
+    C: 0.5
+    m: 0.6
+    p: 0.0
+  
+  evaporation:
+    K: 3e5  # s/m²
+    x_star_limit: 0.05  # m
+    use_constraint: true
+
+# Combustion
+combustion:
+  # CEA (Chemical Equilibrium Analysis) - Lookup table for thermochemistry
+  # IMPORTANT: This builds a LOOKUP TABLE of c*, Cf, Tc, gamma, R vs (MR, Pc)
+  # The Pc_range here is ONLY for building the lookup table grid - it's NOT an input!
+  # The actual Pc is SOLVED from your tank pressures in the main pipeline.
+  # Think of this like a 2D lookup table: we pre-compute values at different (MR, Pc) points,
+  # then during the solve, we interpolate to get properties at the actual (MR, Pc) we're solving for.
+  cea:
+    ox_name: "LOX"
+    fuel_name: "RP-1"
+    expansion_ratio: 4  # From engine specs: Ae/At = 6.54
+    cache_file: "cea_cache_LOX_RP1.npz"  # Cache file (relative to project root, first run builds it, slow)
+    Pc_range: [2.0e6, 9.0e6]  # Pa - Lookup table range (NOT pipeline input! Just for table grid)
+    MR_range: [1.6, 3.5]  # Mixture ratio range for lookup table (extended to capture peaks and falling edges)
+    n_points: 200  # Grid points (200×200 = 40,000 CEA calls on first run, then cached)
+  
+  # Combustion Efficiency (L* correction)
+  # CEA assumes infinite-area equilibrium, real chambers have finite volume
+  # η_c* = 1 - C × e^(-K×L*) where L* = V_chamber / A_throat
+  efficiency:
+    model: "exponential"  # "exponential", "constant", or "linear"
+    C: 0.3  # Efficiency loss parameter (0.2-0.4 typical)
+    K: 0.15  # Recovery rate parameter (0.1-0.3 typical)
+    use_spray_correction: false  # Adjust efficiency based on spray quality
+    spray_penalty_factor: 0.8  # Penalty if spray constraints violated
+
+# Chamber Geometry
+# From engine specs:
+#   Dc = 84.91 mm (chamber diameter)
+#   Dt = 33.05 mm (throat diameter) → At = π×(Dt/2)² = 0.000857892 m²
+#   L* = 1000.00 mm = 1.0 m (characteristic length)
+#   Lc = 181.62 mm (total chamber length)
+#   Lcyl = 107.45 mm (cylindrical length)
+chamber:
+  volume: 0.000857892  # m³ - Calculated from L*×At = 1.0 × 0.000857892
+  A_throat: 0.0.0014039765  # m² - From Dt = 33.05 mm
+  Lstar: 1.0  # m - From engine specs (1000.00 mm)
+
+# Nozzle
+# From engine specs:
+#   Dt = 33.05 mm → At = 0.000857892 m²
+#   De = 84.56 mm → Ae = 0.005615906 m²
+#   Ae/At = 6.54 (expansion ratio)
+# Thrust = F_momentum + F_pressure
+#   F_momentum = ṁ × v_exit
+#   F_pressure = (P_exit - Pa) × A_exit
+nozzle:
+  A_throat: 0.0.0014039765 # m² - From Dt = 33.05 mm
+  A_exit: 0.005615906  # m² - From De = 84.56 mm
+  expansion_ratio: 4  # From engine specs: Ae/At = 6.54
+  efficiency: 0.98  # Nozzle efficiency (accounts for losses)
+
+# Solver Settings
+# Solves: ṁ_supply(Pc) = ṁ_demand(Pc) to find Pc
+solver:
+  method: "brentq"  # Root finding method: "brentq" (safe), "secant", or "newton"
+  Pc_bounds: [100000.0, 8000000.0]  # Pa - Bounds for Pc solver (will be clamped to min(P_tank))
+  tolerance: 1e-6  # Root finding tolerance
+  max_iterations: 100  # Max iterations for root finder
+  
+  # Closure iterations (spray constraint enforcement)
+  closure:
+    max_iterations: 6  # Max iterations to satisfy spray constraints
+    Cd_reduction_factor: 0.95  # Reduce Cd by this factor if constraints violated
+    tolerance: 1e-4  # Convergence tolerance for closure
+

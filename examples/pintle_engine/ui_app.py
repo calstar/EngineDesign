@@ -223,6 +223,71 @@ def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: st
     return Function(source, interpolation=interpolation)
 
 
+def detect_tank_underfill_time(mdot_func, m_initial: float, burn_time: float, n_samples: int = 1000) -> Optional[float]:
+    """
+    Detect when a tank would be underfilled by integrating mass flow rate over time.
+    
+    Parameters:
+    -----------
+    mdot_func : Function or callable
+        Mass flow rate function (can be RocketPy Function or callable)
+    m_initial : float
+        Initial tank mass [kg]
+    burn_time : float
+        Total burn time [s]
+    n_samples : int
+        Number of time samples for integration
+    
+    Returns:
+    --------
+    cutoff_time : float or None
+        Time when tank would be depleted [s], or None if no underfill occurs
+    """
+    # Create time array for integration
+    t_samples = np.linspace(0, burn_time, n_samples)
+    
+    # Evaluate mass flow rate at sample points
+    if hasattr(mdot_func, 'get_value'):
+        # RocketPy Function
+        mdot_samples = np.array([mdot_func.get_value(t) for t in t_samples])
+    elif callable(mdot_func):
+        # Callable function
+        mdot_samples = np.array([mdot_func(t) for t in t_samples])
+    else:
+        raise TypeError(f"mdot_func must be a RocketPy Function or callable, got {type(mdot_func)}")
+    
+    # Integrate mass flow rate to get cumulative mass consumed
+    # Use trapezoidal integration
+    dt = burn_time / (n_samples - 1)
+    mass_consumed = np.cumsum((mdot_samples[:-1] + mdot_samples[1:]) / 2 * dt)
+    mass_consumed = np.concatenate([[0], mass_consumed])  # Add initial point
+    
+    # Find where cumulative mass exceeds initial mass
+    depletion_mask = mass_consumed >= m_initial
+    
+    if np.any(depletion_mask):
+        # Find first time where depletion occurs
+        first_depletion_idx = np.where(depletion_mask)[0][0]
+        if first_depletion_idx > 0:
+            # Interpolate between previous and current point for more accurate cutoff
+            t_prev = t_samples[first_depletion_idx - 1]
+            t_curr = t_samples[first_depletion_idx]
+            m_prev = mass_consumed[first_depletion_idx - 1]
+            m_curr = mass_consumed[first_depletion_idx]
+            
+            if m_curr > m_prev:
+                # Linear interpolation to find exact time when m_initial is reached
+                cutoff_time = t_prev + (t_curr - t_prev) * (m_initial - m_prev) / (m_curr - m_prev)
+            else:
+                cutoff_time = t_curr
+        else:
+            cutoff_time = t_samples[0]
+        
+        return float(cutoff_time)
+    
+    return None
+
+
 def _series_to_np(series_obj) -> np.ndarray:
     """RocketPy series to numpy, handling versions with/without get_source."""
     try:
@@ -2668,12 +2733,17 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
 
     with st.expander("Rocket", expanded=False):
         rocket = working.get("rocket") or {}
+        # Preserve motor config if it exists (it's nested under rocket.motor)
+        motor_config = rocket.get("motor", {}) if rocket else {}
         rocket.setdefault("mass", 90.72)
         rocket.setdefault("inertia", [8.0, 8.0, 0.5])
         rocket.setdefault("radius", 0.1)
         rocket.setdefault("cm_wo_motor", 1.0)
         rocket.setdefault("dry_mass", 12.0)
         rocket.setdefault("motor_inertia", [0.1, 0.1, 0.1])
+        # Restore motor config if it existed
+        if motor_config:
+            rocket["motor"] = motor_config
         colR1, colR2, colR3 = st.columns(3)
         with colR1:
             r_mass = st.number_input("Rocket mass [kg]", value=float(rocket.get("mass", 90.72)), key="flight_rocket_mass")
@@ -2708,6 +2778,9 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         with colF3:
             fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fins["fin_position"]), key="flight_fins_pos"))
         rocket["fins"] = fins
+        # Ensure motor config is preserved if it existed
+        if motor_config and "motor" not in rocket:
+            rocket["motor"] = motor_config
         working["rocket"] = rocket
 
     with st.expander("Tanks", expanded=False):
@@ -4573,23 +4646,23 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 st.error("Dataset time axis must increase (duration must be > 0 s). Check the selected time column.")
                 return
             
-            # Check for tank underfill and truncate dataset if needed
-            m_lox0 = float(m_lox)
-            m_fuel0 = float(m_fuel)
-            
             # Normalize time to start at 0
             t_min = float(np.min(t_vals))
             t_vals_normalized = t_vals - t_min
+            
+            # Check for tank underfill (for user feedback only - actual truncation handled in flight_sim.py)
+            m_lox0 = float(m_lox)
+            m_fuel0 = float(m_fuel)
             
             # Build temporary Functions for underfill detection
             mdot_lox_temp = build_rp_function(t_vals_normalized, mdot_O_vals)
             mdot_fuel_temp = build_rp_function(t_vals_normalized, mdot_F_vals)
             
-            # Detect underfill by integrating mdot arrays
+            # Detect underfill by integrating mdot arrays (for user feedback)
             lox_cutoff = detect_tank_underfill_time(mdot_lox_temp, m_lox0, burn_time_ds)
             fuel_cutoff = detect_tank_underfill_time(mdot_fuel_temp, m_fuel0, burn_time_ds)
             
-            # Find earliest cutoff
+            # Find earliest cutoff and warn user
             cutoff_time = None
             if lox_cutoff is not None and fuel_cutoff is not None:
                 cutoff_time = min(lox_cutoff, fuel_cutoff)
@@ -4598,19 +4671,10 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             elif fuel_cutoff is not None:
                 cutoff_time = fuel_cutoff
             
-            # Truncate arrays if needed
             if cutoff_time is not None and cutoff_time < burn_time_ds:
-                # Find index where time exceeds cutoff
-                trunc_idx = np.searchsorted(t_vals_normalized, cutoff_time, side='right')
-                if trunc_idx < len(t_vals_normalized):
-                    t_vals_normalized = t_vals_normalized[:trunc_idx+1]
-                    thrust_vals_SI = thrust_vals_SI[:trunc_idx+1]
-                    mdot_O_vals = mdot_O_vals[:trunc_idx+1]
-                    mdot_F_vals = mdot_F_vals[:trunc_idx+1]
-                    burn_time_ds = float(t_vals_normalized[-1])
-                    st.info(f"Truncated burn at {cutoff_time:.2f} s due to propellant depletion")
+                st.info(f"⚠️ Propellant depletion detected at {cutoff_time:.2f} s. Curves will be truncated to zero at this time.")
             
-            # Build RocketPy Functions
+            # Build RocketPy Functions (truncation will be handled in flight_sim.py)
             thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
             mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
             mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
@@ -4642,10 +4706,10 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     with col2:
                         st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
                     
-                    # Add truncated data to dataset
-                    truncated_df = pd.DataFrame({
+                    # Create dataset DataFrame (note: curves may be truncated in flight_sim.py if tanks empty)
+                    dataset_df = pd.DataFrame({
                         "Time (s)": t_vals_normalized,
-                        "Thrust_truncated (N)": thrust_vals_SI,
+                        "Thrust (N)": thrust_vals_SI,
                         "mdot_O (kg/s)": mdot_O_vals,
                         "mdot_F (kg/s)": mdot_F_vals,
                     })
@@ -4653,19 +4717,19 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     # Extract flight data
                     flight_time, flight_z, flight_vz = extract_flight_series(flight_obj)
                     if flight_time.size > 0:
-                        truncated_df["Altitude above sea level (m)"] = np.interp(
+                        dataset_df["Altitude above sea level (m)"] = np.interp(
                             t_vals_normalized, 
                             flight_time, 
                             flight_z
                         )
-                        truncated_df["Vertical Velocity (m/s)"] = np.interp(
+                        dataset_df["Vertical Velocity (m/s)"] = np.interp(
                             t_vals_normalized,
                             flight_time,
                             flight_vz
                         )
                     
-                    st.subheader("Truncated Dataset")
-                    st.dataframe(truncated_df)
+                    st.subheader("Flight Dataset")
+                    st.dataframe(dataset_df)
                     
                     # Plot flight results
                     if flight_time.size > 0:

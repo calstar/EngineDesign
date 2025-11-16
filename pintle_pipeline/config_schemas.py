@@ -420,12 +420,52 @@ class FinsConfig(BaseModel):
     tip_chord: float = Field(gt=0, description="Tip chord [m]")
     fin_span: float = Field(gt=0, description="Fin span [m]")
     fin_position: float = Field(description="Fin position [m]")
+    sweep_angle: Optional[float] = Field(default=None, description="Fin sweep angle [deg] (90 - angle from vertical)")
 
 
 class MotorConfig(BaseModel):
     """Motor configuration for flight simulation"""
+    model_config = ConfigDict(extra="forbid", validate_default=True)
+    
     dry_mass: float = Field(gt=0, description="Motor dry mass [kg]")
     inertia: list[float] = Field(description="Motor inertia [kg·m²]")
+    position: Optional[float] = Field(default=0.0, description="Motor position [m] (origin = nozzle outlet)")
+    motor_position: Optional[float] = Field(default=0.0, description="Motor position [m] (alias)")
+    center_of_dry_mass_position: Optional[float] = Field(default=0.0, description="Center of dry mass position [m]")
+    burn_time: Optional[Union[float, tuple]] = Field(default=None, description="Burn time [s] or (start, end) tuple")
+    nozzle_radius: Optional[float] = Field(default=None, description="Nozzle radius [m]")
+    nozzle_position: Optional[float] = Field(default=-0.6, description="Nozzle position [m]")
+
+
+class NoseConeConfig(BaseModel):
+    """Nose cone configuration for flight simulation"""
+    length: float = Field(gt=0, description="Nose cone length [m]")
+    kind: str = Field(default="vonKarman", description="Nose cone type (e.g., 'vonKarman', 'conical', 'ogive')")
+    position: Optional[float] = Field(default=None, description="Nose cone position [m] (auto-calculated if None)")
+
+
+class RailButtonsConfig(BaseModel):
+    """Rail buttons configuration for flight simulation"""
+    upper_button_position: float = Field(gt=0, description="Upper rail button position [m]")
+    lower_button_position: float = Field(ge=0, description="Lower rail button position [m]")
+    angular_position: float = Field(ge=0, le=360, description="Angular position [deg]")
+
+
+class ParachuteConfig(BaseModel):
+    """Parachute configuration for flight simulation"""
+    name: Optional[str] = Field(default=None, description="Parachute name (optional, key name used if not provided)")
+    cd_s: float = Field(gt=0, description="Parachute drag coefficient times area [m²]")
+    trigger: Union[float, str] = Field(description="Trigger altitude [m] or 'apogee'")
+    sampling_rate: float = Field(default=105, description="Sampling rate [Hz]")
+    lag: float = Field(default=1.5, description="Lag time [s]")
+    noise: tuple = Field(default=(0, 8.3, 0.5), description="Noise parameters [mean, std, cutoff] as tuple of 3 floats")
+
+
+class ParachutesConfig(BaseModel):
+    """Parachutes configuration container for flight simulation"""
+    big_main: Optional[ParachuteConfig] = Field(default=None, description="Big main parachute configuration")
+    small_main: Optional[ParachuteConfig] = Field(default=None, description="Small main parachute configuration")
+    drogue: Optional[ParachuteConfig] = Field(default=None, description="Drogue parachute configuration")
 
 
 class RocketConfig(BaseModel):
@@ -436,8 +476,15 @@ class RocketConfig(BaseModel):
     cm_wo_motor: float = Field(description="Center of mass without motor [m]")
     dry_mass: float = Field(gt=0, description="Dry mass [kg]")
     motor_inertia: list[float] = Field(description="Motor inertia [kg·m²]")
+    power_off_drag: Optional[float] = Field(default=0.45, description="Drag coefficient (power off)")
+    power_on_drag: Optional[float] = Field(default=0.45, description="Drag coefficient (power on)")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
     motor: Optional[MotorConfig] = Field(default=None, description="Motor configuration")
+    nose: Optional[NoseConeConfig] = Field(default=None, description="Nose cone configuration")
+    nose_cone: Optional[NoseConeConfig] = Field(default=None, description="Nose cone configuration (alias)")
+    rail_buttons: Optional[RailButtonsConfig] = Field(default=None, description="Rail buttons configuration")
+    parachutes: Optional[ParachutesConfig] = Field(default=None, description="Parachute configurations")
+    rail_length: Optional[float] = Field(default=3.35, description="Rail length [m]")
 
 
 class EnvironmentConfig(BaseModel):
@@ -473,6 +520,7 @@ class PintleEngineConfig(BaseModel):
     lox_tank: Optional[LOXTankConfig] = Field(default=None, description="LOX tank configuration for flight simulation")
     fuel_tank: Optional[FuelTankConfig] = Field(default=None, description="Fuel tank configuration for flight simulation")
     press_tank: Optional[PressTankConfig] = Field(default=None, description="Pressurant tank configuration for flight simulation")
+    motor: Optional[MotorConfig] = Field(default=None, description="[DEPRECATED] Motor configuration for flight simulation - use rocket.motor instead")
     rocket: Optional[RocketConfig] = Field(default=None, description="Rocket configuration for flight simulation")
     environment: Optional[EnvironmentConfig] = Field(default=None, description="Environment configuration for flight simulation")
     thrust: Optional[ThrustConfig] = Field(default=None, description="Thrust configuration for flight simulation")

@@ -335,24 +335,57 @@ press_tank:
   press_radius: 0.0762   # [m] Pressurant tank radius
   pres_tank_pos: 1.2  # [m] Pressurant tank position relative to motor center (above LOX)
 
-
 # Rocket
 rocket:
-  mass: 90.72  # [kg] Total rocket mass (200 lbs = 90.72 kg)
-  inertia: [8.0, 8.0, 0.5]
-  radius: 0.1015
-  cm_wo_motor: 1.3
-  dry_mass: 12.0
-  motor_inertia: [0.1, 0.1, 0.1]
+  mass: 40  # [kg] Total rocket mass (dry with no motor)
+  inertia: [212.26,212.26,0.2790,0.000437,0.09528,0.00973]  # [kg·m²] Full inertia tensor
+  radius: 0.0785  # [m] Rocket radius
+  cm_wo_motor: 4.191  # [m] Center of mass without motor (from bottom of rocket)
+  dry_mass: 40  # [kg] Dry mass (required field)
+  motor_inertia: [0.1, 0.1, 0.1]  # [kg·m²] Motor inertia (required field)
+  power_off_drag: 0.45  # Drag coefficient (power off)
+  power_on_drag: 0.45  # Drag coefficient (power on)
+  motor:
+    dry_mass: 42.18
+    inertia: [53.37,53.36,0.1497,-0.00602,0.0618,0.2915]
+    nozzle_radius: 0.05145 # [m] Nozzle radius
+    nozzle_position: 0.0 # [m] Nozzle position relative to motor center (above fuel)
+    burn_time: 10.0 # [s] Burn time
+    center_of_dry_mass_position: 2.08 # [m] Center of dry mass position relative to motor center
+    motor_position: 0.0 # [m] Motor position relative to rocket center
+  nose_cone:
+    length: 0.762 # [m] Nose cone length
+    position: 7.28 # [m] Nose cone position relative to rocket center
+  rail_buttons:
+    upper_button_position: 2.0  # [m] Upper rail button position
+    lower_button_position: 0.1  # [m] Lower rail button position
+    angular_position: 60.0  # [deg] Angular position
   fins:
-    no_fins: 3
-    root_chord: 0.2
-    tip_chord: 0.1
-    fin_span: 0.3
-    fin_position: 0.0  # [m] Fins at bottom (tail) of rocket - will be set to 0.0 in code
-  motor: 
-    dry_mass: 12.0
-    inertia: [0.1, 0.1, 0.1]
+    no_fins: 4  # [int] Number of fins
+    root_chord: 0.494 # [m] Root chord
+    tip_chord: 0.24 # [m] Tip chord
+    fin_span: 0.2286 # [m] Fin span
+    fin_position: 0.7  # [m] Fin position (required field)
+    sweep_angle: 57.265 # [deg] Sweep angle of fins
+  parachutes:
+    big_main:
+      cd_s: 14.292  # [m²] Drag coefficient times area (fixed typo from 14.292.2)
+      trigger: 366.0  # [m] Ejection altitude (366 m = 1200 ft)
+      sampling_rate: 105  # [Hz] Sampling rate
+      lag: 1.5  # [s] Lag time
+      noise: [0, 8.3, 0.5]  # Noise parameters [mean, std, cutoff]
+    small_main:
+      cd_s: 4.672  # [m²] Drag coefficient times area (fixed typo from 4.672.2)
+      trigger: 914.4  # [m] Ejection altitude (914.4 m = 3000 ft)
+      sampling_rate: 105  # [Hz] Sampling rate
+      lag: 1.5  # [s] Lag time
+      noise: [0, 8.3, 0.5]  # Noise parameters [mean, std, cutoff]
+    drogue:
+      cd_s: 4.004  # [m²] Drag coefficient times area (1.82 * 2.2 = 4.004)
+      trigger: "apogee"  # Ejection at apogee
+      sampling_rate: 105  # [Hz] Sampling rate
+      lag: 1.5  # [s] Lag time
+      noise: [0, 8.3, 0.5]  # Noise parameters [mean, std, cutoff]
 
 # Environment
 environment:
