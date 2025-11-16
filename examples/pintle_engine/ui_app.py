@@ -46,6 +46,9 @@ chamber_path = project_root / "chamber"
 if str(chamber_path) not in sys.path:
     sys.path.insert(0, str(chamber_path))
 from chamber_geometry import chamber_geometry_calc
+# Import graphite geometry sizing
+from pintle_pipeline.graphite_geometry import size_graphite_insert
+from pintle_pipeline.graphite_cooling import compute_graphite_recession, calculate_throat_recession_multiplier
 
 
 # RocketPy imports (optional, only needed for flight sim)
@@ -4310,6 +4313,375 @@ def _display_chamber_results(results: dict) -> None:
         )
 
 
+def graphite_insert_view(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner] = None) -> PintleEngineConfig:
+    """Graphite Insert tab - sizes graphite throat insert geometry and updates config."""
+    st.header("Graphite Insert Sizing")
+    st.markdown("Size graphite throat insert based on heat flux, recession, and thermal requirements.")
+    
+    # Get config label for unique form keys
+    config_label = st.session_state.get("config_label", "default")
+    
+    # Get current config values for defaults
+    config_dict = config_obj.model_dump()
+    graphite_config = config_dict.get("graphite_insert", {})
+    chamber_config = config_dict.get("chamber", {})
+    
+    # Get defaults from config
+    throat_diameter = np.sqrt(4.0 * chamber_config.get("A_throat", 0.000857892) / np.pi)
+    burn_time = 10.0  # Default burn time
+    if config_dict.get("thrust") and config_dict["thrust"].get("burn_time"):
+        burn_time = float(config_dict["thrust"]["burn_time"])
+    
+    # Create form for input
+    with st.form(f"graphite_insert_form_{config_label}", clear_on_submit=False):
+        st.subheader("Input Method")
+        input_method = st.radio(
+            "How to get design point values?",
+            ["From Engine Run", "Manual Input"],
+            horizontal=True,
+            help="'From Engine Run' will evaluate the engine at specified tank pressures to get heat flux and recession rate. 'Manual Input' lets you enter values directly."
+        )
+        
+        if input_method == "From Engine Run":
+            st.subheader("Design Point (Tank Pressures)")
+            col1, col2 = st.columns(2)
+            with col1:
+                P_tank_O_psi = st.number_input(
+                    "LOX Tank Pressure [psi]",
+                    min_value=50.0,
+                    max_value=3000.0,
+                    value=1305.0,
+                    step=5.0,
+                    key=f"graphite_P_tank_O_{config_label}"
+                )
+            with col2:
+                P_tank_F_psi = st.number_input(
+                    "Fuel Tank Pressure [psi]",
+                    min_value=50.0,
+                    max_value=3000.0,
+                    value=974.0,
+                    step=5.0,
+                    key=f"graphite_P_tank_F_{config_label}"
+                )
+            
+            if runner is None:
+                st.warning("⚠️ Runner not available. Please use 'Manual Input' mode or ensure engine is configured.")
+                input_method = "Manual Input"  # Force manual mode
+        
+        st.subheader("Graphite Material Properties")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            thermal_conductivity = st.number_input(
+                "Thermal Conductivity [W/(m·K)]",
+                min_value=10.0,
+                max_value=500.0,
+                value=float(graphite_config.get("thermal_conductivity", 100.0)),
+                step=10.0,
+                key=f"graphite_k_{config_label}"
+            )
+            density = st.number_input(
+                "Density [kg/m³]",
+                min_value=1000.0,
+                max_value=3000.0,
+                value=float(graphite_config.get("material_density", 1800.0)),
+                step=50.0,
+                key=f"graphite_rho_{config_label}"
+            )
+        with col2:
+            specific_heat = st.number_input(
+                "Specific Heat [J/(kg·K)]",
+                min_value=100.0,
+                max_value=2000.0,
+                value=float(graphite_config.get("specific_heat", 710.0)),
+                step=50.0,
+                key=f"graphite_cp_{config_label}"
+            )
+            backface_temp_max = st.number_input(
+                "Max Backface Temp [K]",
+                min_value=300.0,
+                max_value=1000.0,
+                value=600.0,
+                step=50.0,
+                help="Maximum allowable temperature at backface (for metal substrate/adhesive)",
+                key=f"graphite_T_back_{config_label}"
+            )
+        with col3:
+            mechanical_thickness = st.number_input(
+                "Mechanical Thickness [mm]",
+                min_value=0.1,
+                max_value=10.0,
+                value=float(graphite_config.get("initial_thickness", 0.005)) * 1000.0,
+                step=0.1,
+                help="Minimum thickness for mechanical support, groove, seating",
+                key=f"graphite_t_mech_{config_label}"
+            )
+            safety_factor = st.number_input(
+                "Safety Factor [%]",
+                min_value=0.0,
+                max_value=100.0,
+                value=30.0,
+                step=5.0,
+                help="Safety factor as percentage (typically 30-50%)",
+                key=f"graphite_sf_{config_label}"
+            )
+        
+        st.subheader("Operating Conditions")
+        col1, col2 = st.columns(2)
+        with col1:
+            burn_time_input = st.number_input(
+                "Burn Time [s]",
+                min_value=0.1,
+                max_value=1000.0,
+                value=burn_time,
+                step=1.0,
+                key=f"graphite_burn_time_{config_label}"
+            )
+            throat_diam_input = st.number_input(
+                "Throat Diameter [mm]",
+                min_value=1.0,
+                max_value=500.0,
+                value=throat_diameter * 1000.0,
+                step=0.1,
+                key=f"graphite_Dt_{config_label}"
+            )
+        with col2:
+            use_transient = st.checkbox(
+                "Use Transient Conduction Model",
+                value=False,
+                help="Include transient thermal penetration depth calculation",
+                key=f"graphite_transient_{config_label}"
+            )
+            if use_transient:
+                transient_eta = st.number_input(
+                    "Transient Safety Factor (η)",
+                    min_value=1.5,
+                    max_value=5.0,
+                    value=2.5,
+                    step=0.1,
+                    help="Safety factor for transient penetration depth (typically 2-3)",
+                    key=f"graphite_eta_{config_label}"
+                )
+            else:
+                transient_eta = 2.5
+        
+        # Manual input section (shown if manual mode or if runner unavailable)
+        peak_heat_flux_manual = None
+        surface_temp_manual = None
+        recession_rate_manual = None
+        
+        if input_method == "Manual Input":
+            st.subheader("Manual Design Point Values")
+            col1, col2 = st.columns(2)
+            with col1:
+                peak_heat_flux_manual = st.number_input(
+                    "Peak Heat Flux [MW/m²]",
+                    min_value=0.1,
+                    max_value=50.0,
+                    value=5.0,
+                    step=0.5,
+                    help="Peak convective heat flux at throat",
+                    key=f"graphite_q_peak_{config_label}"
+                ) * 1e6  # Convert to W/m²
+                surface_temp_manual = st.number_input(
+                    "Surface Temperature [K]",
+                    min_value=500.0,
+                    max_value=3000.0,
+                    value=2000.0,
+                    step=50.0,
+                    help="Surface temperature from wall model",
+                    key=f"graphite_T_surf_{config_label}"
+                )
+            with col2:
+                recession_rate_manual = st.number_input(
+                    "Recession Rate [µm/s]",
+                    min_value=0.1,
+                    max_value=1000.0,
+                    value=60.0,
+                    step=5.0,
+                    help="Net recession rate from wall model",
+                    key=f"graphite_rdot_{config_label}"
+                ) * 1e-6  # Convert to m/s
+        
+        calculate_button = st.form_submit_button("Size Graphite Insert", type="primary")
+    
+    # Perform calculation if button clicked
+    if calculate_button:
+        try:
+            # Get values from form
+            mechanical_thickness_m = mechanical_thickness / 1000.0  # Convert mm to m
+            throat_diameter_m = throat_diam_input / 1000.0  # Convert mm to m
+            safety_factor_frac = safety_factor / 100.0  # Convert % to fraction
+            
+            # Get design point values
+            if input_method == "From Engine Run" and runner is not None:
+                # Run engine to get design point
+                P_tank_O = P_tank_O_psi * PSI_TO_PA
+                P_tank_F = P_tank_F_psi * PSI_TO_PA
+                
+                with st.spinner("Running engine to get design point..."):
+                    results = runner.evaluate(P_tank_O, P_tank_F)
+                
+                # Extract values from results
+                diagnostics = results.get("diagnostics", {})
+                cooling = diagnostics.get("cooling", {})
+                
+                # Get chamber heat flux (from ablative or estimate)
+                ablative = cooling.get("ablative", {})
+                if ablative.get("enabled", False):
+                    chamber_heat_flux = ablative.get("incident_heat_flux", 1e6)
+                else:
+                    # Estimate from chamber conditions
+                    Pc = results.get("Pc", 2e6)
+                    Tc = results.get("Tc", 3000.0)
+                    # Rough estimate: q'' ~ 0.026 * Pr^0.4 * (rho*u)^0.8 * (T_g - T_w)
+                    # Simplified: use typical value scaled by pressure
+                    chamber_heat_flux = 1e6 * (Pc / 2e6) ** 0.8
+                
+                # Calculate throat heat flux multiplier
+                gamma = results.get("gamma", 1.2)
+                R = results.get("R", 300.0)
+                mdot_total = results.get("mdot_total", 0.1)
+                
+                # Estimate velocities
+                rho_chamber = Pc / (R * Tc)
+                A_chamber = np.pi * (throat_diameter_m * 3) ** 2 / 4.0  # Approximate chamber area
+                v_chamber = mdot_total / (rho_chamber * A_chamber) if rho_chamber > 0 else 50.0
+                v_throat = np.sqrt(gamma * R * Tc / (gamma + 1))  # Sonic velocity
+                
+                throat_mult = calculate_throat_recession_multiplier(
+                    Pc, v_chamber, v_throat, chamber_heat_flux, gamma
+                )
+                peak_heat_flux = chamber_heat_flux * throat_mult
+                
+                # Get surface temperature (estimate from throat conditions)
+                surface_temp = Tc * 0.85  # Approximate throat temperature
+                
+                # Get recession rate from graphite cooling model
+                graphite_cfg_temp = config_obj.graphite_insert
+                if graphite_cfg_temp and graphite_cfg_temp.enabled:
+                    graphite_results = compute_graphite_recession(
+                        net_heat_flux=peak_heat_flux,
+                        throat_temperature=surface_temp,
+                        gas_temperature=Tc,
+                        graphite_config=graphite_cfg_temp,
+                        throat_area=np.pi * (throat_diameter_m / 2) ** 2,
+                        pressure=Pc,
+                    )
+                    recession_rate = graphite_results.get("recession_rate", 6e-5)
+                else:
+                    # Default estimate
+                    recession_rate = 6e-5  # m/s
+                
+                st.success(f"✓ Engine run complete: Pc = {results.get('Pc', 0)/6894.76:.1f} psi, "
+                          f"Thrust = {results.get('F', 0)/1000:.2f} kN")
+            else:
+                # Use manual input values
+                if peak_heat_flux_manual is not None:
+                    peak_heat_flux = peak_heat_flux_manual
+                if surface_temp_manual is not None:
+                    surface_temp = surface_temp_manual
+                if recession_rate_manual is not None:
+                    recession_rate = recession_rate_manual
+            
+            # Perform sizing calculation
+            with st.spinner("Calculating graphite insert size..."):
+                sizing = size_graphite_insert(
+                    peak_heat_flux=peak_heat_flux,
+                    surface_temperature=surface_temp,
+                    recession_rate=recession_rate,
+                    burn_time=burn_time_input,
+                    thermal_conductivity=thermal_conductivity,
+                    backface_temperature_max=backface_temp_max,
+                    throat_diameter=throat_diameter_m,
+                    density=density if use_transient else None,
+                    specific_heat=specific_heat if use_transient else None,
+                    mechanical_thickness=mechanical_thickness_m,
+                    safety_factor=safety_factor_frac,
+                    transient=use_transient,
+                    transient_eta=transient_eta if use_transient else 2.5,
+                )
+            
+            # Display results
+            st.subheader("Sizing Results")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Initial Thickness", f"{sizing.initial_thickness*1000:.2f} mm")
+                st.metric("Recession Allowance", f"{sizing.recession_allowance*1000:.2f} mm")
+                st.metric("Conduction Thickness", f"{sizing.conduction_thickness*1000:.2f} mm")
+            with col2:
+                st.metric("Safety Margin", f"{sizing.safety_margin*1000:.2f} mm")
+                st.metric("Total Axial Length", f"{sizing.total_axial_length*1000:.2f} mm")
+                st.metric("Upstream Length", f"{sizing.axial_half_length_upstream*1000:.2f} mm")
+            with col3:
+                st.metric("Downstream Length", f"{sizing.axial_half_length_downstream*1000:.2f} mm")
+                st.metric("Conduction Model", sizing.conduction_model)
+                st.metric("Sizing Method", sizing.sizing_method)
+            
+            # Throat growth check
+            st.subheader("Throat Growth Analysis")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Initial Throat Diameter", f"{sizing.throat_diameter_initial*1000:.3f} mm")
+                st.metric("Final Throat Diameter", f"{sizing.throat_diameter_end*1000:.3f} mm")
+            with col2:
+                st.metric("Area Change", f"{sizing.throat_area_change*1e6:.3f} mm²")
+                area_change_color = "normal" if not sizing.throat_area_change_excessive else "inverse"
+                st.metric("Area Change [%]", f"{sizing.throat_area_change_pct:.2f}%", 
+                         delta=None if not sizing.throat_area_change_excessive else "Exceeds 3% threshold")
+            
+            # Integrity warnings
+            if sizing.integrity_note != "All checks passed":
+                st.warning(f"⚠️ {sizing.integrity_note}")
+            else:
+                st.success("✓ All integrity checks passed")
+            
+            # Update config button
+            st.subheader("Update Configuration")
+            if st.button("Update Config with Calculated Values", type="primary", 
+                        key=f"graphite_update_config_{config_label}"):
+                # Update config_dict
+                if "graphite_insert" not in config_dict:
+                    config_dict["graphite_insert"] = {}
+                
+                config_dict["graphite_insert"]["enabled"] = True
+                config_dict["graphite_insert"]["initial_thickness"] = float(sizing.initial_thickness)
+                config_dict["graphite_insert"]["thermal_conductivity"] = float(thermal_conductivity)
+                config_dict["graphite_insert"]["material_density"] = float(density)
+                config_dict["graphite_insert"]["specific_heat"] = float(specific_heat)
+                
+                # Update session state
+                st.session_state["config_dict"] = config_dict
+                st.success("✓ Configuration updated! The runner will be recreated on next evaluation.")
+                st.info("💡 Note: Axial length is not stored in config - it's calculated from heat flux profile or simple rule.")
+            
+            # Store results for display
+            st.session_state["graphite_sizing_results"] = sizing
+            
+        except Exception as e:
+            st.error(f"Error during sizing calculation: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    # Show stored results if available
+    if "graphite_sizing_results" in st.session_state and not calculate_button:
+        sizing = st.session_state["graphite_sizing_results"]
+        st.subheader("Previous Sizing Results")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Initial Thickness", f"{sizing.initial_thickness*1000:.2f} mm")
+            st.metric("Recession Allowance", f"{sizing.recession_allowance*1000:.2f} mm")
+        with col2:
+            st.metric("Conduction Thickness", f"{sizing.conduction_thickness*1000:.2f} mm")
+            st.metric("Total Axial Length", f"{sizing.total_axial_length*1000:.2f} mm")
+        with col3:
+            st.metric("Area Change [%]", f"{sizing.throat_area_change_pct:.2f}%")
+            if sizing.integrity_note != "All checks passed":
+                st.warning(f"⚠️ {sizing.integrity_note}")
+    
+    return PintleEngineConfig(**st.session_state.get("config_dict", config_dict))
+
+
 def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, config_label: str) -> None:
     if not ROCKETPY_AVAILABLE:
         st.error("RocketPy is not installed. Install it with: `pip install rocketpy`")
@@ -4973,7 +5345,7 @@ def main():
         # Reuse cached runner
         runner = cached_runner
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
         "Forward Mode",
         "Inverse Mode",
         "Time-Series Analysis",
@@ -4982,6 +5354,7 @@ def main():
         "Custom Plot Builder",
         "Flight Simulation",
         "Chamber Design",
+        "Graphite Insert",
     ])
     
     # Run chamber design tab - it updates st.session_state["config_dict"] when Calculate is pressed
@@ -4989,6 +5362,11 @@ def main():
     with tab8:
         config_obj = chamber_design_view(config_obj)
         # chamber_design_view updates st.session_state["config_dict"] with calculated values
+    
+    # Run graphite insert tab - it updates st.session_state["config_dict"] when Calculate is pressed
+    with tab9:
+        config_obj = graphite_insert_view(config_obj, runner)
+        # graphite_insert_view updates st.session_state["config_dict"] with calculated values
     
     # CRITICAL: After chamber design tab runs, check if config was updated and recreate runner
     # This ensures Forward Mode and other tabs use the updated geometry immediately

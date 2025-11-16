@@ -120,10 +120,13 @@ graphite_insert:
   heat_of_ablation: 1.5e7 #J/kg
   thermal_conductivity: 100.0
   specific_heat: 710.0
+  activation_energy: 1.9e5 #J/mol
   initial_thickness: 0.005
   surface_temperature_limit: 2500.0
   oxidation_temperature: 800.0
-  oxidation_rate: 1.0e-06
+  oxidation_rate: 1.0e-06 #https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
+  oxidation_reference_temperature: 973 #https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
+  oxidation_reference_pressure: 21000 #https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
   recession_multiplier: null
   char_layer_conductivity: 5.0
   char_layer_thickness: 0.0005

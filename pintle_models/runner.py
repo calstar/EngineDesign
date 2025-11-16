@@ -15,10 +15,13 @@ from pintle_models.chamber_profiles import (
 from pintle_pipeline.ablative_geometry import (
     update_chamber_geometry_from_ablation,
     update_nozzle_exit_from_ablation,
-    calculate_throat_recession_multiplier,
+    calculate_throat_recession_multiplier as calculate_ablative_throat_recession_multiplier,
     calculate_local_recession_rate,
 )
-from pintle_pipeline.graphite_cooling import compute_graphite_recession
+from pintle_pipeline.graphite_cooling import (
+    compute_graphite_recession,
+    calculate_throat_recession_multiplier,
+)
 
 
 class PintleEngineRunner:
