@@ -3,8 +3,88 @@
 import numpy as np
 from typing import Optional, Dict, List
 from .config_schemas import RegenCoolingConfig
+from .constants import (
+    STEFAN_BOLTZMANN_W_M2_K4,
+    DEFAULT_GAMMA_ND,
+    DEFAULT_GAS_CONST_J_KG_K,
+    DEFAULT_CHAMBER_LEN_M,
+    DEFAULT_THROAT_AREA_M2,
+    DEFAULT_COOLANT_SPEC_HEAT_J_KG_K,
+    DEFAULT_COOLANT_THERMAL_COND_W_M_K,
+    DEFAULT_COOLANT_DENS_KG_M3,
+    DEFAULT_COOLANT_TEMP_K,
+    DEFAULT_HOT_GAS_VISC_PA_S,
+    DEFAULT_HOT_GAS_THERMAL_COND_W_M_K,
+    DEFAULT_EMISSIVITY_ND,
+    DEFAULT_VIEW_FACTOR_ND,
+    NU_LAMINAR_ND,
+    NU_TURBULENT_COEFFICIENT_ND,
+    NU_TURBULENT_RE_EXPONENT_ND,
+    NU_TURBULENT_PR_EXPONENT_ND,
+    K_ENTRANCE_SHARP_ND,
+    MIN_DENS_KG_M3,
+    EPSILON_TINY,
+    EPSILON_SMALL,
+    DEFAULT_RECOVERY_FACTOR_ND,
+    UNIVERSAL_GAS_CONST_J_KMOL_K,
+)
 
-SIGMA = 5.670374419e-8  # Stefan-Boltzmann constant
+# Unit conversion constants for viscosity formula
+# Formula uses Rankine and lb/lb-mol, result in lb·s/in²
+# Import from constants to avoid duplication
+from .constants import RANKINE_PER_KELVIN, LB_S_PER_IN2_TO_PA_S
+
+
+def calculate_gas_viscosity_huzel(
+    temperature: float,
+    molecular_weight: float,
+) -> float:
+    """
+    Calculate gas dynamic viscosity using Huzel's empirical correlation.
+    
+    Formula: μ = (46.6 × 10^-10) × M^0.5 × T^0.6
+    
+    Where:
+    - M = molecular weight [lb/lb-mol] (same as kg/kmol numerically)
+    - T = temperature [°R] (Rankine)
+    - Result: μ [lb·s/in²], converted to [Pa·s]
+    
+    This correlation is specifically for combustion gases and accounts for:
+    - Temperature dependence (T^0.6)
+    - Molecular weight dependence (M^0.5)
+    
+    Parameters
+    ----------
+    temperature : float
+        Gas temperature [K]
+    molecular_weight : float
+        Molecular weight [kg/kmol] (same as lb/lb-mol numerically)
+    
+    Returns
+    -------
+    viscosity : float
+        Dynamic viscosity [Pa·s]
+    
+    References
+    ----------
+    Huzel & Huang, "Design of Liquid Propellant Rocket Engines"
+    Equation (4-16) for combustion gas viscosity estimation
+    """
+    # Convert temperature from Kelvin to Rankine
+    T_rankine = temperature * RANKINE_PER_KELVIN
+    
+    # Molecular weight: lb/lb-mol = kg/kmol (same numerically)
+    M_lb_lbmol = molecular_weight
+    
+    # Calculate viscosity using Huzel's formula
+    # μ = (46.6 × 10^-10) × M^0.5 × T^0.6
+    # Result is in lb·s/in²
+    mu_lb_s_in2 = 46.6e-10 * (M_lb_lbmol ** 0.5) * (T_rankine ** 0.6)
+    
+    # Convert from lb·s/in² to Pa·s
+    viscosity_pa_s = mu_lb_s_in2 * LB_S_PER_IN2_TO_PA_S
+    
+    return float(viscosity_pa_s)
 
 
 def calculate_channel_hydraulic_diameter(width: float, height: float) -> float:
@@ -132,8 +212,7 @@ def delta_p_regen_channels(
     delta_p_inlet = f_inlet * (config.L_inlet / d_hyd_inlet) * (rho / 2) * u_inlet ** 2
     
     # Add minor loss for inlet (entrance loss)
-    K_entrance = 0.5  # Sharp entrance
-    delta_p_inlet += K_entrance * (rho / 2) * u_inlet ** 2
+    delta_p_inlet += K_ENTRANCE_SHARP_ND * (rho / 2) * u_inlet ** 2
     
     # 2. Split loss (manifold)
     # Loss coefficient for flow splitting
@@ -307,11 +386,11 @@ def compute_regen_heat_transfer(
     if not config.use_heat_transfer or mdot_coolant <= 0:
         return results
 
-    cp_c = max(coolant_props.get("cp", 2000.0), 1.0)
-    k_c = max(coolant_props.get("thermal_conductivity", 0.1), 1e-4)
-    mu_c = max(coolant_props.get("viscosity", 1e-4), 1e-8)
-    rho_c = max(coolant_props.get("density", 700.0), 1.0)
-    T_c_bulk = coolant_props.get("temperature", 300.0)
+    cp_c = max(coolant_props.get("cp", DEFAULT_COOLANT_SPEC_HEAT_J_KG_K), 1.0)
+    k_c = max(coolant_props.get("thermal_conductivity", DEFAULT_COOLANT_THERMAL_COND_W_M_K), EPSILON_SMALL)
+    mu_c = max(coolant_props.get("viscosity", 1e-4), EPSILON_TINY)
+    rho_c = max(coolant_props.get("density", DEFAULT_COOLANT_DENS_KG_M3), 1.0)
+    T_c_bulk = coolant_props.get("temperature", DEFAULT_COOLANT_TEMP_K)
 
     channel_area = config.channel_width * config.channel_height
     d_hyd_channel = calculate_channel_hydraulic_diameter(config.channel_width, config.channel_height)
@@ -319,8 +398,8 @@ def compute_regen_heat_transfer(
 
     Pc = gas_props.get("Pc", 0.0)
     Tc = gas_props.get("Tc", 0.0)
-    gamma = gas_props.get("gamma", 1.2)
-    R_g = gas_props.get("R", 350.0)
+    gamma = gas_props.get("gamma", DEFAULT_GAMMA_ND)
+    R_g = gas_props.get("R", DEFAULT_GAS_CONST_J_KG_K)
 
     chamber_d_inner = config.chamber_inner_diameter
     if chamber_d_inner is None:
@@ -328,7 +407,7 @@ def compute_regen_heat_transfer(
         if chamber_area is not None and chamber_area > 0:
             chamber_d_inner = np.sqrt(4.0 * chamber_area / np.pi)
         else:
-            throat_area = gas_props.get("A_throat", 1e-3)
+            throat_area = gas_props.get("A_throat", DEFAULT_THROAT_AREA_M2)
             chamber_d_inner = np.sqrt(4.0 * throat_area / np.pi)
 
     # Use chamber_length from gas_props (comes from chamber.length in config)
@@ -343,20 +422,38 @@ def compute_regen_heat_transfer(
     segment_area_hot = circumference * segment_length
 
     A_cross = np.pi * (chamber_d_inner ** 2) / 4.0
-    rho_g = max(Pc / (R_g * max(Tc, 1.0)), 0.01)
+    rho_g = max(Pc / (R_g * max(Tc, 1.0)), MIN_DENS_KG_M3)
     V_g = mdot_total / (rho_g * A_cross)
-    mu_g = config.hot_gas_viscosity
-    k_g = config.hot_gas_thermal_conductivity
-    cp_g = gamma * R_g / max(gamma - 1.0, 1e-6)
-    Pr_g = config.hot_gas_prandtl if config.hot_gas_prandtl > 0 else (mu_g * cp_g / max(k_g, 1e-4))
-
-    Re_g = rho_g * V_g * chamber_d_inner / max(mu_g, 1e-8)
-    if Re_g < 2000:
-        Nu_g = 4.36
+    
+    # Get viscosity from config (for reference)
+    mu_g_config = config.hot_gas_viscosity
+    
+    # Calculate viscosity using Huzel's formula if molecular weight is available
+    M = gas_props.get("M")  # Molecular weight [kg/kmol]
+    if M is not None and M > 0 and Tc > 0:
+        mu_g_calculated = calculate_gas_viscosity_huzel(Tc, M)
     else:
-        Nu_g = 0.023 * (Re_g ** 0.8) * (Pr_g ** 0.4)
+        mu_g_calculated = mu_g_config  # Fallback to config if M not available
+    
+    # Use calculated viscosity for calculations (more accurate)
+    mu_g = mu_g_calculated
+    
+    k_g = config.hot_gas_thermal_conductivity
+    cp_g = gamma * R_g / max(gamma - 1.0, EPSILON_SMALL)
+    Pr_g = config.hot_gas_prandtl if config.hot_gas_prandtl > 0 else (mu_g * cp_g / max(k_g, EPSILON_SMALL))
+
+    Re_g = rho_g * V_g * chamber_d_inner / max(mu_g, EPSILON_TINY)
+    if Re_g < 2000:
+        Nu_g = NU_LAMINAR_ND
+    else:
+        Nu_g = NU_TURBULENT_COEFFICIENT_ND * (Re_g ** NU_TURBULENT_RE_EXPONENT_ND) * (Pr_g ** NU_TURBULENT_PR_EXPONENT_ND)
     turbulence_boost_g = (1.0 + config.gas_turbulence_intensity) ** 0.8
     h_g_base = Nu_g * k_g / chamber_d_inner * turbulence_boost_g
+
+    # Calculate adiabatic wall temperature using recovery factor
+    # Taw = Tc × recovery_factor (accounts for kinetic energy recovery in boundary layer)
+    recovery_factor = config.recovery_factor if config.recovery_factor is not None else DEFAULT_RECOVERY_FACTOR_ND
+    Taw = Tc * recovery_factor
 
     heat_removed_total = 0.0
     heat_flux_conv_total = 0.0
@@ -376,16 +473,18 @@ def compute_regen_heat_transfer(
             f_c = (0.79 * np.log(Re_c) - 1.64) ** -2 if Re_c > 2300 else 64.0 / max(Re_c, 1.0)
             Nu_c = (f_c / 8.0 * (Re_c - 1000.0) * Pr_c) / (1.0 + 12.7 * np.sqrt(f_c / 8.0) * (Pr_c ** (2.0 / 3.0) - 1.0))
             if Nu_c <= 0:
-                Nu_c = 4.36
+                Nu_c = NU_LAMINAR_ND
         turbulence_boost_c = (1.0 + config.coolant_turbulence_intensity) ** 0.8
         h_c = Nu_c * k_c / d_hyd_channel * turbulence_boost_c
 
         h_g = h_g_base
-        U_inv = (1.0 / max(h_g, 1e-6)) + (config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)) + (1.0 / max(h_c, 1e-6))
+        U_inv = (1.0 / max(h_g, EPSILON_SMALL)) + (config.wall_thickness / max(config.wall_thermal_conductivity, EPSILON_SMALL)) + (1.0 / max(h_c, EPSILON_SMALL))
         U = 1.0 / U_inv
-        delta_T = max(Tc - T_c_bulk, 0.0)
+        # Use adiabatic wall temperature (Taw) instead of chamber temperature (Tc)
+        # More accurate: q = h_g × (Taw - Tw) where Taw = Tc × recovery_factor
+        delta_T = max(Taw - T_c_bulk, 0.0)
         heat_flux_conv = U * delta_T
-        heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * SIGMA * (Tc ** 4 - T_c_bulk ** 4)
+        heat_flux_rad = config.radiation_emissivity_hot * config.radiation_view_factor * STEFAN_BOLTZMANN_W_M2_K4 * (Tc ** 4 - T_c_bulk ** 4)
         heat_flux_rad = max(heat_flux_rad, 0.0)
         heat_flux_total = heat_flux_conv + heat_flux_rad
 
@@ -394,10 +493,11 @@ def compute_regen_heat_transfer(
         heat_flux_conv_total += heat_flux_conv * segment_area_hot
         heat_flux_rad_total += heat_flux_rad * segment_area_hot
 
-        T_c_bulk += q_segment / max(mdot_coolant * cp_c, 1e-6)
+        T_c_bulk += q_segment / max(mdot_coolant * cp_c, EPSILON_SMALL)
 
-        Tw_hot = Tc - heat_flux_conv / max(h_g, 1e-6)
-        Tw_cold = Tw_hot - heat_flux_conv * config.wall_thickness / max(config.wall_thermal_conductivity, 1e-6)
+        # Wall temperature calculated from adiabatic wall temperature
+        Tw_hot = Taw - heat_flux_conv / max(h_g, EPSILON_SMALL)
+        Tw_cold = Tw_hot - heat_flux_conv * config.wall_thickness / max(config.wall_thermal_conductivity, EPSILON_SMALL)
 
         wall_hot_segments.append(Tw_hot)
         wall_cold_segments.append(Tw_cold)
@@ -409,14 +509,18 @@ def compute_regen_heat_transfer(
         {
             "coolant_outlet_temperature": float(T_c_bulk),
             "heat_removed": float(heat_removed_total),
-            "heat_flux_convective": float(heat_flux_conv_total / max(circumference * chamber_length, 1e-6)),
-            "heat_flux_radiative": float(heat_flux_rad_total / max(circumference * chamber_length, 1e-6)),
+            "heat_flux_convective": float(heat_flux_conv_total / max(circumference * chamber_length, EPSILON_SMALL)),
+            "heat_flux_radiative": float(heat_flux_rad_total / max(circumference * chamber_length, EPSILON_SMALL)),
             "overall_heat_flux": float(avg_heat_flux),
             "h_hot": float(h_g_base),
             "h_coolant": float(h_c),
-            "wall_temperature_hot": float(np.mean(wall_hot_segments) if wall_hot_segments else Tc),
+            "wall_temperature_hot": float(np.mean(wall_hot_segments) if wall_hot_segments else Taw),
             "wall_temperature_coolant": float(np.mean(wall_cold_segments) if wall_cold_segments else T_c_bulk),
+            "gas_viscosity": float(mu_g),  # Viscosity used in calculations (calculated from Huzel if available)
+            "gas_viscosity_config": float(mu_g_config),  # Viscosity from config (for reference)
+            "gas_viscosity_calculated": float(mu_g_calculated),  # Viscosity from Huzel formula (for reference)
             "effective_gas_temperature": float(Tc),
+            "adiabatic_wall_temperature": float(Taw),
             "coolant_bulk_temperature": float(T_c_bulk),
             "segment_wall_temperatures": wall_hot_segments,
             "segment_coolant_wall_temperatures": wall_cold_segments,
@@ -437,17 +541,17 @@ def estimate_hot_wall_heat_flux(
 
     Tc = gas_props.get("Tc", 0.0)
     Pc = gas_props.get("Pc", 0.0)
-    gamma = gas_props.get("gamma", 1.2)
-    R_g = gas_props.get("R", 350.0)
-    # Prioritize chamber_length from gas_props (comes from chamber.length in config)
+    gamma = gas_props.get("gamma", DEFAULT_GAMMA_ND)
+    R_g = gas_props.get("R", DEFAULT_GAS_CONST_J_KG_K)
+    # Prioritize chamber_length from gas_props (comes from chamber.length in config)where is h_g 
     # This is the actual physical chamber length, not the regen channel length
-    chamber_length = gas_props.get("chamber_length", 0.1)
+    chamber_length = gas_props.get("chamber_length", DEFAULT_CHAMBER_LEN_M)
     # Fallback to regen channel_length only if chamber_length is not in gas_props
     if chamber_length <= 0 and config is not None and config.channel_length > 0:
         chamber_length = config.channel_length
     # Last resort: use default
     if chamber_length <= 0:
-        chamber_length = 0.1
+        chamber_length = DEFAULT_CHAMBER_LEN_M
 
     chamber_d_inner = config.chamber_inner_diameter if config is not None else None
     if chamber_d_inner is None:
@@ -455,31 +559,48 @@ def estimate_hot_wall_heat_flux(
         if chamber_area is not None and chamber_area > 0:
             chamber_d_inner = np.sqrt(4.0 * chamber_area / np.pi)
         else:
-            throat_area = gas_props.get("A_throat", 1e-3)
+            throat_area = gas_props.get("A_throat", DEFAULT_THROAT_AREA_M2)
             chamber_d_inner = np.sqrt(4.0 * throat_area / np.pi)
 
     A_cross = np.pi * (chamber_d_inner ** 2) / 4.0
-    rho_g = max(Pc / (R_g * max(Tc, 1.0)), 0.01)
+    rho_g = max(Pc / (R_g * max(Tc, 1.0)), MIN_DENS_KG_M3)
     V_g = mdot_total / (rho_g * A_cross)
 
-    mu_g = config.hot_gas_viscosity if config is not None else 4.0e-5
-    k_g = config.hot_gas_thermal_conductivity if config is not None else 0.1
-    cp_g = gamma * R_g / max(gamma - 1.0, 1e-6)
-    Pr_g_source = config.hot_gas_prandtl if (config is not None and config.hot_gas_prandtl > 0) else None
-    Pr_g = Pr_g_source if Pr_g_source is not None else (mu_g * cp_g / max(k_g, 1e-4))
-
-    Re_g = rho_g * V_g * chamber_d_inner / max(mu_g, 1e-8)
-    if Re_g < 2000:
-        Nu_g = 4.36
+    # Get viscosity from config (for reference)
+    mu_g_config = config.hot_gas_viscosity if config is not None else DEFAULT_HOT_GAS_VISC_PA_S
+    
+    # Calculate viscosity using Huzel's formula if molecular weight is available
+    M = gas_props.get("M")  # Molecular weight [kg/kmol]
+    if M is not None and M > 0 and Tc > 0:
+        mu_g_calculated = calculate_gas_viscosity_huzel(Tc, M)
     else:
-        Nu_g = 0.023 * (Re_g ** 0.8) * (Pr_g ** 0.4)
+        mu_g_calculated = mu_g_config  # Fallback to config if M not available
+    
+    # Use calculated viscosity for calculations (more accurate)
+    mu_g = mu_g_calculated
+    
+    k_g = config.hot_gas_thermal_conductivity if config is not None else DEFAULT_HOT_GAS_THERMAL_COND_W_M_K
+    cp_g = gamma * R_g / max(gamma - 1.0, EPSILON_SMALL)
+    Pr_g_source = config.hot_gas_prandtl if (config is not None and config.hot_gas_prandtl > 0) else None
+    Pr_g = Pr_g_source if Pr_g_source is not None else (mu_g * cp_g / max(k_g, EPSILON_SMALL))
+
+    Re_g = rho_g * V_g * chamber_d_inner / max(mu_g, EPSILON_TINY)
+    if Re_g < 2000:
+        Nu_g = NU_LAMINAR_ND
+    else:
+        Nu_g = NU_TURBULENT_COEFFICIENT_ND * (Re_g ** NU_TURBULENT_RE_EXPONENT_ND) * (Pr_g ** NU_TURBULENT_PR_EXPONENT_ND)
     h_g = Nu_g * k_g / chamber_d_inner
 
-    delta_T = max(Tc - wall_temperature, 0.0)
+    # Calculate adiabatic wall temperature using recovery factor
+    # Taw = Tc × recovery_factor (accounts for kinetic energy recovery in boundary layer) see Huzel 4-10
+    recovery_factor = config.recovery_factor if (config is not None and config.recovery_factor is not None) else DEFAULT_RECOVERY_FACTOR_ND
+    Taw = Tc * recovery_factor
+
+    delta_T = max(Taw - wall_temperature, 0.0)
     heat_flux_conv = h_g * delta_T
-    emissivity = config.radiation_emissivity_hot if config is not None else 0.8
-    view_factor = config.radiation_view_factor if config is not None else 1.0
-    heat_flux_rad = emissivity * view_factor * SIGMA * (
+    emissivity = config.radiation_emissivity_hot if config is not None else DEFAULT_EMISSIVITY_ND
+    view_factor = config.radiation_view_factor if config is not None else DEFAULT_VIEW_FACTOR_ND
+    heat_flux_rad = emissivity * view_factor * STEFAN_BOLTZMANN_W_M2_K4 * (
         Tc ** 4 - wall_temperature ** 4
     )
     heat_flux_total = heat_flux_conv + max(heat_flux_rad, 0.0)
@@ -492,4 +613,8 @@ def estimate_hot_wall_heat_flux(
         "heat_flux_rad": float(max(heat_flux_rad, 0.0)),
         "h_hot": float(h_g),
         "surface_area": float(A_hot),
+        "adiabatic_wall_temperature": float(Taw),
+        "gas_viscosity": float(mu_g),  # Viscosity used in calculations (calculated from Huzel if available)
+        "gas_viscosity_config": float(mu_g_config),  # Viscosity from config (for reference)
+        "gas_viscosity_calculated": float(mu_g_calculated),  # Viscosity from Huzel formula (for reference)
     }

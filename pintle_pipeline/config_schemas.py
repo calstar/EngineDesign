@@ -145,6 +145,7 @@ class RegenCoolingConfig(BaseModel):
     gas_turbulence_intensity: float = Field(default=0.1, ge=0, description="Estimated turbulence intensity of hot gas (0-1)")
     coolant_turbulence_intensity: float = Field(default=0.05, ge=0, description="Estimated turbulence intensity of coolant (0-1)")
     hot_gas_cp: float = Field(default=2200.0, gt=0, description="Hot-gas specific heat [J/(kg·K)]")
+    recovery_factor: Optional[float] = Field(default=None, gt=0, le=1, description="Turbulent boundary layer recovery factor for adiabatic wall temperature (Taw = Tc × recovery_factor). Typical range: 0.90-0.98. If None, uses default from constants.")
 
 
 class FilmCoolingConfig(BaseModel):
@@ -208,7 +209,10 @@ class AblativeCoolingConfig(BaseModel):
     surface_temperature_limit: float = Field(default=1200.0, gt=0, description="Allowable surface temperature [K]")
     coverage_fraction: float = Field(default=1.0, gt=0, le=1.0, description="Fraction of chamber surface protected by ablative liner")
     pyrolysis_temperature: float = Field(default=900.0, gt=0, description="Characteristic pyrolysis temperature of ablator [K]")
-    blowing_efficiency: float = Field(default=0.8, ge=0, le=1, description="Effectiveness of ablative gases in blocking convective heat flux")
+    blowing_efficiency: float = Field(default=0.8, ge=0, le=1, description="Effectiveness of ablative gases in blocking convective heat flux (legacy constant factor, used if use_physics_based_blowing=False)")
+    use_physics_based_blowing: bool = Field(default=True, description="If True, use physics-based blowing parameter B = m_dot_pyrolysis/m_dot_external. If False, use constant blowing_efficiency factor.")
+    blowing_coefficient: float = Field(default=0.5, gt=0, description="Blowing coefficient c in empirical function f(B) = 1/(1 + c*B). Typical range: 0.3-0.8. Higher values = stronger blowing effect.")
+    blowing_min_reduction_factor: float = Field(default=0.1, ge=0, le=1, description="Minimum convective reduction factor (maximum blowing effectiveness). Prevents blowing from reducing convective heat transfer below this fraction. Default 0.1 means maximum 90% reduction. Lower values allow stronger blowing effect.")
     turbulence_reference_intensity: float = Field(default=0.08, gt=0, description="Reference turbulence intensity for ablative augmentation")
     turbulence_sensitivity: float = Field(default=1.5, ge=0, description="Sensitivity of ablative heat flux to turbulence")
     turbulence_exponent: float = Field(default=1.0, gt=0, description="Exponent on turbulence intensity for ablative response")
@@ -216,6 +220,10 @@ class AblativeCoolingConfig(BaseModel):
     throat_recession_multiplier: Optional[float] = Field(default=None, gt=0, description="Throat recession multiplier vs chamber (if None, calculated from flow conditions). Typically 1.2-2.0")
     char_layer_conductivity: float = Field(default=0.2, gt=0, description="Thermal conductivity of char layer [W/(m·K)]")
     char_layer_thickness: float = Field(default=0.001, gt=0, description="Thickness of protective char layer [m]")
+    surface_emissivity: float = Field(default=0.85, ge=0, le=1, description="Surface emissivity for radiative heat transfer (0-1, typical 0.8-0.9 for charred ablators)")
+    ambient_temperature: float = Field(default=300.0, gt=0, description="Ambient/surrounding temperature for radiative heat transfer [K]. For radiation to space, use ~300K. For radiation exchange with gas, use gas temperature.")
+    radiative_sink_minimum_threshold: float = Field(default=400.0, gt=0, description="Minimum ambient temperature threshold [K]. If ambient_temperature is below this, radiative_sink_fallback_temperature is used instead.")
+    radiative_sink_fallback_temperature: float = Field(default=600.0, gt=0, description="Fallback radiative sink temperature [K] used when ambient_temperature is too low. Represents approximate heated steel layer temperature behind ablator.")
     track_geometry_evolution: bool = Field(default=True, description="Enable time-varying geometry tracking (L* evolution)")
     nozzle_ablative: bool = Field(default=False, description="If True, nozzle exit also recedes (A_exit grows). If False, only throat recedes (expansion ratio decreases)")
 

@@ -19,6 +19,13 @@ from pintle_pipeline.numerical_robustness import (
     PhysicsValidator,
     validate_engine_state,
 )
+from pintle_pipeline.constants import (
+    DEFAULT_CHAMBER_TEMP_K,
+    DEFAULT_CSTAR_IDEAL_M_S,
+    DEFAULT_GAMMA_ND,
+    DEFAULT_GAS_CONST_J_KG_K,
+    DEFAULT_TURBULENCE_INTENSITY_ND,
+)
 from pintle_models.closure import flows
 
 
@@ -123,7 +130,7 @@ class ChamberSolver:
         # This corrects CEA's infinite-area assumption
         mixture_eff = self._compute_mixture_efficiency(diagnostics)
 
-        cooling_results, cooling_eff = self._evaluate_cooling_models(
+        cooling_results, cooling_eff, _ = self._evaluate_cooling_models(
             Pc_val,
             mdot_O,
             mdot_F,
@@ -484,7 +491,7 @@ class ChamberSolver:
                 }
         
         mixture_eff = self._compute_mixture_efficiency(closure_diag)
-        cooling_results, cooling_eff = self._evaluate_cooling_models(
+        cooling_results, cooling_eff, effective_Tc = self._evaluate_cooling_models(
             Pc_val,
             mdot_O,
             mdot_F,
@@ -499,13 +506,13 @@ class ChamberSolver:
         if use_advanced:
             advanced_params = {
                 "Pc": Pc_val,
-                "Tc": cea_props.get("Tc", 3500.0),
-                "cstar_ideal": cea_props.get("cstar_ideal", 1800.0),
-                "gamma": cea_props.get("gamma", 1.2),
-                "R": cea_props.get("R", 400.0),
+                "Tc": effective_Tc,  # Use effective temperature after cooling
+                "cstar_ideal": cea_props.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S),
+                "gamma": cea_props.get("gamma", DEFAULT_GAMMA_ND),
+                "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
                 "MR": MR,
                 "spray_diagnostics": closure_diag,
-                "turbulence_intensity": closure_diag.get("turbulence_intensity_mix", 0.08),
+                "turbulence_intensity": closure_diag.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
             }
         
         eta = eta_cstar(
@@ -521,7 +528,6 @@ class ChamberSolver:
         # Comprehensive validation of final solution
         mdot_total = mdot_O + mdot_F
         cstar_actual = eta * cea_props["cstar_ideal"]
-        Tc = cea_props["Tc"]
         gamma = cea_props["gamma"]
         R = cea_props["R"]
         
@@ -531,9 +537,9 @@ class ChamberSolver:
             (2.0 / (gamma + 1.0)) ** ((gamma + 1.0) / (gamma - 1.0))
         )) / (mdot_total * g0) if mdot_total > 0 else 0.0
         
-        # Validate engine state
+        # Validate engine state (use effective temperature after cooling)
         validation_results = validate_engine_state(
-            Pc_val, MR, mdot_total, cstar_actual, gamma, Tc, Isp, 0.0  # F not calculated yet
+            Pc_val, MR, mdot_total, cstar_actual, gamma, effective_Tc, Isp, 0.0  # F not calculated yet
         )
         
         # Check for critical errors
@@ -553,7 +559,8 @@ class ChamberSolver:
             "eta_cstar": eta,
             "mixture_efficiency": mixture_eff,
             "cooling_efficiency": cooling_eff,
-            "Tc": Tc,
+            "Tc": effective_Tc,  # Use effective temperature after cooling (accounts for energy removal)
+            "Tc_ideal": cea_props["Tc"],  # Store original CEA temperature for reference
             "gamma": gamma,
             "R": R,
             "M": cea_props.get("M"),  # Molecular weight [kg/kmol]
@@ -649,19 +656,18 @@ class ChamberSolver:
         mdot_F: float,
         cea_props: Dict[str, float],
         closure_diag: Dict[str, Any],
-    ) -> Tuple[Dict[str, Any], float]:
+    ) -> Tuple[Dict[str, Any], float, float]:
         config = self.config
         mdot_total = mdot_O + mdot_F
         cooling_results: Dict[str, Any] = {}
+        Tc = float(cea_props["Tc"])
 
         if mdot_total <= 0:
             closure_diag["cooling"] = cooling_results
-            return cooling_results, 1.0
+            return cooling_results, 1.0, Tc
 
         fuel_fluid = config.fluids["fuel"]
         geometry = self._get_chamber_geometry()
-
-        Tc = float(cea_props["Tc"])
         Pc_val = float(Pc)
         gamma = float(cea_props["gamma"])
         R = float(cea_props["R"])
@@ -671,7 +677,20 @@ class ChamberSolver:
         velocity_g = mdot_total / (rho_g * area_cross)
 
         regen_cfg = config.regen_cooling
-        mu_g = regen_cfg.hot_gas_viscosity if regen_cfg is not None else 4.0e-5
+        from pintle_pipeline.constants import DEFAULT_HOT_GAS_VISC_PA_S
+        mu_g_config = regen_cfg.hot_gas_viscosity if regen_cfg is not None else DEFAULT_HOT_GAS_VISC_PA_S
+        
+        # Calculate viscosity using Huzel's formula if molecular weight is available
+        M = cea_props.get("M")  # Molecular weight [kg/kmol]
+        if M is not None and M > 0 and Tc > 0:
+            from pintle_pipeline.regen_cooling import calculate_gas_viscosity_huzel
+            mu_g_calculated = calculate_gas_viscosity_huzel(Tc, M)
+        else:
+            mu_g_calculated = mu_g_config  # Fallback to config if M not available
+        
+        # Use calculated viscosity for calculations (more accurate)
+        mu_g = mu_g_calculated
+        
         k_g = regen_cfg.hot_gas_thermal_conductivity if regen_cfg is not None else 0.1
         Pr_g = (
             regen_cfg.hot_gas_prandtl
@@ -738,6 +757,7 @@ class ChamberSolver:
             "Tc": effective_Tc,
             "gamma": gamma,
             "R": R,
+            "M": cea_props.get("M"),  # Molecular weight [kg/kmol] for viscosity calculation
             "chamber_area": geometry["area_cross"],
             "A_throat": config.chamber.A_throat,
             "chamber_length": geometry["length"],
@@ -777,12 +797,28 @@ class ChamberSolver:
             ablative_results = compute_ablative_response(
                 hot_flux["heat_flux_total"],
                 abl_cfg.surface_temperature_limit,
-                effective_Tc,
                 abl_cfg,
                 abl_area,
                 turbulence_intensity_calc,
+                heat_flux_conv=hot_flux.get("heat_flux_conv"),
+                heat_flux_rad=hot_flux.get("heat_flux_rad"),
+                gas_mass_flow_rate=mdot_total,
             )
             ablative_results["incident_heat_flux"] = hot_flux["heat_flux_total"]
+            
+            # Calculate effective gas temperature after ablative cooling
+            # Energy removed from gas: Q = mdot_total × cp × ΔT
+            # Therefore: ΔT = Q / (mdot_total × cp)
+            abl_heat_removed = ablative_results.get("heat_removed", 0.0)
+            if abl_heat_removed > 0 and mdot_total > 0:
+                cp = gamma * R / max(gamma - 1.0, 1e-6)  # Specific heat [J/(kg·K)]
+                delta_T_abl = abl_heat_removed / max(mdot_total * cp, 1e-6)
+                effective_Tc = max(effective_Tc - delta_T_abl, 1.0)  # Update effective temperature
+                ablative_results["temperature_reduction"] = float(delta_T_abl)
+            else:
+                ablative_results["temperature_reduction"] = 0.0
+            
+            ablative_results["effective_gas_temperature"] = float(effective_Tc)
             cooling_results["ablative"] = ablative_results
 
         cooling_eff = self._compute_cooling_efficiency(
@@ -793,10 +829,17 @@ class ChamberSolver:
             R,
         )
 
-        cooling_results.setdefault("metadata", {})["gas_turbulence_intensity"] = turbulence_intensity_calc
+        # Store metadata for diagnostics
+        metadata = cooling_results.setdefault("metadata", {})
+        metadata["gas_turbulence_intensity"] = turbulence_intensity_calc
+        metadata["effective_gas_temperature"] = float(effective_Tc)
+        metadata["original_gas_temperature"] = float(Tc)
+        metadata["gas_viscosity"] = float(mu_g)  # Viscosity used in calculations (calculated from Huzel if available)
+        metadata["gas_viscosity_config"] = float(mu_g_config)  # Viscosity from config (for reference)
+        metadata["gas_viscosity_calculated"] = float(mu_g_calculated)  # Viscosity from Huzel formula (for reference)
         closure_diag["cooling"] = cooling_results
 
-        return cooling_results, cooling_eff
+        return cooling_results, cooling_eff, effective_Tc
 
     def _get_chamber_geometry(self) -> Dict[str, float]:
         chamber_cfg = self.config.chamber

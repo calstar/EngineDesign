@@ -718,6 +718,7 @@ class CEACache:
             Tc : float [K]
             gamma : float
             R : float [J/(kg·K)]
+            M : float [kg/kmol] (molecular weight)
         """
         if eps is None:
             eps = self.config.expansion_ratio
