@@ -52,6 +52,16 @@ try:
 except ImportError:
     # Fallback if import fails
     solve_chamber_geometry_with_cea = None
+
+# Import chamber profiles for multi-layer visualization
+try:
+    from pintle_models.chamber_profiles import (
+        calculate_complete_chamber_geometry,
+        visualize_chamber_cross_section,
+    )
+except ImportError:
+    calculate_complete_chamber_geometry = None
+    visualize_chamber_cross_section = None
 # Import graphite geometry sizing
 from pintle_pipeline.graphite_geometry import size_graphite_insert
 from pintle_pipeline.graphite_cooling import compute_graphite_recession, calculate_throat_recession_multiplier
@@ -1254,6 +1264,19 @@ def compute_timeseries_dataframe(
     cooling_eff = [diag.get("cooling_efficiency", np.nan) if isinstance(diag, dict) else np.nan for diag in diag_list]
     df_dict["Mixture Efficiency"] = np.asarray(mixture_eff, dtype=float)
     df_dict["Cooling Efficiency"] = np.asarray(cooling_eff, dtype=float)
+
+    # Ensure all arrays have the same length
+    n_expected = len(times)
+    for key, arr in df_dict.items():
+        arr_array = np.asarray(arr)
+        if len(arr_array) != n_expected:
+            if len(arr_array) < n_expected:
+                # Pad with NaN
+                padding = np.full(n_expected - len(arr_array), np.nan, dtype=arr_array.dtype)
+                df_dict[key] = np.concatenate([arr_array, padding])
+            else:
+                # Truncate
+                df_dict[key] = arr_array[:n_expected]
 
     df = pd.DataFrame(df_dict)
     df = df.replace([np.inf, -np.inf], np.nan)
@@ -4601,43 +4624,238 @@ def _display_chamber_results(results: dict) -> None:
     # Display results
     st.subheader("Chamber Contour")
     
-    # Create contour plot using plotly
-    fig_contour = go.Figure()
-    fig_contour.add_trace(go.Scatter(
-        x=pts[:, 0],
-        y=pts[:, 1],
-        mode='lines',
-        name='Chamber Contour',
-        line=dict(color='red', width=2)
-    ))
-    # Add mirror image for full contour
-    fig_contour.add_trace(go.Scatter(
-        x=pts[:, 0],
-        y=-pts[:, 1],
-        mode='lines',
-        name='Lower Contour',
-        line=dict(color='red', width=2),
-        showlegend=False
-    ))
-    # Add centerline
-    x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
-    fig_contour.add_trace(go.Scatter(
-        x=[x_min, x_max],
-        y=[0, 0],
-        mode='lines',
-        name='Centerline',
-        line=dict(color='gray', width=1, dash='dash'),
-        showlegend=False
-    ))
-    
-    fig_contour.update_layout(
-        title="Chamber Contour (Half-Section)",
-        xaxis_title="Axial Position [m]",
-        yaxis_title="Radius [m]",
-        height=500,
-        showlegend=True
-    )
-    st.plotly_chart(fig_contour, width='stretch')
+    # Try to create enhanced multi-layer visualization if available
+    if (calculate_complete_chamber_geometry is not None and 
+        hasattr(config_obj, 'ablative_cooling') and config_obj.ablative_cooling and
+        hasattr(config_obj, 'graphite_insert') and config_obj.graphite_insert and
+        hasattr(config_obj, 'stainless_steel_case') and config_obj.stainless_steel_case):
+        
+        try:
+            # Get current geometry from results
+            V_chamber = results.get("chamber_volume", config_obj.chamber.volume)
+            A_throat = results.get("A_throat", config_obj.chamber.A_throat)
+            L_chamber = results.get("chamber_length", config_obj.chamber.length)
+            D_chamber_initial = config_obj.chamber.chamber_inner_diameter
+            D_throat_initial = np.sqrt(4.0 * A_throat / np.pi)
+            
+            # Get recession values (default to 0 if not available)
+            recession_chamber = results.get("recession_chamber", 0.0) if isinstance(results.get("recession_chamber"), (int, float)) else 0.0
+            recession_graphite = results.get("recession_graphite", 0.0) if isinstance(results.get("recession_graphite"), (int, float)) else 0.0
+            
+            # Calculate complete geometry
+            geometry = calculate_complete_chamber_geometry(
+                V_chamber=V_chamber,
+                A_throat=A_throat,
+                L_chamber=L_chamber,
+                D_chamber_initial=D_chamber_initial,
+                D_throat_initial=D_throat_initial,
+                ablative_config=config_obj.ablative_cooling,
+                graphite_config=config_obj.graphite_insert,
+                stainless_config=config_obj.stainless_steel_case,
+                recession_chamber=recession_chamber,
+                recession_graphite=recession_graphite,
+                n_points=100,
+            )
+            
+            # Create enhanced plotly visualization
+            fig_contour = go.Figure()
+            positions = np.array(geometry["positions"])
+            
+            # Gas boundary (chamber)
+            D_gas = np.array(geometry["D_gas_chamber"]) / 2.0  # Convert to radius
+            fig_contour.add_trace(go.Scatter(
+                x=positions,
+                y=D_gas,
+                mode='lines',
+                name='Gas Boundary (Chamber)',
+                line=dict(color='orange', width=3),
+                fill='tozeroy',
+                fillcolor='rgba(255, 165, 0, 0.2)',
+            ))
+            fig_contour.add_trace(go.Scatter(
+                x=positions,
+                y=-D_gas,
+                mode='lines',
+                name='Gas Boundary (Lower)',
+                line=dict(color='orange', width=3),
+                fill='tozeroy',
+                fillcolor='rgba(255, 165, 0, 0.2)',
+                showlegend=False,
+            ))
+            
+            # Ablative layer
+            if geometry["ablative_thickness"][0] > 0:
+                D_ablative = np.array(geometry["D_ablative_outer"]) / 2.0
+                fig_contour.add_trace(go.Scatter(
+                    x=positions,
+                    y=D_ablative,
+                    mode='lines',
+                    name='Phenolic Ablator',
+                    line=dict(color='brown', width=2, dash='dash'),
+                    fill='tonexty',
+                    fillcolor='rgba(139, 69, 19, 0.3)',
+                ))
+                fig_contour.add_trace(go.Scatter(
+                    x=positions,
+                    y=-D_ablative,
+                    mode='lines',
+                    name='Phenolic Ablator (Lower)',
+                    line=dict(color='brown', width=2, dash='dash'),
+                    fill='tonexty',
+                    fillcolor='rgba(139, 69, 19, 0.3)',
+                    showlegend=False,
+                ))
+            
+            # Stainless steel case (chamber)
+            if geometry["stainless_thickness"] > 0:
+                D_stainless = np.array(geometry["D_stainless_outer"]) / 2.0
+                fig_contour.add_trace(go.Scatter(
+                    x=positions,
+                    y=D_stainless,
+                    mode='lines',
+                    name='Stainless Steel Case',
+                    line=dict(color='gray', width=2, dash='dot'),
+                    fill='tonexty',
+                    fillcolor='rgba(128, 128, 128, 0.2)',
+                ))
+                fig_contour.add_trace(go.Scatter(
+                    x=positions,
+                    y=-D_stainless,
+                    mode='lines',
+                    name='Stainless Steel (Lower)',
+                    line=dict(color='gray', width=2, dash='dot'),
+                    fill='tonexty',
+                    fillcolor='rgba(128, 128, 128, 0.2)',
+                    showlegend=False,
+                ))
+            
+            # Throat region with graphite
+            throat_pos = positions[-1]
+            D_throat = geometry["D_throat_current"] / 2.0
+            D_graphite = geometry["D_graphite_outer"] / 2.0
+            D_stainless_throat = geometry["D_stainless_throat_outer"] / 2.0
+            
+            # Draw throat region
+            if geometry["graphite_thickness"] > 0:
+                # Graphite insert (circular cross-section at throat)
+                theta = np.linspace(0, 2*np.pi, 100)
+                fig_contour.add_trace(go.Scatter(
+                    x=[throat_pos] * len(theta),
+                    y=D_graphite * np.cos(theta),
+                    mode='lines',
+                    name='Graphite Insert',
+                    line=dict(color='black', width=2),
+                ))
+                # Throat (gas boundary at throat)
+                fig_contour.add_trace(go.Scatter(
+                    x=[throat_pos] * len(theta),
+                    y=D_throat * np.cos(theta),
+                    mode='lines',
+                    name='Throat',
+                    line=dict(color='red', width=3),
+                ))
+                # Stainless steel at throat
+                if geometry["stainless_thickness"] > 0:
+                    fig_contour.add_trace(go.Scatter(
+                        x=[throat_pos] * len(theta),
+                        y=D_stainless_throat * np.cos(theta),
+                        mode='lines',
+                        name='Stainless Steel (Throat)',
+                        line=dict(color='gray', width=2, dash='dot'),
+                    ))
+            
+            # Add centerline
+            x_min, x_max = positions[0], positions[-1]
+            fig_contour.add_trace(go.Scatter(
+                x=[x_min, x_max],
+                y=[0, 0],
+                mode='lines',
+                name='Centerline',
+                line=dict(color='gray', width=1, dash='dash'),
+                showlegend=False
+            ))
+            
+            fig_contour.update_layout(
+                title="Complete Chamber Cross-Section (Chamber + Ablative + Graphite + Stainless Steel)",
+                xaxis_title="Axial Position [m]",
+                yaxis_title="Radius [m]",
+                height=600,
+                showlegend=True,
+                yaxis=dict(scaleanchor="x", scaleratio=1),  # Equal aspect ratio
+            )
+            st.plotly_chart(fig_contour, use_container_width=True)
+            
+        except Exception as e:
+            st.warning(f"Could not generate enhanced multi-layer visualization: {e}")
+            # Fall back to simple contour
+            fig_contour = go.Figure()
+            fig_contour.add_trace(go.Scatter(
+                x=pts[:, 0],
+                y=pts[:, 1],
+                mode='lines',
+                name='Chamber Contour',
+                line=dict(color='red', width=2)
+            ))
+            fig_contour.add_trace(go.Scatter(
+                x=pts[:, 0],
+                y=-pts[:, 1],
+                mode='lines',
+                name='Lower Contour',
+                line=dict(color='red', width=2),
+                showlegend=False
+            ))
+            x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+            fig_contour.add_trace(go.Scatter(
+                x=[x_min, x_max],
+                y=[0, 0],
+                mode='lines',
+                name='Centerline',
+                line=dict(color='gray', width=1, dash='dash'),
+                showlegend=False
+            ))
+            fig_contour.update_layout(
+                title="Chamber Contour (Half-Section)",
+                xaxis_title="Axial Position [m]",
+                yaxis_title="Radius [m]",
+                height=500,
+                showlegend=True
+            )
+            st.plotly_chart(fig_contour, use_container_width=True)
+    else:
+        # Simple contour plot (fallback)
+        fig_contour = go.Figure()
+        fig_contour.add_trace(go.Scatter(
+            x=pts[:, 0],
+            y=pts[:, 1],
+            mode='lines',
+            name='Chamber Contour',
+            line=dict(color='red', width=2)
+        ))
+        fig_contour.add_trace(go.Scatter(
+            x=pts[:, 0],
+            y=-pts[:, 1],
+            mode='lines',
+            name='Lower Contour',
+            line=dict(color='red', width=2),
+            showlegend=False
+        ))
+        x_min, x_max = pts[:, 0].min(), pts[:, 0].max()
+        fig_contour.add_trace(go.Scatter(
+            x=[x_min, x_max],
+            y=[0, 0],
+            mode='lines',
+            name='Centerline',
+            line=dict(color='gray', width=1, dash='dash'),
+            showlegend=False
+        ))
+        fig_contour.update_layout(
+            title="Chamber Contour (Half-Section)",
+            xaxis_title="Axial Position [m]",
+            yaxis_title="Radius [m]",
+            height=500,
+            showlegend=True
+        )
+        st.plotly_chart(fig_contour, use_container_width=True)
     
     # Display geometry parameters table
     st.subheader("Chamber Geometry Parameters")
