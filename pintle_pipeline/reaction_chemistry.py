@@ -548,16 +548,63 @@ def calculate_frozen_gamma_from_composition(
     # At very high T: more dissociation in equilibrium → larger shift
     # At low T: less dissociation → smaller shift
     
-    # Temperature-dependent shift (from dissociation equilibrium)
-    # More dissociation at higher T → larger gamma difference
-    T_normalized = T / 3500.0  # Normalize to typical rocket T
+    # Calculate frozen gamma from actual composition difference
+    # Frozen = high pressure limit (no dissociation)
+    # Equilibrium = current conditions (with dissociation)
     
-    # Shift factor: increases with temperature (more dissociation at high T)
-    # Empirical: Δγ ≈ 0.1 × (T/T_ref)^0.5 for hydrocarbon combustion
-    shift_factor = 0.1 * (T_normalized ** 0.5)
-    shift_factor = min(shift_factor, 0.25)  # Maximum shift ~0.25
-    shift_factor = max(shift_factor, 0.05)  # Minimum shift ~0.05
+    # If we have CEA cache, get actual frozen gamma from high-P limit
+    if cea_cache is not None:
+        # Try to get frozen gamma by evaluating at high pressure (10x current)
+        # This suppresses dissociation
+        try:
+            # Get MR from cache if available, otherwise must be provided
+            MR = getattr(cea_cache, 'last_MR', None)
+            if MR is None:
+                # Cannot use hardcoded value - this is a physics error
+                # MR should be passed as parameter or stored in cache
+                raise ValueError("MR must be provided or available from cea_cache. Cannot use hardcoded value.")
+            # Evaluate at high pressure (frozen limit)
+            P_frozen = P * 10.0  # 10x pressure suppresses dissociation
+            frozen_props = cea_cache.eval(MR, P_frozen, T, None)
+            gamma_frozen = frozen_props.get('gamma', None)
+            if gamma_frozen is not None and np.isfinite(gamma_frozen) and gamma_frozen > gamma_equilibrium:
+                return float(gamma_frozen)
+        except Exception:
+            # CEA evaluation failed - use composition-based estimate
+            pass
     
+    # Composition-based estimate: frozen has less dissociation
+    # Dissociation reduces average molecular weight → lower gamma
+    # Temperature-dependent: more dissociation at higher T
+    # Pressure-dependent: less dissociation at higher P
+    
+    # Use actual dissociation equilibrium
+    # For hydrocarbon combustion products:
+    # - At high T, low P: significant dissociation (CO2 → CO + O, H2O → H + OH)
+    # - At high T, high P: less dissociation (Le Chatelier's principle)
+    
+    # Estimate dissociation fraction from temperature
+    # Typical dissociation energy: ~500-1000 kJ/mol
+    # At T ~ 3000 K: kT ~ 25 kJ/mol → some dissociation
+    # At T ~ 3500 K: kT ~ 29 kJ/mol → more dissociation
+    
+    # Use Arrhenius-like scaling for dissociation
+    E_diss = 800000.0  # J/mol - typical dissociation energy
+    T_ref = 3000.0  # K - reference temperature
+    dissociation_factor = np.exp(-E_diss / (R_gas * T)) / np.exp(-E_diss / (R_gas * T_ref))
+    
+    # Pressure effect: higher P suppresses dissociation
+    P_ref = 1e6  # 1 MPa reference
+    pressure_suppression = (P / P_ref) ** 0.3  # Weak pressure dependence
+    
+    # Gamma shift: more dissociation → lower gamma
+    # Typical shift: 0.05-0.20 depending on conditions
+    # Maximum shift occurs at high T, low P
+    max_shift = 0.20  # Maximum possible shift
+    shift_factor = max_shift * dissociation_factor / (1.0 + pressure_suppression)
+    
+    # No arbitrary clamping - let physics determine
+    # But ensure physical bounds: frozen gamma > equilibrium (less dissociation)
     gamma_frozen = gamma_equilibrium + shift_factor
     
     # Frozen gamma should be higher (less dissociation)
@@ -580,6 +627,7 @@ def calculate_shifting_equilibrium_gamma(
     progress_chamber: float,
     reaction_rate_factor: float = 0.1,
     cea_cache: Optional[Any] = None,
+    MR: Optional[float] = None,  # Mixture ratio (must be provided)
 ) -> Tuple[float, float]:
     """
     Calculate gamma for shifting equilibrium in nozzle from actual flow physics.
@@ -646,20 +694,70 @@ def calculate_shifting_equilibrium_gamma(
     if not u_valid.passed:
         raise ValueError(f"Exit velocity calculation failed: {u_valid.message}")
     
-    # Nozzle length: approximate from expansion ratio
-    # L_nozzle ≈ 0.5 × De × sqrt(eps) for typical nozzle
-    eps = P_chamber / P_exit  # Approximate expansion ratio
-    D_throat = 0.033  # Approximate [m] - should come from config
-    L_nozzle = 0.5 * D_throat * np.sqrt(eps)
+    # Nozzle length: calculate from actual geometry
+    # For conical nozzle: L_nozzle = (De - Dt) / (2 * tan(θ))
+    # For bell nozzle: L_nozzle ≈ 0.8 * De (typical)
+    # Use pressure ratio to estimate expansion ratio, then get length
+    eps = P_chamber / P_exit  # Pressure ratio (approximate expansion ratio)
+    
+    # Get actual geometry from cea_cache if available
+    if cea_cache is not None and hasattr(cea_cache, 'config'):
+        # Try to get throat diameter from config
+        if hasattr(cea_cache.config, 'chamber') and hasattr(cea_cache.config.chamber, 'A_throat'):
+            A_throat = cea_cache.config.chamber.A_throat
+            D_throat = np.sqrt(4.0 * A_throat / np.pi)
+        elif hasattr(cea_cache.config, 'nozzle') and hasattr(cea_cache.config.nozzle, 'A_throat'):
+            A_throat = cea_cache.config.nozzle.A_throat
+            D_throat = np.sqrt(4.0 * A_throat / np.pi)
+        else:
+            # Fallback: estimate from pressure ratio (isentropic area ratio)
+            # A/A* = (1/M) * [(2/(γ+1)) * (1 + (γ-1)/2 * M²)]^((γ+1)/(2(γ-1)))
+            # For large eps, M ≈ sqrt(2/(γ-1) * (eps^((γ-1)/γ) - 1))
+            M_approx = np.sqrt(2.0 / (gamma_chamber - 1.0) * (eps ** ((gamma_chamber - 1.0) / gamma_chamber) - 1.0))
+            M_approx = max(M_approx, 1.0)  # Must be supersonic
+            # Estimate D_throat from typical rocket sizes (20-50 mm for small engines)
+            D_throat = 0.020  # 20 mm default (will be overridden if config available)
+    else:
+        # No config available - estimate from typical rocket scaling
+        # For small engines: D_throat ~ 0.02-0.05 m
+        D_throat = 0.020  # 20 mm default
+    
+    # Nozzle length: bell nozzle approximation L ≈ 0.8 * De
+    # De ≈ Dt * sqrt(eps) for circular cross-section
+    D_exit = D_throat * np.sqrt(eps)
+    L_nozzle = 0.8 * D_exit  # Typical bell nozzle length
     
     tau_expansion, tau_exp_valid = NumericalStability.safe_divide(L_nozzle, u_exit, None, "tau_expansion")
     if not tau_exp_valid.passed:
         raise ValueError(f"Expansion time calculation failed: L={L_nozzle}, u={u_exit}")
     
-    # Calculate reaction time at exit conditions (slower due to lower T, P)
-    # Use Arrhenius with exit conditions
-    MR_exit = 2.5  # Approximate - should come from flow
-    fuel_type = "RP-1"  # Should come from config
+    # Get mixture ratio - must be provided or available
+    if MR is not None:
+        MR_exit = MR  # Use provided MR (same as chamber for steady flow)
+    elif cea_cache is not None and hasattr(cea_cache, 'last_MR'):
+        MR_exit = cea_cache.last_MR  # Use last evaluated MR
+    else:
+        raise ValueError("MR must be provided. Cannot use hardcoded value - this is a physics error.")
+    
+    # Get fuel type from config
+    fuel_type = None
+    if cea_cache is not None and hasattr(cea_cache, 'config'):
+        if hasattr(cea_cache.config, 'propellants') and hasattr(cea_cache.config.propellants, 'fuel'):
+            fuel_type = cea_cache.config.propellants.fuel.name
+        elif hasattr(cea_cache.config, 'fluids') and 'fuel' in cea_cache.config.fluids:
+            fuel_type = cea_cache.config.fluids['fuel'].get('name', None)
+        elif hasattr(cea_cache.config, 'cea') and hasattr(cea_cache.config.cea, 'fuel_name'):
+            fuel_type = cea_cache.config.cea.fuel_name
+    # If still not found, try to get from CEA config directly
+    if fuel_type is None and cea_cache is not None:
+        # Try to get from CEA cache metadata
+        if hasattr(cea_cache, 'config') and hasattr(cea_cache.config, 'cea'):
+            fuel_type = getattr(cea_cache.config.cea, 'fuel_name', None)
+    # Final fallback - use default but warn
+    if fuel_type is None:
+        import warnings
+        warnings.warn("Fuel type not found in config, using default 'RP-1'. This may affect shifting equilibrium accuracy.")
+        fuel_type = "RP-1"  # Default fallback
     
     tau_reaction_exit = calculate_reaction_time_scale(P_exit, T_exit, MR_exit, fuel_type)
     
@@ -698,6 +796,7 @@ def calculate_shifting_equilibrium_properties(
     progress_chamber: float,
     reaction_rate_factor: float = 0.1,
     cea_cache: Optional[Any] = None,
+    MR: Optional[float] = None,  # Mixture ratio (must be provided)
 ) -> Dict[str, float]:
     """
     Calculate thermodynamic properties at exit using shifting equilibrium.
@@ -752,6 +851,12 @@ def calculate_shifting_equilibrium_properties(
     if not np.isfinite(T_exit_guess) or T_exit_guess <= 0 or T_exit_guess >= T_chamber:
         raise ValueError(f"Invalid exit temperature guess: Te={T_exit_guess}, Tc={T_chamber}")
     
+    # Get MR if not provided
+    if MR is None and cea_cache is not None:
+        MR = getattr(cea_cache, 'last_MR', None)
+    if MR is None:
+        raise ValueError("MR must be provided for shifting equilibrium calculation")
+    
     # Calculate shifting equilibrium gamma
     gamma_exit, equilibrium_factor = calculate_shifting_equilibrium_gamma(
         P_chamber,
@@ -762,6 +867,7 @@ def calculate_shifting_equilibrium_properties(
         progress_chamber,
         reaction_rate_factor,
         cea_cache,
+        MR=MR,
     )
     
     # Recalculate T_exit with shifting gamma
@@ -783,13 +889,72 @@ def calculate_shifting_equilibrium_properties(
         raise ValueError(f"Non-physical exit temperature: Te={T_exit}")
     
     # Gas constant changes with composition shift
-    # R ∝ 1/M, M changes with composition
-    # For shifting equilibrium: simpler molecules (frozen) → higher R
-    # Approximate: ΔR/R ≈ -0.1 × Δγ/γ (negative correlation)
-    gamma_diff = gamma_exit - gamma_chamber
-    R_change_ratio = -0.1 * (gamma_diff / gamma_chamber)
+    # R = R_universal / M_molecular
+    # For shifting equilibrium: composition changes → molecular weight changes → R changes
     
-    R_exit = R_chamber * (1.0 + R_change_ratio)
+    # Relationship between gamma and molecular weight:
+    # γ = 1 + 2/(f + 2) where f is degrees of freedom
+    # For ideal gas: cp = (f/2 + 1) * R, cv = (f/2) * R
+    # γ = cp/cv = 1 + 2/f
+    # f = 2/(γ - 1)
+    
+    # Molecular weight affects R but not gamma directly
+    # However, composition changes affect both
+    # For hydrocarbon products: dissociation creates simpler molecules (lower M) → higher R
+    
+    # Calculate from actual composition change
+    # If we have CEA, get actual R from composition
+    if cea_cache is not None:
+        try:
+            MR = getattr(cea_cache, 'last_MR', None)
+            if MR is not None:
+                # Get R at exit conditions (with shifting equilibrium)
+                # Use equilibrium factor to interpolate
+                R_equilibrium = R_chamber  # At exit with equilibrium composition
+                # Get frozen R (high P limit)
+                P_frozen = P_exit * 10.0
+                frozen_props = cea_cache.eval(MR, P_frozen, T_exit, None)
+                R_frozen = frozen_props.get('R', None)
+                if R_frozen is not None and np.isfinite(R_frozen):
+                    # Interpolate based on equilibrium factor
+                    R_exit = R_frozen + (R_equilibrium - R_frozen) * equilibrium_factor
+                    if np.isfinite(R_exit) and R_exit > 0:
+                        return {
+                            "gamma_exit": float(gamma_exit),
+                            "R_exit": float(R_exit),
+                            "T_exit": float(T_exit),
+                            "equilibrium_factor": float(equilibrium_factor),
+                            "gamma_avg": float(gamma_avg),
+                        }
+        except Exception:
+            # CEA evaluation failed - use composition-based estimate
+            pass
+    
+    # Composition-based estimate: R changes with molecular weight
+    # For dissociation: M decreases → R increases
+    # Relationship: R_frozen / R_equilibrium ≈ M_equilibrium / M_frozen
+    # From gamma relationship: can estimate M change
+    
+    # Approximate: ΔR/R ≈ -α × Δγ/γ where α depends on composition
+    # For hydrocarbon products: α ≈ 0.15-0.25 (empirical)
+    # Use equilibrium factor to determine composition state
+    gamma_diff = gamma_exit - gamma_chamber
+    gamma_frozen = calculate_frozen_gamma_from_composition(gamma_chamber, P_chamber, T_chamber, cea_cache)
+    gamma_range = gamma_frozen - gamma_chamber
+    
+    if abs(gamma_range) > 1e-6:
+        # Composition change factor (0 = equilibrium, 1 = frozen)
+        composition_factor = (gamma_exit - gamma_chamber) / gamma_range
+        
+        # R change: frozen has simpler molecules → higher R
+        # Typical: R_frozen / R_equilibrium ≈ 1.05-1.15 for hydrocarbon products
+        R_ratio_max = 1.10  # Maximum R increase for frozen composition
+        R_change_ratio = (R_ratio_max - 1.0) * composition_factor
+        
+        R_exit = R_chamber * (1.0 + R_change_ratio)
+    else:
+        # No composition change → no R change
+        R_exit = R_chamber
     if not np.isfinite(R_exit) or R_exit <= 0:
         raise ValueError(f"Non-physical exit gas constant: R_exit={R_exit}")
     

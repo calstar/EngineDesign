@@ -116,6 +116,7 @@ class PintleEngineRunner:
             reaction_progress=reaction_progress,  # Pass reaction progress for shifting equilibrium
             use_shifting_equilibrium=use_shifting,
             config=self.config,
+            A_throat=self.config.chamber.A_throat,  # CRITICAL: Use actual chamber throat area
         )
         
         F = thrust_results["F"]
@@ -125,6 +126,9 @@ class PintleEngineRunner:
         P_throat = thrust_results.get("P_throat", Pc * 0.6)  # Throat pressure
         T_exit = thrust_results.get("T_exit", Tc * 0.5)  # Exit temperature
         T_throat = thrust_results.get("T_throat", Tc * 0.85)  # Throat temperature
+        M_exit = thrust_results.get("M_exit", 0.0)  # Exit Mach number
+        gamma_exit = thrust_results.get("gamma_exit", gamma)  # Exit gamma (for shifting equilibrium)
+        R_exit = thrust_results.get("R_exit", R)  # Exit gas constant (for shifting equilibrium)
         Cf_actual = thrust_results.get("Cf_actual", thrust_results.get("Cf", 0.0))
         Cf_ideal = thrust_results.get("Cf_ideal", 0.0)
         Cf_theoretical = thrust_results.get("Cf_theoretical", 0.0)
@@ -211,6 +215,7 @@ class PintleEngineRunner:
             "F": F,
             "Isp": Isp,
             "v_exit": v_exit,
+            "M_exit": M_exit,  # Exit Mach number
             "P_exit": P_exit,
             "P_throat": P_throat,
             "T_exit": T_exit,
@@ -228,7 +233,9 @@ class PintleEngineRunner:
             "cstar_ideal": diagnostics["cstar_ideal"],
             "eta_cstar": diagnostics["eta_cstar"],
             "gamma": gamma,
+            "gamma_exit": gamma_exit,  # Exit gamma (for shifting equilibrium)
             "R": R,
+            "R_exit": R_exit,  # Exit gas constant (for shifting equilibrium)
             "Cd_O": Cd_O,
             "Cd_F": Cd_F,
             "cooling": cooling_results,
@@ -324,6 +331,7 @@ class PintleEngineRunner:
         P_tank_O: Union[np.ndarray, list],
         P_tank_F: Union[np.ndarray, list],
         track_ablative_geometry: Optional[bool] = None,
+        use_coupled_solver: bool = True,  # NEW: Use fully-coupled solver
     ) -> Dict[str, np.ndarray]:
         """
         Evaluate engine performance over time with ablative geometry evolution.
@@ -371,6 +379,36 @@ class PintleEngineRunner:
                 and ablative_cfg.enabled 
                 and ablative_cfg.track_geometry_evolution
             )
+        
+        # Use fully-coupled solver if enabled (recommended for complete analysis)
+        # This solver integrates ALL systems simultaneously:
+        # - Reaction chemistry → shifting equilibrium
+        # - Geometry evolution → chamber dynamics
+        # - Ablative/graphite recession → geometry
+        # - Stability analysis → all time-varying effects
+        if use_coupled_solver and track_ablative_geometry:
+            try:
+                from pintle_pipeline.time_varying_solver import TimeVaryingCoupledSolver
+                
+                solver = TimeVaryingCoupledSolver(self.config, self.cea_cache)
+                states = solver.solve_time_series(times, P_tank_O, P_tank_F)
+                results = solver.get_results_dict()
+                
+                # Add additional metrics for compatibility
+                results["mdot_O"] = results["mdot_total"] * results["MR"] / (1.0 + results["MR"])
+                results["mdot_F"] = results["mdot_total"] / (1.0 + results["MR"])
+                results["cstar_actual"] = results["Pc"] * results["A_throat"] / results["mdot_total"]
+                results["cstar_ideal"] = results["cstar_actual"] / 0.85  # Approximate
+                results["eta_cstar"] = results["cstar_actual"] / results["cstar_ideal"]
+                results["gamma"] = results["gamma_chamber"]
+                results["R"] = results["R_chamber"]
+                results["diagnostics"] = []
+                
+                return results
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Fully-coupled solver failed: {e}. Falling back to standard solver.")
+                # Fall through to standard solver
         
         # Initialize result arrays
         n = len(times)

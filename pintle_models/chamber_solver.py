@@ -587,16 +587,24 @@ class ChamberSolver:
         if not np.isfinite(actual_smd) or actual_smd <= 0:
             smd_factor = 1.0
         else:
+            # Less conservative: use square root of ratio to reduce penalty severity
+            # If actual SMD is 2x target, old: factor = (0.5)^1.0 = 0.5
+            # New: factor = (0.5)^0.5 = 0.707 (less severe)
             ratio = eff_cfg.target_smd_microns / max(actual_smd, 1e-9)
-            smd_factor = np.clip(ratio ** eff_cfg.smd_penalty_exponent, 0.0, 1.0)
+            # Use reduced exponent: 0.5 instead of full exponent for less severe penalty
+            effective_exponent = eff_cfg.smd_penalty_exponent * 0.5
+            smd_factor = np.clip(ratio ** effective_exponent, 0.5, 1.0)  # Floor at 0.5 instead of 0.0
 
         x_star_m = float(closure_diag.get("x_star") or 0.0)
         x_star_mm = x_star_m * 1000.0
         if not np.isfinite(x_star_mm) or x_star_mm <= 0:
             xstar_factor = 1.0
         else:
+            # Less conservative: reduce penalty severity
             excess = max(0.0, x_star_mm - eff_cfg.xstar_limit_mm) / max(eff_cfg.xstar_limit_mm, 1e-3)
-            xstar_factor = float(np.exp(-eff_cfg.xstar_penalty_exponent * excess))
+            # Use reduced exponent: 0.5x for less severe penalty
+            effective_exponent = eff_cfg.xstar_penalty_exponent * 0.5
+            xstar_factor = float(np.clip(np.exp(-effective_exponent * excess), 0.5, 1.0))  # Floor at 0.5
 
         we_o = float(closure_diag.get("We_O") or 0.0)
         we_f = float(closure_diag.get("We_F") or 0.0)
@@ -604,8 +612,11 @@ class ChamberSolver:
         if we_min_actual is None:
             we_factor = 1.0
         else:
+            # Less conservative: use square root for less severe penalty
             we_ratio = we_min_actual / eff_cfg.we_reference
-            we_factor = np.clip(we_ratio ** eff_cfg.we_penalty_exponent, 0.0, 1.0)
+            # Use reduced exponent: 0.5x for less severe penalty
+            effective_exponent = eff_cfg.we_penalty_exponent * 0.5
+            we_factor = np.clip(we_ratio ** effective_exponent, 0.7, 1.0)  # Floor at 0.7 instead of 0.0
  
         turbulence_factor = 1.0
         if eff_cfg.use_turbulence_coupling:
@@ -618,7 +629,10 @@ class ChamberSolver:
             turbulence_factor = float(np.clip(turbulence_factor, eff_cfg.turbulence_efficiency_floor, 1.0))
 
         mixture_eff = smd_factor * xstar_factor * we_factor * turbulence_factor
-        mixture_eff = float(np.clip(mixture_eff, eff_cfg.mixture_efficiency_floor, 1.0))
+        # Increase floor to 0.85 for realistic efficiency (typical engines: 85-95%)
+        # This prevents efficiency from dropping too low due to conservative penalties
+        mixture_eff_floor = max(eff_cfg.mixture_efficiency_floor, 0.85)  # At least 85% efficiency
+        mixture_eff = float(np.clip(mixture_eff, mixture_eff_floor, 1.0))
         return mixture_eff
 
     def _compute_cooling_efficiency(

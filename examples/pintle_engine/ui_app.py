@@ -971,9 +971,18 @@ def compute_timeseries_dataframe(
         and len(times) >= 2
     )
     
+    # Check if fully-coupled solver should be used
+    use_coupled_solver = st.session_state.get("use_coupled_solver", True) if hasattr(st, 'session_state') else True
+    
     if use_time_varying:
         # Use time-varying method for ablative geometry evolution
-        results = runner.evaluate_arrays_with_time(times, P_tank_O_pa, P_tank_F_pa)
+        # NEW: Use fully-coupled solver by default (integrates all systems)
+        results = runner.evaluate_arrays_with_time(
+            times, 
+            P_tank_O_pa, 
+            P_tank_F_pa,
+            use_coupled_solver=use_coupled_solver,  # Fully-coupled solver
+        )
     else:
         # Use standard method
         results = runner.evaluate_arrays(P_tank_O_pa, P_tank_F_pa)
@@ -1192,8 +1201,22 @@ def compute_timeseries_dataframe(
         df_dict["Throat Area (mm²)"] = np.asarray(results["A_throat"], dtype=float) * 1e6
         df_dict["Cumulative Chamber Recession (µm)"] = np.asarray(results["recession_chamber"], dtype=float) * 1e6
         df_dict["Cumulative Throat Recession (µm)"] = np.asarray(results["recession_throat"], dtype=float) * 1e6
+        if "recession_graphite" in results:
+            df_dict["Cumulative Graphite Recession (µm)"] = np.asarray(results["recession_graphite"], dtype=float) * 1e6
+        if "graphite_thickness_remaining" in results:
+            df_dict["Graphite Thickness Remaining (mm)"] = np.asarray(results["graphite_thickness_remaining"], dtype=float) * 1000.0
         if "throat_recession_multiplier" in results:
             df_dict["Throat Recession Multiplier"] = np.asarray(results["throat_recession_multiplier"], dtype=float)
+        
+        # Add multi-layer thermal analysis metrics
+        if "T_ablative_surface" in results:
+            df_dict["Ablative Surface Temp (K)"] = np.asarray(results["T_ablative_surface"], dtype=float)
+        if "T_stainless_chamber" in results:
+            df_dict["Stainless Steel Temp - Chamber (K)"] = np.asarray(results["T_stainless_chamber"], dtype=float)
+        if "T_graphite_surface" in results:
+            df_dict["Graphite Surface Temp (K)"] = np.asarray(results["T_graphite_surface"], dtype=float)
+        if "T_stainless_throat" in results:
+            df_dict["Stainless Steel Temp - Throat (K)"] = np.asarray(results["T_stainless_throat"], dtype=float)
     
     # Extract stability metrics from diagnostics (if stored per point)
     # Note: For full time-series stability analysis, this would need to call comprehensive_stability_analysis
