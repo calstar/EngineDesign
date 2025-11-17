@@ -112,6 +112,7 @@ def calculate_thrust(
     reaction_progress: Optional[Dict] = None,
     use_shifting_equilibrium: bool = True,
     config: Optional[Any] = None,
+    A_throat: Optional[float] = None,  # CRITICAL: Use actual chamber throat area, not nozzle_config.A_throat
 ) -> dict:
     """
     Calculate engine thrust with high fidelity.
@@ -194,9 +195,29 @@ def calculate_thrust(
     eps_val = float(eps)
     Pc_val = float(Pc)
     
+    # CRITICAL: Use actual chamber throat area if provided, otherwise fall back to nozzle_config
+    # This ensures we use the correct A_throat (from chamber config, which may differ from nozzle config)
+    A_throat_actual = A_throat if A_throat is not None else nozzle_config.A_throat
+    
     gamma_check = PhysicalConstraints.validate_gamma(gamma_val)
     if not gamma_check.passed and gamma_check.severity == "error":
         raise ValueError(f"Invalid gamma: {gamma_check.message}")
+    
+    # Initialize M_exit early to ensure it's always defined
+    # CRITICAL: Must initialize to a valid supersonic value, not 0.0
+    M_exit = 2.0  # Default supersonic value
+    M_exit_calculated = False  # Track if M_exit was successfully calculated
+    
+    # CRITICAL: Ensure M_exit is always calculated - if conditions are invalid, use fallback
+    if not (gamma_val > 1.0 and eps_val > 1.0):
+        import warnings
+        warnings.warn(f"Invalid nozzle conditions: gamma={gamma_val:.4f}, eps={eps_val:.4f}. Using fallback M_exit=2.0")
+        M_exit = 2.0
+        M_exit_calculated = True
+    
+    P_exit = Pa  # Initialize to ambient
+    T_exit = Tc  # Initialize to chamber temp
+    v_exit = 0.0  # Initialize
     
     if gamma_val > 1 and eps_val > 1:
         # Solve for exit Mach number from area ratio (supersonic solution)
@@ -226,8 +247,10 @@ def calculate_thrust(
             warnings.warn(f"Invalid expansion ratio: eps={eps_val:.4f} (should be > 1). Using M=2.0 as fallback.")
             M_exit = 2.0
         else:
-            M_exit = max(M_exit, 1.1)  # Ensure clearly supersonic (M > 1.1)
-            M_exit = min(M_exit, 10.0)  # Cap at M=10
+            # Physics requirement: must be supersonic (M > 1.0)
+            # No arbitrary upper cap - let physics determine M from area ratio
+            if M_exit <= 1.0:
+                M_exit = 1.0 + 1e-6  # Just above sonic
         
         # Enhanced Newton-Raphson with convergence safeguards
         tolerance = 1e-10  # Stricter tolerance
@@ -274,15 +297,32 @@ def calculate_thrust(
                 warnings.warn(f"Mach number solver converged to subsonic M={M_exit:.3f} (eps={eps_val:.2f}). Resetting to supersonic guess.")
                 # Reset to supersonic guess
                 M_exit = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_val + 1.0))
-                M_exit = max(M_exit, 1.1)
+                # Physics requirement: must be supersonic
+                if M_exit <= 1.0:
+                    M_exit = 1.0 + 1e-6
             
-            M_exit = max(M_exit, 1.01)  # Ensure supersonic
-            M_exit = min(M_exit, 10.0)  # Cap at M=10
+            # Physics requirement: must be supersonic (M > 1.0)
+            # No arbitrary upper cap - let physics determine M
+            if M_exit <= 1.0:
+                M_exit = 1.0 + 1e-6  # Just above sonic
+        
+        # Mark as calculated
+        M_exit_calculated = True
         
         # Validate convergence
         if abs(error) > tolerance * 10:  # Allow 10x tolerance for warning
             import warnings
-            warnings.warn(f"Mach number solver did not fully converge: |error| = {abs(error):.2e} after {max_iterations} iterations")
+            warnings.warn(f"Mach number solver did not fully converge: |error| = {abs(error):.2e} after {max_iterations} iterations. Final M_exit={M_exit:.4f}, eps={eps_val:.4f}")
+        
+        # CRITICAL: Ensure M_exit is always valid and supersonic
+        if M_exit <= 0.0 or M_exit < 1.0:
+            import warnings
+            warnings.warn(f"[ERROR] M_exit calculation completed but M_exit={M_exit:.6f} (should be > 1.0). eps_val={eps_val:.6f}, gamma_val={gamma_val:.6f}. Forcing to 2.0")
+            M_exit = 2.0  # Fallback to reasonable supersonic value
+        # Ensure M_exit is supersonic
+        # Physics requirement: must be supersonic
+        if M_exit <= 1.0:
+            M_exit = 1.0 + 1e-6
         
         # Use isentropic relation for exit pressure
         # P_exit/Pc = [1 + (gamma-1)/2 × M_exit²]^(-gamma/(gamma-1))
@@ -299,18 +339,32 @@ def calculate_thrust(
         # Calculate exit velocity from Mach number (consistent with T_exit and P_exit)
         # v_exit = M_exit × sqrt(gamma × R × T_exit)
         # This is the CORRECT relation for isentropic flow
+        # CRITICAL: Use chamber gamma and R for initial calculation, then update if shifting equilibrium
         sound_speed_exit_squared = gamma_val * R * T_exit
         sound_speed_exit, sound_valid = NumericalStability.safe_sqrt(sound_speed_exit_squared, "sound_speed_exit")
-        if sound_valid.passed and np.isfinite(sound_speed_exit) and sound_speed_exit > 0:
+        if sound_valid.passed and np.isfinite(sound_speed_exit) and sound_speed_exit > 0 and M_exit > 0:
             v_exit = M_exit * sound_speed_exit
         else:
-            # Fallback to energy equation if sound speed calculation fails
-            cp = gamma_val * R / max(gamma_val - 1.0, 0.01)
-            delta_T = Tc - T_exit
-            if delta_T > 0 and cp > 0:
-                v_exit_squared = 2.0 * cp * delta_T
-                v_exit, v_valid = NumericalStability.safe_sqrt(v_exit_squared, "v_exit")
-                if not v_valid.passed:
+            # If sound speed calculation fails, we have invalid conditions
+            # DO NOT use energy equation - it's incorrect for isentropic flow
+            # Recalculate M_exit and try again
+            import warnings
+            warnings.warn(f"[WARNING] Cannot calculate v_exit from M_exit in initial calculation. Recalculating M_exit.")
+            if eps_val > 1.0 and gamma_val > 1.0:
+                if eps_val > 10.0:
+                    prefactor = ((gamma_val + 1.0) / 2.0) ** ((gamma_val + 1.0) / (2.0 * (gamma_val - 1.0)))
+                    M_exit = prefactor / (eps_val ** (1.0 / (gamma_val - 1.0)))
+                else:
+                    M_exit = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_val + 1.0))
+                # Physics requirement: must be supersonic
+                if M_exit <= 1.0:
+                    M_exit = 1.0 + 1e-6
+                # Try again with recalculated M_exit
+                sound_speed_exit_squared = gamma_val * R * T_exit
+                sound_speed_exit, sound_valid = NumericalStability.safe_sqrt(sound_speed_exit_squared, "sound_speed_exit")
+                if sound_valid.passed and np.isfinite(sound_speed_exit) and sound_speed_exit > 0:
+                    v_exit = M_exit * sound_speed_exit
+                else:
                     v_exit = 0.0
             else:
                 v_exit = 0.0
@@ -319,30 +373,69 @@ def calculate_thrust(
         if not np.isfinite(P_exit) or P_exit < 0:
             P_exit = Pa  # Fallback to ambient
         
-        P_exit = max(P_exit, Pa)  # Can't be less than ambient
+        # Physics: P_exit can be < Pa (overexpanded) or > Pa (underexpanded)
+        # Don't clamp - that's a physics result, not an error
+        # Only ensure it's positive
+        if P_exit < 0:
+            raise ValueError(f"Non-physical exit pressure: P_exit={P_exit} Pa")
         
         # Validate exit temperature
-        # Typical: T_exit/Tc = 0.3-0.7 for well-expanded nozzles
-        T_exit_min = Tc * 0.2  # Minimum reasonable
-        T_exit_max = Tc * 0.95  # Maximum reasonable
-        if not np.isfinite(T_exit) or T_exit < T_exit_min or T_exit > T_exit_max:
-            import warnings
-            warnings.warn(f"Exit temperature {T_exit:.1f} K seems unphysical (Tc={Tc:.1f} K, M_exit={M_exit:.2f}). Recalculating.")
-            # Recalculate with conservative estimate
-            T_exit = Tc * 0.5  # Conservative fallback
-            # Recalculate velocity with corrected temperature
-            sound_speed_exit_squared = gamma_val * R * T_exit
-            sound_speed_exit, sound_valid = NumericalStability.safe_sqrt(sound_speed_exit_squared, "sound_speed_exit")
-            if sound_valid.passed and np.isfinite(sound_speed_exit) and sound_speed_exit > 0:
-                v_exit = M_exit * sound_speed_exit
+        # Physics: T_exit must be positive and less than Tc (isentropic expansion)
+        if not np.isfinite(T_exit) or T_exit <= 0 or T_exit >= Tc:
+            raise ValueError(f"Non-physical exit temperature: T_exit={T_exit} K, Tc={Tc} K, M_exit={M_exit:.4f}. This indicates a calculation error.")
     else:
+        # Invalid conditions - use fallback values
+        import warnings
+        warnings.warn(f"Invalid nozzle conditions: gamma={gamma_val:.4f}, eps={eps_val:.4f}. Using fallback values.")
+        # Calculate reasonable fallback M_exit from eps
+        if eps_val > 1.0 and gamma_val > 1.0:
+            # Use improved initial guess
+            if eps_val > 10.0:
+                prefactor = ((gamma_val + 1.0) / 2.0) ** ((gamma_val + 1.0) / (2.0 * (gamma_val - 1.0)))
+                M_exit = prefactor / (eps_val ** (1.0 / (gamma_val - 1.0)))
+            else:
+                M_exit = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_val + 1.0))
+            # Physics requirement: must be supersonic
+            if M_exit <= 1.0:
+                M_exit = 1.0 + 1e-6
+            M_exit_calculated = True  # Mark as calculated
+            
+            # Quick Newton iteration for accuracy
+            for _ in range(20):
+                term = (2.0 / (gamma_val + 1.0)) * (1.0 + (gamma_val - 1.0) / 2.0 * M_exit**2)
+                exponent = (gamma_val + 1.0) / (2.0 * (gamma_val - 1.0))
+                A_Astar = (1.0 / M_exit) * (term ** exponent)
+                error = A_Astar - eps_val
+                if abs(error) < 1e-8:
+                    break
+                dterm_dM = (gamma_val - 1.0) * M_exit
+                dA_dM = -A_Astar / M_exit + A_Astar * exponent * (dterm_dM / term)
+                if abs(dA_dM) > 1e-12:
+                    step = error / dA_dM
+                    step = np.clip(step, -0.5 * M_exit, 0.5 * M_exit)
+                    M_exit = M_exit - step
+                # Physics requirement: must be supersonic
+                if M_exit <= 1.0:
+                    M_exit = 1.0 + 1e-6
+                # No arbitrary upper cap - let physics determine M
+            M_exit_calculated = True
+        else:
+            M_exit = 2.0  # Default supersonic value
+            M_exit_calculated = True  # Mark as calculated
         P_exit = Pa
-        T_exit = Tc  # No expansion
-        v_exit = 0.0
+        T_exit = Tc * 0.5  # Conservative estimate
+        # Calculate v_exit from M_exit
+        sound_speed_exit_squared = gamma_val * R * T_exit
+        sound_speed_exit, sound_valid = NumericalStability.safe_sqrt(sound_speed_exit_squared, "sound_speed_exit")
+        if sound_valid.passed and np.isfinite(sound_speed_exit) and sound_speed_exit > 0:
+            v_exit = M_exit * sound_speed_exit
+        else:
+            v_exit = 0.0
     
     # Apply shifting equilibrium if enabled
-    # As gas expands, equilibrium composition shifts. Gamma changes
-    # between chamber value (equilibrium) and exit (may be shifted)
+    # PROPER ITERATIVE APPROACH: As gas expands, equilibrium composition shifts.
+    # Gamma and R change between chamber (equilibrium) and exit (shifting).
+    # Must iterate to find self-consistent solution: M_exit, P_exit, T_exit, gamma_exit, R_exit
     gamma_exit = gamma_val
     R_exit = R
     equilibrium_factor = 1.0
@@ -363,23 +456,128 @@ def calculate_thrust(
                 # Could add config parameter for this
                 pass
             
-            # Calculate shifting equilibrium properties
-            shifting_props = calculate_shifting_equilibrium_properties(
-                Pc_val,
-                Tc,
-                gamma_val,
-                R,
-                P_exit,
-                progress_chamber,
-                reaction_rate_factor,
-            )
+            # ITERATIVE SHIFTING EQUILIBRIUM SOLUTION
+            # Physics-based: iterate to find self-consistent M_exit, P_exit, T_exit, gamma_exit, R_exit
+            # NO ARBITRARY CONSTANTS OR CLAMPING - all from physics equations
+            gamma_exit_iter = gamma_val
+            R_exit_iter = R
+            M_exit_iter = M_exit
+            P_exit_iter = P_exit
+            T_exit_iter = T_exit
             
-            gamma_exit = shifting_props["gamma_exit"]
-            R_exit = shifting_props["R_exit"]
-            equilibrium_factor = shifting_props["equilibrium_factor"]
+            # Use MR parameter passed to calculate_thrust (no hardcoded values)
+            # MR is already available as a function parameter - use it directly
+            MR_for_shifting = MR
             
-            # Recalculate T_exit with shifting gamma
-            T_exit_shifting = shifting_props["T_exit"]
+            max_iterations = 20  # More iterations for convergence
+            tolerance = 1e-6  # Stricter tolerance
+            
+            for iteration in range(max_iterations):
+                gamma_exit_old = gamma_exit_iter
+                
+                # Calculate shifting equilibrium properties based on current exit conditions
+                shifting_props = calculate_shifting_equilibrium_properties(
+                    Pc_val,
+                    Tc,
+                    gamma_val,
+                    R,
+                    P_exit_iter,  # Use current P_exit
+                    progress_chamber,
+                    reaction_rate_factor,
+                    cea_cache,
+                    MR=MR_for_shifting,  # Pass MR - no hardcoded values
+                )
+                
+                gamma_exit_iter = shifting_props["gamma_exit"]
+                R_exit_iter = shifting_props["R_exit"]
+                equilibrium_factor = shifting_props["equilibrium_factor"]
+                
+                # Check convergence
+                gamma_change = abs(gamma_exit_iter - gamma_exit_old) / max(gamma_exit_old, 1.0)
+                if gamma_change < tolerance:
+                    break
+                
+                # Recalculate M_exit with new gamma_exit using area-Mach relation
+                # Physics equation: A/A* = f(M, gamma) = eps
+                if eps_val > 1.0 and gamma_exit_iter > 1.0:
+                    # Initial guess for M_exit with new gamma (from area-Mach relation)
+                    if eps_val > 10.0:
+                        prefactor = ((gamma_exit_iter + 1.0) / 2.0) ** ((gamma_exit_iter + 1.0) / (2.0 * (gamma_exit_iter - 1.0)))
+                        M_exit_iter = prefactor / (eps_val ** (1.0 / (gamma_exit_iter - 1.0)))
+                    else:
+                        M_exit_iter = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit_iter + 1.0))
+                    
+                    # Physics requirement: must be supersonic (M > 1.0)
+                    # If guess is subsonic, reset to supersonic
+                    if M_exit_iter <= 1.0:
+                        M_exit_iter = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit_iter + 1.0))
+                        if M_exit_iter <= 1.0:
+                            M_exit_iter = 1.0 + 1e-6  # Just above sonic
+                    
+                    # Newton-Raphson iteration to solve area-Mach relation
+                    # Solve: A/A* = eps exactly (no approximations)
+                    for newton_iter in range(50):  # More iterations for accuracy
+                        term = (2.0 / (gamma_exit_iter + 1.0)) * (1.0 + (gamma_exit_iter - 1.0) / 2.0 * M_exit_iter**2)
+                        exponent = (gamma_exit_iter + 1.0) / (2.0 * (gamma_exit_iter - 1.0))
+                        A_Astar = (1.0 / M_exit_iter) * (term ** exponent)
+                        error = A_Astar - eps_val
+                        
+                        if abs(error) < 1e-10:  # Converged
+                            break
+                        
+                        # Analytical derivative
+                        dterm_dM = (gamma_exit_iter - 1.0) * M_exit_iter
+                        dA_dM = -A_Astar / M_exit_iter + A_Astar * exponent * (dterm_dM / term)
+                        
+                        if abs(dA_dM) > 1e-12:
+                            step = error / dA_dM
+                            # Limit step size for numerical stability (not physics clamp)
+                            step = np.clip(step, -0.5 * M_exit_iter, 0.5 * M_exit_iter)
+                            M_exit_iter = M_exit_iter - step
+                            
+                            # Physics requirement: must stay supersonic
+                            # If solver goes subsonic, reset to supersonic guess
+                            if M_exit_iter <= 1.0:
+                                M_exit_iter = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit_iter + 1.0))
+                                if M_exit_iter <= 1.0:
+                                    M_exit_iter = 1.0 + 1e-6
+                        else:
+                            # Derivative too small - use bisection-like approach
+                            if error > 0:
+                                M_exit_iter = M_exit_iter * 0.99
+                            else:
+                                M_exit_iter = M_exit_iter * 1.01
+                            
+                            # Ensure supersonic (physics requirement)
+                            if M_exit_iter <= 1.0:
+                                M_exit_iter = 1.0 + 1e-6
+                
+                # Recalculate P_exit and T_exit with new gamma_exit and M_exit_iter
+                # Using isentropic relations (physics-based, no arbitrary factors)
+                pressure_exponent_new = -gamma_exit_iter / (gamma_exit_iter - 1.0)
+                pressure_factor_new = (1.0 + (gamma_exit_iter - 1.0) / 2.0 * M_exit_iter**2) ** pressure_exponent_new
+                P_exit_iter = Pc_val * pressure_factor_new
+                
+                # Physics: P_exit cannot be negative
+                if P_exit_iter < 0:
+                    raise ValueError(f"Non-physical exit pressure: P_exit={P_exit_iter} Pa")
+                
+                # Note: P_exit can be < Pa (overexpanded) or > Pa (underexpanded)
+                # Don't clamp to Pa - that's a physics result
+                
+                temperature_factor_new = 1.0 / (1.0 + (gamma_exit_iter - 1.0) / 2.0 * M_exit_iter**2)
+                T_exit_iter = Tc * temperature_factor_new
+                
+                # Physics validation: T_exit must be positive and less than Tc
+                if T_exit_iter <= 0 or T_exit_iter >= Tc:
+                    raise ValueError(f"Non-physical exit temperature: T_exit={T_exit_iter} K, Tc={Tc} K")
+            
+            # Use converged values
+            gamma_exit = gamma_exit_iter
+            R_exit = R_exit_iter
+            M_exit = M_exit_iter
+            P_exit = P_exit_iter
+            T_exit = T_exit_iter
             
         except Exception as e:
             # Don't silently fail - shifting equilibrium failure indicates physics issue
@@ -390,44 +588,36 @@ def calculate_thrust(
             R_exit = R
             equilibrium_factor = 0.0  # Indicate frozen assumption
     
-    # Use shifting equilibrium gamma for exit calculations
-    gamma_for_exit = gamma_exit
-    
-    # Recalculate exit properties with shifting gamma if it changed significantly
-    if abs(gamma_exit - gamma_val) > 0.01:  # Significant difference
-        # Recalculate M_exit with new gamma (simplified correction)
-        # For more accuracy, we'd re-solve area-Mach relation
-        gamma_ratio = gamma_exit / gamma_val
-        M_correction = 1.0 + 0.1 * (gamma_ratio - 1.0)  # Small correction
-        M_exit = M_exit * M_correction
-        M_exit = np.clip(M_exit, 1.01, 10.0)
-        
-        # Recalculate P_exit with new gamma
-        pressure_exponent_new = -gamma_exit / (gamma_exit - 1.0)
-        pressure_factor_new = (1.0 + (gamma_exit - 1.0) / 2.0 * M_exit**2) ** pressure_exponent_new
-        P_exit = Pc_val * pressure_factor_new
-        P_exit = max(P_exit, Pa)
-        
-        # Recalculate T_exit with new gamma (consistent with M_exit)
-        temperature_factor_new = 1.0 / (1.0 + (gamma_exit - 1.0) / 2.0 * M_exit**2)
-        T_exit = Tc * temperature_factor_new
-        
-        # Recalculate v_exit with new gamma and R
-        sound_speed_exit_squared_new = gamma_exit * R_exit * T_exit
-        sound_speed_exit_new, sound_valid_new = NumericalStability.safe_sqrt(sound_speed_exit_squared_new, "sound_speed_exit_new")
-        if sound_valid_new.passed and np.isfinite(sound_speed_exit_new) and sound_speed_exit_new > 0:
-            v_exit = M_exit * sound_speed_exit_new
-        else:
-            # Fallback to energy equation
-            cp_new = gamma_exit * R_exit / max(gamma_exit - 1.0, 0.01)
-            delta_T_new = Tc - T_exit
-            if delta_T_new > 0 and cp_new > 0:
-                v_exit_squared_new = 2.0 * cp_new * delta_T_new
-                v_exit, v_valid_new = NumericalStability.safe_sqrt(v_exit_squared_new, "v_exit_new")
-                if not v_valid_new.passed:
-                    v_exit = 0.0
+    # CRITICAL: Recalculate v_exit with final exit properties (gamma_exit, R_exit, T_exit, M_exit)
+    # v_exit = M_exit × sqrt(gamma_exit × R_exit × T_exit)
+    # This ensures velocity is consistent with exit conditions
+    # FOR ISENTROPIC FLOW, v_exit MUST be calculated from M_exit - energy equation is NOT valid!
+    sound_speed_exit_final = np.sqrt(gamma_exit * R_exit * T_exit) if gamma_exit > 1.0 and R_exit > 0 and T_exit > 0 else None
+    if sound_speed_exit_final is not None and np.isfinite(sound_speed_exit_final) and sound_speed_exit_final > 0 and M_exit > 0:
+        v_exit = M_exit * sound_speed_exit_final
+    else:
+        # If sound speed calculation fails, we have invalid exit conditions
+        # DO NOT use energy equation - it's incorrect for isentropic flow
+        # Recalculate M_exit and try again
+        import warnings
+        warnings.warn(f"[CRITICAL] Cannot calculate v_exit from M_exit after shifting equilibrium: gamma_exit={gamma_exit:.4f}, R_exit={R_exit:.2f}, T_exit={T_exit:.1f} K, M_exit={M_exit:.4f}. Recalculating M_exit.")
+        if eps_val > 1.0 and gamma_exit > 1.0:
+            if eps_val > 10.0:
+                prefactor = ((gamma_exit + 1.0) / 2.0) ** ((gamma_exit + 1.0) / (2.0 * (gamma_exit - 1.0)))
+                M_exit = prefactor / (eps_val ** (1.0 / (gamma_exit - 1.0)))
+            else:
+                M_exit = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit + 1.0))
+            # Physics requirement: must be supersonic
+            if M_exit <= 1.0:
+                M_exit = 1.0 + 1e-6
+            # Try again with recalculated M_exit
+            sound_speed_exit_final = np.sqrt(gamma_exit * R_exit * T_exit) if gamma_exit > 1.0 and R_exit > 0 and T_exit > 0 else None
+            if sound_speed_exit_final is not None and np.isfinite(sound_speed_exit_final) and sound_speed_exit_final > 0:
+                v_exit = M_exit * sound_speed_exit_final
             else:
                 v_exit = 0.0
+        else:
+            v_exit = 0.0  # Fallback - invalid conditions
     
     # Final validation of exit temperature
     T_exit_check = PhysicalConstraints.validate_temperature(T_exit, "T_exit")
@@ -435,10 +625,125 @@ def calculate_thrust(
         # Don't fallback to Tc (that's way too high) - use conservative estimate
         T_exit = max(Tc * 0.3, 500.0)  # At least 30% of chamber temp or 500K minimum
     
+    # CRITICAL: ALWAYS recalculate exit velocity from M_exit to ensure physical consistency
+    # v_exit MUST be calculated from M_exit for isentropic flow: v_exit = M_exit × sqrt(gamma_exit × R_exit × T_exit)
+    # This ensures velocity-Mach consistency and correct thrust calculation
+    # This is the ONLY physically correct method for isentropic nozzle flow
+    # CRITICAL FIX: Ensure M_exit is valid BEFORE calculating v_exit
+    if M_exit <= 0.0 or M_exit < 1.0:
+        import warnings
+        warnings.warn(f"[CRITICAL] M_exit is invalid ({M_exit:.6f}) before final v_exit calculation. Recalculating from eps={eps_val:.4f}, gamma_exit={gamma_exit:.4f}")
+        # Recalculate M_exit from area-Mach relation
+        if eps_val > 1.0 and gamma_exit > 1.0:
+            if eps_val > 10.0:
+                prefactor = ((gamma_exit + 1.0) / 2.0) ** ((gamma_exit + 1.0) / (2.0 * (gamma_exit - 1.0)))
+                M_exit = prefactor / (eps_val ** (1.0 / (gamma_exit - 1.0)))
+            else:
+                M_exit = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit + 1.0))
+            # Physics requirement: must be supersonic
+            if M_exit <= 1.0:
+                M_exit = 1.0 + 1e-6
+            # Quick Newton iteration for accuracy
+            for _ in range(10):
+                term = (2.0 / (gamma_exit + 1.0)) * (1.0 + (gamma_exit - 1.0) / 2.0 * M_exit**2)
+                exponent = (gamma_exit + 1.0) / (2.0 * (gamma_exit - 1.0))
+                A_Astar = (1.0 / M_exit) * (term ** exponent)
+                error = A_Astar - eps_val
+                if abs(error) < 1e-6:
+                    break
+                dterm_dM = (gamma_exit - 1.0) * M_exit
+                dA_dM = -A_Astar / M_exit + A_Astar * exponent * (dterm_dM / term)
+                if abs(dA_dM) > 1e-12:
+                    step = error / dA_dM
+                    step = np.clip(step, -0.5 * M_exit, 0.5 * M_exit)
+                    M_exit = M_exit - step
+                # Physics requirement: must be supersonic
+                if M_exit <= 1.0:
+                    M_exit = 1.0 + 1e-6
+                # No arbitrary upper cap - let physics determine M
+        else:
+            M_exit = 2.0  # Fallback
+    
+    # Now calculate v_exit from M_exit (ALWAYS use this method for isentropic flow)
+    if M_exit > 0.0 and M_exit >= 1.0:
+        sound_speed_exit_consistent = np.sqrt(gamma_exit * R_exit * T_exit) if gamma_exit > 1.0 and R_exit > 0 and T_exit > 0 else None
+        if sound_speed_exit_consistent is not None and np.isfinite(sound_speed_exit_consistent) and sound_speed_exit_consistent > 0:
+            v_exit_from_M = M_exit * sound_speed_exit_consistent
+            # ALWAYS use M_exit-based velocity - it's the physically correct method for isentropic flow
+            # The energy equation is only a fallback and can give incorrect results
+            v_exit = v_exit_from_M
+        else:
+            # If sound speed calculation fails, we have a problem
+            import warnings
+            warnings.warn(f"[WARNING] Cannot calculate exit velocity from M_exit: gamma_exit={gamma_exit:.4f}, R_exit={R_exit:.2f}, T_exit={T_exit:.1f} K")
+    
+    # CRITICAL: Final validation - ensure M_exit is always valid before calculating thrust
+    # This MUST happen before v_exit validation to ensure v_exit is calculated correctly
+    if M_exit <= 0.0 or M_exit < 1.0:
+        import warnings
+        warnings.warn(f"[CRITICAL] M_exit is invalid ({M_exit:.6f}) before thrust calculation. Recalculating from eps={eps_val:.4f}, gamma_exit={gamma_exit:.4f}")
+        # Recalculate M_exit from area-Mach relation
+        if eps_val > 1.0 and gamma_exit > 1.0:
+            if eps_val > 10.0:
+                prefactor = ((gamma_exit + 1.0) / 2.0) ** ((gamma_exit + 1.0) / (2.0 * (gamma_exit - 1.0)))
+                M_exit = prefactor / (eps_val ** (1.0 / (gamma_exit - 1.0)))
+            else:
+                M_exit = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit + 1.0))
+            # Physics requirement: must be supersonic
+            if M_exit <= 1.0:
+                M_exit = 1.0 + 1e-6
+            # Quick Newton iteration for accuracy
+            for _ in range(10):
+                term = (2.0 / (gamma_exit + 1.0)) * (1.0 + (gamma_exit - 1.0) / 2.0 * M_exit**2)
+                exponent = (gamma_exit + 1.0) / (2.0 * (gamma_exit - 1.0))
+                A_Astar = (1.0 / M_exit) * (term ** exponent)
+                error = A_Astar - eps_val
+                if abs(error) < 1e-6:
+                    break
+                dterm_dM = (gamma_exit - 1.0) * M_exit
+                dA_dM = -A_Astar / M_exit + A_Astar * exponent * (dterm_dM / term)
+                if abs(dA_dM) > 1e-12:
+                    step = error / dA_dM
+                    step = np.clip(step, -0.5 * M_exit, 0.5 * M_exit)
+                    M_exit = M_exit - step
+                # Physics requirement: must be supersonic
+                if M_exit <= 1.0:
+                    M_exit = 1.0 + 1e-6
+                # No arbitrary upper cap - let physics determine M
+        else:
+            M_exit = 2.0  # Fallback
+        # Recalculate v_exit with corrected M_exit
+        sound_speed_exit_final = np.sqrt(gamma_exit * R_exit * T_exit) if gamma_exit > 1.0 and R_exit > 0 and T_exit > 0 else None
+        if sound_speed_exit_final is not None and np.isfinite(sound_speed_exit_final) and sound_speed_exit_final > 0:
+            v_exit = M_exit * sound_speed_exit_final
+        else:
+            import warnings
+            warnings.warn(f"[WARNING] Cannot recalculate v_exit: gamma_exit={gamma_exit:.4f}, R_exit={R_exit:.2f}, T_exit={T_exit:.1f} K")
+    
     # Validate exit velocity
     v_exit_check = PhysicalConstraints.validate_velocity(v_exit, "v_exit")
     if not v_exit_check.passed and v_exit_check.severity == "error":
-        v_exit = 0.0  # Fallback
+        # Recalculate from M_exit as last resort
+        if M_exit > 0.0 and M_exit >= 1.0:
+            sound_speed_exit_final = np.sqrt(gamma_exit * R_exit * T_exit) if gamma_exit > 1.0 and R_exit > 0 and T_exit > 0 else None
+            if sound_speed_exit_final is not None and np.isfinite(sound_speed_exit_final) and sound_speed_exit_final > 0:
+                v_exit = M_exit * sound_speed_exit_final
+            else:
+                v_exit = 0.0
+        else:
+            v_exit = 0.0  # Fallback
+    
+    # CRITICAL: Final v_exit recalculation RIGHT BEFORE thrust calculation
+    # This ensures v_exit is ALWAYS calculated from M_exit for isentropic flow
+    # v_exit = M_exit × sqrt(gamma_exit × R_exit × T_exit)
+    sound_speed_final = np.sqrt(gamma_exit * R_exit * T_exit) if gamma_exit > 1.0 and R_exit > 0 and T_exit > 0 else None
+    if sound_speed_final is not None and np.isfinite(sound_speed_final) and sound_speed_final > 0 and M_exit > 0 and M_exit >= 1.0:
+        v_exit = M_exit * sound_speed_final
+    else:
+        import warnings
+        warnings.warn(f"[CRITICAL] Cannot calculate v_exit from M_exit before thrust: gamma_exit={gamma_exit:.4f}, R_exit={R_exit:.2f}, T_exit={T_exit:.1f} K, M_exit={M_exit:.4f}")
+        # Last resort: use zero velocity (will give zero thrust, which is better than wrong thrust)
+        v_exit = 0.0
     
     # Calculate thrust components with validation
     F_momentum = mdot_total * v_exit
@@ -448,10 +753,10 @@ def calculate_thrust(
     # Validate thrust components
     if not all(np.isfinite([F_momentum, F_pressure, F_total])):
         # Fallback to thrust coefficient method
-        F_total = Cf * Pc_val * nozzle_config.A_throat
+        F_total = Cf * Pc_val * A_throat_actual
     
     # Also calculate using thrust coefficient method for validation
-    F_cf = Cf * Pc_val * nozzle_config.A_throat
+    F_cf = Cf * Pc_val * A_throat_actual
     
     # Validate thrust equation
     thrust_check = PhysicsValidator.validate_thrust_equation(
@@ -468,7 +773,7 @@ def calculate_thrust(
     # Cf_actual = F / (Pc * A_throat)
     # This is the measured value, not the theoretical
     Cf_actual, cf_actual_valid = NumericalStability.safe_divide(
-        F, Pc_val * nozzle_config.A_throat, 0.0, "Cf_actual"
+        F, Pc_val * A_throat_actual, 0.0, "Cf_actual"
     )
     if not cf_actual_valid.passed:
         Cf_actual = Cf  # Fallback to theoretical
@@ -543,7 +848,7 @@ def calculate_thrust(
             import warnings
             warnings.warn(f"Temperature profile calculation failed: {e}")
 
-    return {
+    results = {
         "F": float(F),
         "F_momentum": float(F_momentum),
         "F_pressure": float(F_pressure),
@@ -564,5 +869,28 @@ def calculate_thrust(
         "R_chamber": float(R),
         "R_exit": float(R_exit),
         "equilibrium_factor": float(equilibrium_factor),
-        "M_exit": float(M_exit) if 'M_exit' in locals() else np.nan,
+        "M_exit": float(M_exit) if M_exit > 1.0 else float(1.0 + 1e-6),  # Physics requirement: must be supersonic
     }
+    
+    # CRITICAL: Final check - ensure M_exit is always valid before returning
+    # Recalculate M_exit if it's invalid
+    if results["M_exit"] <= 0.0 or results["M_exit"] < 1.0:
+        import warnings
+        warnings.warn(f"[CRITICAL] M_exit in results is invalid ({results['M_exit']:.6f}). Recalculating from eps={eps_val:.4f}, gamma_exit={gamma_exit:.4f}")
+        if eps_val > 1.0 and gamma_exit > 1.0:
+            if eps_val > 10.0:
+                prefactor = ((gamma_exit + 1.0) / 2.0) ** ((gamma_exit + 1.0) / (2.0 * (gamma_exit - 1.0)))
+                M_exit_recalc = prefactor / (eps_val ** (1.0 / (gamma_exit - 1.0)))
+            else:
+                M_exit_recalc = 1.0 + np.sqrt(2.0 * (eps_val - 1.0) / (gamma_exit + 1.0))
+            # Physics requirement: must be supersonic
+            if M_exit_recalc <= 1.0:
+                M_exit_recalc = 1.0 + 1e-6
+        else:
+            M_exit_recalc = 2.0
+        # Physics requirement: must be supersonic
+        if M_exit_recalc <= 1.0:
+            M_exit_recalc = 1.0 + 1e-6
+        results["M_exit"] = float(M_exit_recalc)
+    
+    return results

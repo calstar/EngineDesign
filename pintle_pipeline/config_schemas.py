@@ -198,14 +198,27 @@ class GraphiteInsertConfig(BaseModel):
     oxidation_stoichiometry_ratio: Optional[float] = Field(default=None, gt=0, description="Moles of C per mole of O2 (1.0 for CO2, 2.0 for CO) (default: 1.0)")
 
 
+class StainlessSteelCaseConfig(BaseModel):
+    """Stainless steel case configuration (structural wall behind ablative/graphite)"""
+    enabled: bool = Field(default=True, description="Enable stainless steel case")
+    thickness: float = Field(default=0.003, gt=0, description="Stainless steel wall thickness [m]")
+    thermal_conductivity: float = Field(default=15.0, gt=0, description="Thermal conductivity [W/(m·K)]")
+    density: float = Field(default=8000.0, gt=0, description="Material density [kg/m³]")
+    specific_heat: float = Field(default=500.0, gt=0, description="Specific heat [J/(kg·K)]")
+    max_temperature: float = Field(default=1000.0, gt=0, description="Maximum allowable temperature [K] (melting point ~1700K, but limit lower for structural integrity)")
+    emissivity: float = Field(default=0.3, ge=0, le=1, description="Surface emissivity")
+    yield_strength: float = Field(default=200e6, gt=0, description="Yield strength at max temp [Pa]")
+    youngs_modulus: float = Field(default=200e9, gt=0, description="Young's modulus [Pa]")
+
+
 class AblativeCoolingConfig(BaseModel):
-    """Ablative cooling configuration for chamber liner"""
+    """Ablative cooling configuration for chamber liner (phenolic)"""
     enabled: bool = Field(default=False, description="Enable ablative cooling model")
-    material_density: float = Field(default=1600.0, gt=0, description="Ablator density [kg/m³]")
+    material_density: float = Field(default=1600.0, gt=0, description="Ablator (phenolic) density [kg/m³]")
     heat_of_ablation: float = Field(default=2.5e6, gt=0, description="Effective heat of ablation [J/kg]")
-    thermal_conductivity: float = Field(default=0.35, gt=0, description="Ablator thermal conductivity [W/(m·K)]")
-    specific_heat: float = Field(default=1500.0, gt=0, description="Ablator specific heat [J/(kg·K)]")
-    initial_thickness: float = Field(default=0.01, gt=0, description="Initial ablative thickness [m]")
+    thermal_conductivity: float = Field(default=0.35, gt=0, description="Ablator (phenolic) thermal conductivity [W/(m·K)]")
+    specific_heat: float = Field(default=1500.0, gt=0, description="Ablator (phenolic) specific heat [J/(kg·K)]")
+    initial_thickness: float = Field(default=0.01, gt=0, description="Initial ablative (phenolic) thickness [m]")
     surface_temperature_limit: float = Field(default=1200.0, gt=0, description="Allowable surface temperature [K]")
     coverage_fraction: float = Field(default=1.0, gt=0, le=1.0, description="Fraction of chamber surface protected by ablative liner")
     pyrolysis_temperature: float = Field(default=900.0, gt=0, description="Characteristic pyrolysis temperature of ablator [K]")
@@ -486,6 +499,7 @@ class PintleEngineConfig(BaseModel):
     film_cooling: Optional[FilmCoolingConfig] = Field(default=None, description="Film cooling configuration")
     ablative_cooling: Optional[AblativeCoolingConfig] = Field(default=None, description="Ablative cooling configuration for chamber liner")
     graphite_insert: Optional[GraphiteInsertConfig] = Field(default=None, description="Graphite throat insert configuration (separate from chamber ablator)")
+    stainless_steel_case: Optional[StainlessSteelCaseConfig] = Field(default=None, description="Stainless steel case configuration (structural wall behind ablative/graphite)")
     discharge: dict[str, DischargeConfig]  # "oxidizer" and "fuel"
     spray: SprayConfig = Field(default_factory=SprayConfig)
     combustion: CombustionConfig = Field(default_factory=CombustionConfig)

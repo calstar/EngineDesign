@@ -109,20 +109,30 @@ class PintleInjector(InjectorModel):
             
             for feed_iter in range(3):
                 # Calculate feed losses with current mass flows
+                # CRITICAL: Recalculate on each iteration to ensure consistency
                 delta_p_feed_O = delta_p_feed(mdot_O, rho_O, feed_O, P_tank_O)
-
                 delta_p_feed_F_base = delta_p_feed(mdot_F, rho_F, feed_F, P_tank_F)
-                if config.regen_cooling is not None and config.regen_cooling.enabled:
-                    delta_p_regen = delta_p_regen_channels(
-                        mdot_F,
-                        rho_F,
-                        mu_F,
-                        config.regen_cooling,
-                        P_tank_F,
-                    )
-                    delta_p_feed_F = delta_p_feed_F_base + delta_p_regen
-                else:
-                    delta_p_feed_F = delta_p_feed_F_base
+                
+                # CRITICAL: Ensure feed loss is calculated - if it's still 0.0 with non-zero flow, something is wrong
+                if delta_p_feed_O == 0.0 and mdot_O > 0.01:
+                    import warnings
+                    K0_val = feed_O.get('K0', 'N/A') if isinstance(feed_O, dict) else getattr(feed_O, 'K0', 'N/A')
+                    warnings.warn(f"[WARNING] LOX feed loss is 0.0 with mdot_O={mdot_O:.4f} kg/s. Check feed system config (K0={K0_val}, K_eff should be > 0).")
+            
+            # CRITICAL: Ensure final feed losses are stored (recalculate one more time after loop)
+            delta_p_feed_O = delta_p_feed(mdot_O, rho_O, feed_O, P_tank_O)
+            delta_p_feed_F_base = delta_p_feed(mdot_F, rho_F, feed_F, P_tank_F)
+            if config.regen_cooling is not None and config.regen_cooling.enabled:
+                delta_p_regen = delta_p_regen_channels(
+                    mdot_F,
+                    rho_F,
+                    mu_F,
+                    config.regen_cooling,
+                    P_tank_F,
+                )
+                delta_p_feed_F = delta_p_feed_F_base + delta_p_regen
+            else:
+                delta_p_feed_F = delta_p_feed_F_base
 
                 P_inj_O = P_tank_O - delta_p_feed_O
                 P_inj_F = P_tank_F - delta_p_feed_F
@@ -247,6 +257,22 @@ class PintleInjector(InjectorModel):
 
             constraints_ok, violations = check_spray_constraints(We_O, We_F, x_star_combined, spray_cfg)
 
+            # CRITICAL: Recalculate feed losses one final time with converged mass flows
+            # to ensure diagnostics have the correct final values
+            delta_p_feed_O_final = delta_p_feed(mdot_O, rho_O, feed_O, P_tank_O)
+            delta_p_feed_F_base_final = delta_p_feed(mdot_F, rho_F, feed_F, P_tank_F)
+            if config.regen_cooling is not None and config.regen_cooling.enabled:
+                delta_p_regen_final = delta_p_regen_channels(
+                    mdot_F,
+                    rho_F,
+                    mu_F,
+                    config.regen_cooling,
+                    P_tank_F,
+                )
+                delta_p_feed_F_final = delta_p_feed_F_base_final + delta_p_regen_final
+            else:
+                delta_p_feed_F_final = delta_p_feed_F_base_final
+
             diagnostics.update(
                 {
                     "iterations": iteration + 1,
@@ -272,8 +298,9 @@ class PintleInjector(InjectorModel):
                     "P_injector_F": float(P_inj_F),
                     "delta_p_injector_O": float(delta_p_inj_O),
                     "delta_p_injector_F": float(delta_p_inj_F),
-                    "delta_p_feed_O": float(delta_p_feed_O),
-                    "delta_p_feed_F": float(delta_p_feed_F),
+                    # CRITICAL: Use final calculated feed losses, not loop values
+                    "delta_p_feed_O": float(delta_p_feed_O_final),
+                    "delta_p_feed_F": float(delta_p_feed_F_final),
                     # Discharge coefficients
                     "Cd_O": float(Cd_O),
                     "Cd_F": float(Cd_F),

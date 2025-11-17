@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import sys
+from pathlib import Path
 
 try:
     import ezdxf
@@ -297,7 +298,10 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
                 table[(i, j)].set_text_props(size=18)
                 table[(i, j)].set_height(0.30)  # Much taller data rows
         
-        plt.savefig('chamber/chamber_full_contour.png', dpi=150, bbox_inches='tight')
+        # Ensure directory exists before saving
+        output_path = Path('chamber/chamber_full_contour.png')
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(str(output_path), dpi=150, bbox_inches='tight')
         plt.close()
     
     # Export to DXF if requested
@@ -307,6 +311,10 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
                 "ezdxf library is required for DXF export. "
                 "Install it with: pip install ezdxf"
             )
+        
+        # Ensure directory exists before saving
+        dxf_path = Path(export_dxf)
+        dxf_path.parent.mkdir(parents=True, exist_ok=True)
         
         # Create a new DXF document
         doc = ezdxf.new('R2010')  # Use AutoCAD 2010 format
@@ -324,11 +332,13 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         msp.add_line((x_min, 0), (x_max, 0))
         
         # Save the DXF file
-        doc.saveas(export_dxf)
+        doc.saveas(str(dxf_path))
         print(f"Chamber contour exported to {export_dxf}")
     
     # Also return the total chamber length as a separate value for easy access
     return chamber_pts, table_data, total_chamber_length
 
-pts, data, total_length = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
+# Only run example if script is executed directly (not when imported)
+if __name__ == "__main__":
+    pts, data, total_length = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
  
