@@ -50,7 +50,7 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float, float]
     # Extract c*
     cstar_match = re.search(r'CSTAR[, ]*(?:M/SEC|FT/SEC)?\s+([\d.E+-]+)', block, re.IGNORECASE)
     cstar = float(cstar_match.group(1)) if cstar_match else np.nan
-    # Convert ft/s → m/s if needed
+    # Convert ft/s -> m/s if needed
     if re.search(r'CSTAR.*FT/SEC', block, re.IGNORECASE):
         cstar *= 0.3048
 
