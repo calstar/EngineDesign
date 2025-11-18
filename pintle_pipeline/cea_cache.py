@@ -21,7 +21,7 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float, float]
     --------
     Tc : float [K]
     gamma : float
-    R : float [J/(kg·K)]
+    R : float [J/(kg*K)]
     cstar : float [m/s]
     M : float [kg/kmol]
     Isp : float [s] (ambient Isp, or NaN if not found)
@@ -34,7 +34,7 @@ def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float, float]
     mw_match = re.search(r'M,\s*\(1/n\)\s+([\d.E+-]+)', block)
     if mw_match:
         M = float(mw_match.group(1))  # molecular weight [kg/kmol]
-        R = 8314.462618 / M  # J/kg·K
+        R = 8314.462618 / M  # J/(kg*K)
     else:
         M = np.nan
         R = np.nan
@@ -359,7 +359,7 @@ class CEACache:
         
         # Save to cache
         self._save_cache()
-        print(f"💾 CEA cache saved to {self.cache_file}")
+        print(f"[SAVED] CEA cache saved to {self.cache_file}")
     
     def _build_cache_sequential(self, total_points: int):
         """Sequential CEA cache building (original method)"""
@@ -417,7 +417,7 @@ class CEACache:
                             self.M_table[i, j] = M
                         
                     except Exception as e:
-                        print(f"   ⚠️  Error at Pc={Pc_psia:.1f} psia, MR={MR:.2f}, eps={eps:.1f}: {e}")
+                        print(f"   [WARNING] Error at Pc={Pc_psia:.1f} psia, MR={MR:.2f}, eps={eps:.1f}: {e}")
                         if self.use_3d:
                             self.cstar_table[i, j, k_idx] = np.nan
                             self.Cf_table[i, j, k_idx] = np.nan
@@ -717,7 +717,7 @@ class CEACache:
             Cf_ideal : float
             Tc : float [K]
             gamma : float
-            R : float [J/(kg·K)]
+            R : float [J/(kg*K)]
             M : float [kg/kmol] (molecular weight)
         """
         if eps is None:
