@@ -1596,11 +1596,16 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
             info_msg += f"- Total chamber recession: **{df['Cumulative Chamber Recession (µm)'].iloc[-1]:.1f} µm**\n"
             
             # Explain throat recession vs graphite recession
+            # CRITICAL: When graphite is present, throat area grows from GRAPHITE recession, not ablative
             if "Cumulative Graphite Recession (µm)" in df.columns and not df["Cumulative Graphite Recession (µm)"].isna().all():
                 graphite_recession = df["Cumulative Graphite Recession (µm)"].iloc[-1]
-                info_msg += f"- Total throat recession (ablative): **{df['Cumulative Throat Recession (µm)'].iloc[-1]:.1f} µm**\n"
+                throat_recession_ablative = df['Cumulative Throat Recession (µm)'].iloc[-1]
+                info_msg += f"- Total throat recession (ablative): **{throat_recession_ablative:.1f} µm**\n"
                 info_msg += f"- Total graphite recession: **{graphite_recession:.1f} µm**\n"
-                info_msg += f"\n**Note:** When graphite insert is present, throat area grows due to **graphite recession**, not ablative recession. The ablative behind the graphite is protected."
+                info_msg += f"\n**⚠️ IMPORTANT:** When graphite insert is present:\n"
+                info_msg += f"- Throat area grows due to **graphite recession** ({graphite_recession:.1f} µm), NOT ablative recession\n"
+                info_msg += f"- The ablative behind the graphite is **protected** (recession = {throat_recession_ablative:.1f} µm)\n"
+                info_msg += f"- This is why throat area grew by {A_pct_change.iloc[-1]:+.3f}% even though ablative recession at throat is {throat_recession_ablative:.1f} µm"
             else:
                 info_msg += f"- Total throat recession: **{df['Cumulative Throat Recession (µm)'].iloc[-1]:.1f} µm**"
             
