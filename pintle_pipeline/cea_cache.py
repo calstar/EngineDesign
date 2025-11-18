@@ -320,7 +320,7 @@ class CEACache:
             print(f"   [WARNING] Sequential build would take ~{total_points * 0.5 / 60:.0f} minutes!")
         else:
             total_points = self.n_points**2
-            print(f"         Total: {self.n_points}² = {total_points} points")
+            print(f"         Total: {self.n_points}^2 = {total_points} points")
             print(f"   [INFO] Sequential build would take ~{total_points * 0.5 / 60:.0f} minutes")
         
         # Check for parallel processing option
