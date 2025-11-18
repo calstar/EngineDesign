@@ -157,11 +157,11 @@ class CEACache:
         if self.use_3d:
             self.eps_min, self.eps_max = config.eps_range
             self.eps_grid = np.linspace(self.eps_min, self.eps_max, self.n_points)
-            print(f"[INFO] Using 3D CEA cache: {self.n_points}³ = {self.n_points**3} points")
+            print(f"[INFO] Using 3D CEA cache: {self.n_points}^3 = {self.n_points**3} points")
         else:
             self.eps_min = self.eps_max = config.expansion_ratio
             self.eps_grid = None
-            print(f"[INFO] Using 2D CEA cache: {self.n_points}² = {self.n_points**2} points")
+            print(f"[INFO] Using 2D CEA cache: {self.n_points}^2 = {self.n_points**2} points")
         
         # Lookup tables (initialized as None, loaded from cache or computed)
         # Shape: (n, n, n) for 3D or (n, n) for 2D
