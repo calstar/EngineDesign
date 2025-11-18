@@ -1510,12 +1510,21 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
             recession_fig.add_trace(go.Scatter(
                 x=df["time"],
                 y=df["Cumulative Throat Recession (µm)"],
-                name="Throat",
+                name="Throat (Ablative)",
                 mode="lines",
                 line=dict(color="orange", width=2),
             ))
+            # Add graphite recession if available
+            if "Cumulative Graphite Recession (µm)" in df.columns and not df["Cumulative Graphite Recession (µm)"].isna().all():
+                recession_fig.add_trace(go.Scatter(
+                    x=df["time"],
+                    y=df["Cumulative Graphite Recession (µm)"],
+                    name="Throat (Graphite)",
+                    mode="lines",
+                    line=dict(color="red", width=2, dash="dash"),
+                ))
             recession_fig.update_layout(
-                title="Cumulative Ablative Recession",
+                title="Cumulative Recession (Ablative & Graphite)",
                 xaxis_title="Time [s]",
                 yaxis_title="Recession [µm]",
                 legend=dict(x=0.02, y=0.98),
