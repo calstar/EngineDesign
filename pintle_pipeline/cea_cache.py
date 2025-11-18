@@ -311,12 +311,12 @@ class CEACache:
     def _build_cache(self):
         """Build CEA lookup tables with parallel processing support"""
         print(f"[BUILDING] Building CEA cache (this will take a while)...")
-        print(f"   Grid: Pc ∈ [{self.Pc_min/1e6:.1f}, {self.Pc_max/1e6:.1f}] MPa ({self.n_points} points)")
-        print(f"         MR ∈ [{self.MR_min:.2f}, {self.MR_max:.2f}] ({self.n_points} points)")
+        print(f"   Grid: Pc in [{self.Pc_min/1e6:.1f}, {self.Pc_max/1e6:.1f}] MPa ({self.n_points} points)")
+        print(f"         MR in [{self.MR_min:.2f}, {self.MR_max:.2f}] ({self.n_points} points)")
         if self.use_3d:
-            print(f"         eps ∈ [{self.eps_min:.2f}, {self.eps_max:.2f}] ({self.n_points} points)")
+            print(f"         eps in [{self.eps_min:.2f}, {self.eps_max:.2f}] ({self.n_points} points)")
             total_points = self.n_points**3
-            print(f"         Total: {self.n_points}³ = {total_points} points")
+            print(f"         Total: {self.n_points}^3 = {total_points} points")
             print(f"   [WARNING] Sequential build would take ~{total_points * 0.5 / 60:.0f} minutes!")
         else:
             total_points = self.n_points**2
