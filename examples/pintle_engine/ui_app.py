@@ -4655,11 +4655,18 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
     st.subheader("Chamber Contour")
     
     # Try to create enhanced multi-layer visualization if available
+    # CRITICAL: Check config_obj is not None and has required attributes before accessing
     if (calculate_complete_chamber_geometry is not None and 
         config_obj is not None and
-        hasattr(config_obj, 'ablative_cooling') and config_obj.ablative_cooling and
-        hasattr(config_obj, 'graphite_insert') and config_obj.graphite_insert and
-        hasattr(config_obj, 'stainless_steel_case') and config_obj.stainless_steel_case):
+        hasattr(config_obj, 'ablative_cooling') and 
+        config_obj.ablative_cooling is not None and
+        getattr(config_obj.ablative_cooling, 'enabled', False) and
+        hasattr(config_obj, 'graphite_insert') and 
+        config_obj.graphite_insert is not None and
+        getattr(config_obj.graphite_insert, 'enabled', False) and
+        hasattr(config_obj, 'stainless_steel_case') and 
+        config_obj.stainless_steel_case is not None and
+        getattr(config_obj.stainless_steel_case, 'enabled', False)):
         
         try:
             # Get current geometry from results
