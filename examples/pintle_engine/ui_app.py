@@ -4539,7 +4539,7 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
             # Display results immediately after calculation
             results_for_display["solver_info"] = solver_info
             results_for_display["use_cea_solver"] = use_cea_solver
-            _display_chamber_results(results_for_display)
+            _display_chamber_results(results_for_display, config_obj=config_obj)
             
             # Show success message
             st.success("✓ Chamber geometry calculated and config updated! Download button below has the updated config.")
@@ -4595,12 +4595,24 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
     return config_obj
 
 
-def _display_chamber_results(results: dict) -> None:
+def _display_chamber_results(results: dict, config_obj=None) -> None:
     """Helper function to display chamber calculation results."""
     pts = results["pts"]
     table_data = results["table_data"]
     config_dict = results.get("config_dict", {})
     updated = results.get("updated", False)
+    
+    # Get config_obj from parameter, session state, or reconstruct from config_dict
+    if config_obj is None:
+        # Try to get from session state
+        config_obj = st.session_state.get("config_obj")
+        if config_obj is None and config_dict:
+            # Reconstruct from config_dict if available
+            try:
+                from pintle_pipeline.io import load_config_from_dict
+                config_obj = load_config_from_dict(config_dict)
+            except Exception:
+                pass
     solver_info = results.get("solver_info", None)
     use_cea_solver = results.get("use_cea_solver", False)
     
@@ -4648,15 +4660,19 @@ def _display_chamber_results(results: dict) -> None:
             recession_graphite = results.get("recession_graphite", 0.0) if isinstance(results.get("recession_graphite"), (int, float)) else 0.0
             
             # Calculate complete geometry
+            ablative_cfg = config_obj.ablative_cooling if config_obj and hasattr(config_obj, 'ablative_cooling') else None
+            graphite_cfg = config_obj.graphite_insert if config_obj and hasattr(config_obj, 'graphite_insert') else None
+            stainless_cfg = config_obj.stainless_steel_case if config_obj and hasattr(config_obj, 'stainless_steel_case') else None
+            
             geometry = calculate_complete_chamber_geometry(
                 V_chamber=V_chamber,
                 A_throat=A_throat,
                 L_chamber=L_chamber,
                 D_chamber_initial=D_chamber_initial,
                 D_throat_initial=D_throat_initial,
-                ablative_config=config_obj.ablative_cooling,
-                graphite_config=config_obj.graphite_insert,
-                stainless_config=config_obj.stainless_steel_case,
+                ablative_config=ablative_cfg,
+                graphite_config=graphite_cfg,
+                stainless_config=stainless_cfg,
                 recession_chamber=recession_chamber,
                 recession_graphite=recession_graphite,
                 n_points=100,
