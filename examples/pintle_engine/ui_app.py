@@ -4560,7 +4560,7 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
             display_results["dxf_bytes"] = None
         
         # Display the results (they persist in session state after form submission)
-        _display_chamber_results(display_results)
+        _display_chamber_results(display_results, config_obj=config_obj)
     
     # Always show download config button (uses current config_dict from session state - THE SOURCE OF TRUTH)
     st.markdown("---")
@@ -4643,16 +4643,19 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
     
     # Try to create enhanced multi-layer visualization if available
     if (calculate_complete_chamber_geometry is not None and 
+        config_obj is not None and
         hasattr(config_obj, 'ablative_cooling') and config_obj.ablative_cooling and
         hasattr(config_obj, 'graphite_insert') and config_obj.graphite_insert and
         hasattr(config_obj, 'stainless_steel_case') and config_obj.stainless_steel_case):
         
         try:
             # Get current geometry from results
-            V_chamber = results.get("chamber_volume", config_obj.chamber.volume)
-            A_throat = results.get("A_throat", config_obj.chamber.A_throat)
-            L_chamber = results.get("chamber_length", config_obj.chamber.length)
-            D_chamber_initial = config_obj.chamber.chamber_inner_diameter
+            # Use config_dict as fallback if config_obj is not available
+            chamber_config = config_dict.get("chamber", {}) if config_obj is None else None
+            V_chamber = results.get("chamber_volume", config_obj.chamber.volume if config_obj else chamber_config.get("volume", 0.0))
+            A_throat = results.get("A_throat", config_obj.chamber.A_throat if config_obj else chamber_config.get("A_throat", 0.0))
+            L_chamber = results.get("chamber_length", config_obj.chamber.length if config_obj else chamber_config.get("length", 0.0))
+            D_chamber_initial = config_obj.chamber.chamber_inner_diameter if config_obj else chamber_config.get("chamber_inner_diameter", 0.0)
             D_throat_initial = np.sqrt(4.0 * A_throat / np.pi)
             
             # Get recession values (default to 0 if not available)
