@@ -1579,14 +1579,23 @@ def plot_time_series_results(df: pd.DataFrame) -> None:
             lstar_final = df["L* (mm)"].iloc[-1]
             lstar_change_pct = (lstar_final / lstar_initial - 1) * 100
             
-            st.info(
-                f"**Ablative Geometry Impact:**\n\n"
-                f"- L* increased by **{lstar_change_pct:+.2f}%** ({lstar_initial:.2f} → {lstar_final:.2f} mm)\n"
-                f"- Throat area grew by **{A_pct_change.iloc[-1]:+.3f}%**\n"
-                f"- Thrust degraded by **{thrust_loss_pct:+.2f}%** ({thrust_initial:.3f} → {thrust_final:.3f} kN)\n"
-                f"- Total chamber recession: **{df['Cumulative Chamber Recession (µm)'].iloc[-1]:.1f} µm**\n"
-                f"- Total throat recession: **{df['Cumulative Throat Recession (µm)'].iloc[-1]:.1f} µm**"
-            )
+            # Build info message with proper explanation
+            info_msg = f"**Ablative Geometry Impact:**\n\n"
+            info_msg += f"- L* increased by **{lstar_change_pct:+.2f}%** ({lstar_initial:.2f} → {lstar_final:.2f} mm)\n"
+            info_msg += f"- Throat area grew by **{A_pct_change.iloc[-1]:+.3f}%**\n"
+            info_msg += f"- Thrust degraded by **{thrust_loss_pct:+.2f}%** ({thrust_initial:.3f} → {thrust_final:.3f} kN)\n"
+            info_msg += f"- Total chamber recession: **{df['Cumulative Chamber Recession (µm)'].iloc[-1]:.1f} µm**\n"
+            
+            # Explain throat recession vs graphite recession
+            if "Cumulative Graphite Recession (µm)" in df.columns and not df["Cumulative Graphite Recession (µm)"].isna().all():
+                graphite_recession = df["Cumulative Graphite Recession (µm)"].iloc[-1]
+                info_msg += f"- Total throat recession (ablative): **{df['Cumulative Throat Recession (µm)'].iloc[-1]:.1f} µm**\n"
+                info_msg += f"- Total graphite recession: **{graphite_recession:.1f} µm**\n"
+                info_msg += f"\n**Note:** When graphite insert is present, throat area grows due to **graphite recession**, not ablative recession. The ablative behind the graphite is protected."
+            else:
+                info_msg += f"- Total throat recession: **{df['Cumulative Throat Recession (µm)'].iloc[-1]:.1f} µm**"
+            
+            st.info(info_msg)
 
 
 def custom_plot_builder() -> None:
