@@ -58,8 +58,20 @@ def eta_cstar(
     spray_quality_good: bool = True,
     mixture_efficiency: float = 1.0,
     cooling_efficiency: float = 1.0,
-    use_advanced_model: bool = False,
-    advanced_params: Optional[Dict[str, Any]] = None,
+    use_advanced_model: bool = True,
+    advanced_params: Optional[Dict[str, Any]] = {
+        "Pc": DEFAULT_CHAMBER_PRESS_PA,
+        "Tc": DEFAULT_CHAMBER_TEMP_K,
+        "cstar_ideal": DEFAULT_CSTAR_IDEAL_M_S,
+        "gamma": DEFAULT_GAMMA_ND,
+        "R": DEFAULT_GAS_CONST_J_KG_K,
+        "MR": DEFAULT_MIXTURE_RATIO_ND,
+        "Ac": 0.005666174318,
+        "m_dot_total": 3,
+        "Dinj": 0.002,
+        "spray_diagnostics": None,
+        "turbulence_intensity": DEFAULT_TURBULENCE_INTENSITY_ND,
+    },
 ) -> float:
     """
     Calculate combustion efficiency based on characteristic length L*.
@@ -118,12 +130,23 @@ def eta_cstar(
             gamma = advanced_params.get("gamma", DEFAULT_GAMMA_ND)
             R = advanced_params.get("R", DEFAULT_GAS_CONST_J_KG_K)
             MR = advanced_params.get("MR", DEFAULT_MIXTURE_RATIO_ND)
+            Ac = advanced_params.get("Ac", None)
+            m_dot_total = advanced_params.get("m_dot_total", None)
+            Dinj = advanced_params.get("Dinj", None)
             spray_diagnostics = advanced_params.get("spray_diagnostics", None)
             turbulence_intensity = advanced_params.get("turbulence_intensity", DEFAULT_TURBULENCE_INTENSITY_ND)
+            
+            # Validate required parameters
+            if Ac is None or m_dot_total is None:
+                raise ValueError("Ac and m_dot_total are required for advanced combustion efficiency model")
+            if Dinj is None:
+                Dinj = float(np.sqrt(4.0 * Ac / np.pi))
+            Dinj = float(max(Dinj, 1e-6))
             
             # Calculate advanced efficiency
             results = calculate_combustion_efficiency_advanced(
                 Lstar, Pc, Tc, cstar_ideal, gamma, R, MR, config,
+                Ac, Dinj, m_dot_total,
                 spray_diagnostics, turbulence_intensity
             )
             
@@ -141,11 +164,14 @@ def eta_cstar(
             
         except ImportError:
             # Fall back to simple model if advanced module not available
+            print("the advanced module is not available, falling back to simple model")
             pass
-        except Exception:
-            # Fall back to simple model on any error
+        except Exception as exc:
+            import traceback
+            import warnings
+            traceback.print_exc()
+            warnings.warn(f"Advanced eta_cstar failed: {exc}")
             pass
-    
     # Simple model (backward compatible)
     if config.model == "constant":
         eta = 1.0 - config.C

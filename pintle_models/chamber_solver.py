@@ -42,6 +42,7 @@ class ChamberSolver:
             config.chamber.A_throat,
             Lstar_override=config.chamber.Lstar
         )
+        self.injector_diameter = self._infer_injector_diameter()
         
         # Cache for spray quality (updated during solve)
         self.spray_quality_good = True
@@ -138,12 +139,29 @@ class ChamberSolver:
             diagnostics,
         )
 
+        geometry = self._get_chamber_geometry()
+        advanced_params = {
+            "Pc": Pc_val,
+            "Tc": cea_props.get("Tc", DEFAULT_CHAMBER_TEMP_K),
+            "cstar_ideal": cea_props.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S),
+            "gamma": cea_props.get("gamma", DEFAULT_GAMMA_ND),
+            "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
+            "MR": MR,
+            "Ac": geometry["area_cross"],
+            "Dinj": self.injector_diameter,
+            "m_dot_total": mdot_supply,
+            "spray_diagnostics": diagnostics,
+            "turbulence_intensity": diagnostics.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
+        }
+
         eta = eta_cstar(
             self.Lstar,
             self.config.combustion.efficiency,
             self.spray_quality_good,
             mixture_efficiency=mixture_eff,
             cooling_efficiency=cooling_eff,
+            use_advanced_model=True,
+            advanced_params=advanced_params,
         )
         
         # Validate efficiency
@@ -500,10 +518,13 @@ class ChamberSolver:
         )
 
         # Use advanced combustion efficiency model if enabled
-        use_advanced = getattr(self.config.combustion.efficiency, 'use_advanced_model', False)
+        use_advanced = getattr(self.config.combustion.efficiency, 'use_advanced_model', True)
         advanced_params = None
+        mdot_total = mdot_O + mdot_F
         
         if use_advanced:
+            geometry = self._get_chamber_geometry()
+            
             advanced_params = {
                 "Pc": Pc_val,
                 "Tc": effective_Tc,  # Use effective temperature after cooling
@@ -511,6 +532,9 @@ class ChamberSolver:
                 "gamma": cea_props.get("gamma", DEFAULT_GAMMA_ND),
                 "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
                 "MR": MR,
+                "Ac": geometry["area_cross"],
+                "Dinj": self.injector_diameter,
+                "m_dot_total": mdot_total,
                 "spray_diagnostics": closure_diag,
                 "turbulence_intensity": closure_diag.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
             }
@@ -526,7 +550,6 @@ class ChamberSolver:
         )
         
         # Comprehensive validation of final solution
-        mdot_total = mdot_O + mdot_F
         cstar_actual = eta * cea_props["cstar_ideal"]
         gamma = cea_props["gamma"]
         R = cea_props["R"]
@@ -854,6 +877,26 @@ class ChamberSolver:
         closure_diag["cooling"] = cooling_results
 
         return cooling_results, cooling_eff, effective_Tc
+    
+    def _infer_injector_diameter(self) -> float:
+        """Estimate a characteristic injector diameter for mixing models."""
+        injector_cfg = getattr(self.config, "injector", None)
+        diameter = None
+        injector_type = getattr(injector_cfg, "type", None) if injector_cfg is not None else None
+        try:
+            if injector_type == "pintle":
+                diameter = injector_cfg.geometry.fuel.d_pintle_tip
+            elif injector_type == "coaxial":
+                diameter = injector_cfg.geometry.core.d_port
+            elif injector_type == "impinging":
+                diameter = injector_cfg.geometry.oxidizer.d_jet
+        except AttributeError:
+            diameter = None
+        
+        if diameter is None or diameter <= 0:
+            geometry = self._get_chamber_geometry()
+            diameter = np.sqrt(4.0 * geometry["area_cross"] / np.pi)
+        return float(max(diameter, 1e-5))
 
     def _get_chamber_geometry(self) -> Dict[str, float]:
         chamber_cfg = self.config.chamber
