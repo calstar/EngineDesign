@@ -15,6 +15,82 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from pintle_pipeline.config_schemas import CombustionEfficiencyConfig
 
+def calculate_eta_Lstar(
+    Tc: float,
+    Pc: float,
+    R: float,
+    m_dot_total: float,
+    Ac: float,
+    SMD: float,
+    L_star: float,
+    mu: float = 7e-5,
+    Bm: float = 0.2,
+    phi: float = 3.0,
+    D0: float = 2e-5,
+    rho_l: float = 800.0,
+) -> float:
+    """
+    Compute evaporation-based efficiency using L* and a d^2-law evaporation model.
+
+    Parameters
+    ----------
+    Tc : float
+        Chamber temperature [K]
+    Pc : float
+        Chamber pressure [Pa]
+    R : float
+        Gas constant of mixture [J/(kg·K)]
+    m_dot_total : float
+        Total mass flow rate [kg/s]
+    Ac : float
+        Chamber cross-sectional area [m^2]
+    SMD : float
+        Sauter mean diameter d32 [m]
+    L_star : float
+        Characteristic length (L*) [m]
+    mu : float, optional
+        Dynamic viscosity [Pa·s]
+    Bm : float, optional
+        Spalding mass number [-]
+    phi : float, optional
+        LOX penalty constant [-]
+    D0 : float, optional
+        Reference diffusivity at 300 K, 1 atm [m^2/s]
+    rho_l : float, optional
+        Liquid fuel density [kg/m^3]
+
+    Returns
+    -------
+    eta_Lstar : float
+        Evaporation/mixing efficiency associated with length L* [-]
+    """
+    # Gas density and bulk velocity
+    rho_g = Pc / (R * Tc)              # kg/m^3
+    U = m_dot_total / (rho_g * Ac)     # m/s
+
+    # Effective diffusivity at Tc, Pc
+    D_eff = D0 * (Tc / 300.0)**1.75 * (101325.0 / Pc)  # m^2/s
+
+    # Dimensionless groups
+    Sc = mu / (rho_g * D_eff)
+    Re = rho_g * U * float(SMD) / mu          # based on droplet diameter
+
+    Sh = 2.0 + 0.6 * Re**0.5 * Sc**(1.0/3.0)
+
+    # Evaporation constant K [m^2/s]
+    K = ((8.0 * D_eff * rho_g) / rho_l) * Sh * np.log(1.0 + Bm)
+
+    # LOX penalty → effective evaporation constant K_eff [m^2/s]
+    K_eff = K / (1.0 + phi)
+
+    # Length-based Damköhler number:
+    # Da_L = (K_eff * L_star) / (U * SMD^2)   (dimensionless)
+    Da_L = K_eff * L_star / (U * SMD**2)
+
+    # Efficiency from d^2-law over length L*
+    eta_Lstar = 1.0 - np.exp(-Da_L)
+
+    return eta_Lstar
 
 def calculate_residence_time(
     Lstar: float,
@@ -23,6 +99,8 @@ def calculate_residence_time(
     gamma: float,
     R: float,
     Tc: float,
+    Ac: float,
+    m_dot_total: float,
 ) -> float:
     """
     Calculate characteristic residence time in chamber.
@@ -45,18 +123,22 @@ def calculate_residence_time(
         Gas constant [J/(kg·K)]
     Tc : float
         Chamber temperature [K]
+    Ac : float
+        Chamber area (m^2)
+    m_dot_total : float
+        Total mass flow rate (kg/s)
     
     Returns:
     --------
     tau_res : float
         Residence time [s]
     """
-    # Characteristic velocity in chamber (subsonic)
-    # Use sound speed as characteristic velocity
-    sound_speed = np.sqrt(gamma * R * Tc)
-    
+    # Use velocity of gas products as velocity, dependent on chamber velocity and length
+    rho_g = Pc/(R*Tc)
+    U = m_dot_total/(rho_g*Ac)
+
     # Residence time
-    tau_res = Lstar / sound_speed
+    tau_res = Lstar / U
     
     return float(tau_res)
 
@@ -167,7 +249,15 @@ def calculate_mixing_efficiency(
     evaporation_length: float,
     chamber_length: float,
     turbulence_intensity: float,
+    Tc: float,
+    Pc: float,
+    R: float,
+    Ac: float,
+    Dinj: float,
+    m_dot_total: float,
+    Lstar: float,
     target_smd: float = 50e-6,  # 50 microns
+    beta: float = 3.0,  # recirculation/mixing strength factor
 ) -> float:
     """
     Calculate mixing efficiency based on spray quality and evaporation.
@@ -185,14 +275,66 @@ def calculate_mixing_efficiency(
         Chamber length [m]
     turbulence_intensity : float
         Turbulence intensity (0-1)
+    Tc : float
+        Chamber temperature [K]
+    Pc : float
+        Chamber pressure [Pa]
+    R : float
+        Gas constant [J/(kg·K)]
+    Ac : float
+        Chamber area [m^2]
+    Dinj : float
+        Characteristic injector diameter (e.g., pintle tip) [m]
+    m_dot_total : float
+        Total mass flow rate [kg/s]
+    Lstar : float
+        Characteristic length [m]
     target_smd : float
         Target SMD for good atomization [m]
+    beta : float
+        Recirculation enhancement factor (dimensionless)
     
     Returns:
     --------
     eta_mix : float
         Mixing efficiency (0-1)
     """
+    rho_g = Pc / max(R * Tc, 1e-6)
+    U = m_dot_total / max(rho_g * Ac, 1e-8)
+
+    # --- turbulence-based transport properties ---
+    mu_g = 7.0e-5  # Pa·s, representative hot-gas viscosity
+    Dinj_eff = Dinj if Dinj and Dinj > 0 else np.sqrt(4.0 * Ac / np.pi)
+
+    Re = rho_g * U * Dinj_eff / max(mu_g, 1e-8)
+    Re = max(Re, 1.0)
+    I_est = np.clip(0.16 * Re ** (-1.0 / 8.0), 0.02, 0.3)  # canonical high-Re estimate
+    I_eff = max(I_est, turbulence_intensity)
+    Lt = max(0.07 * Dinj_eff, 1e-5)
+    C_mu = 0.09
+    k_est = 1.5 * (U * I_eff) ** 2
+    epsilon_est = C_mu ** 0.75 * k_est ** 1.5 / max(Lt, 1e-6)
+    epsilon_est = max(epsilon_est, 1e-8)
+    mu_t = rho_g * C_mu * (k_est ** 2) / epsilon_est
+    mu_t = max(mu_t, 0.0)
+
+    D_t = mu_t / max(rho_g, 1e-8)
+    D_m = 2.0e-5 * (Tc / 300.0) ** 1.75 * (101325.0 / max(Pc, 1e3))
+    D_total = max(D_m + D_t, 1e-8)
+
+    if chamber_length > 0:
+        evap_ratio = min(evaporation_length / chamber_length, 2.0)  # Cap at 2x
+        evap_factor = 1.0 / (1.0 + 0.3 * (evap_ratio - 1.0))
+    else:
+        evap_factor = 0.5
+    evap_factor = np.clip(evap_factor, 0.1, 1.0)
+
+    tau_res_eff = (Lstar / max(U, 1e-4)) * (1.0 / evap_factor)
+
+    # Recirculation length scale (fraction of chamber length or injector diameter)
+    Dc = np.sqrt(4.0 * Ac / np.pi)
+    L_recirc = 0.25 * Dc # pick a calibrated factor
+
     # Droplet size effect
     # Smaller droplets → better mixing
     if SMD > 0 and target_smd > 0:
@@ -200,26 +342,16 @@ def calculate_mixing_efficiency(
         smd_factor = 1.0 / (1.0 + 0.5 * (smd_ratio - 1.0))
     else:
         smd_factor = 0.5  # Unknown → assume poor
-    
-    # Evaporation length effect
-    # If evaporation length > chamber length, incomplete evaporation
-    if chamber_length > 0:
-        evap_ratio = min(evaporation_length / chamber_length, 2.0)  # Cap at 2x
-        evap_factor = 1.0 / (1.0 + 0.3 * (evap_ratio - 1.0))
-    else:
-        evap_factor = 0.5
-    
-    # Turbulence effect (enhances mixing)
-    turbulence_factor = 0.7 + 0.3 * min(turbulence_intensity / 0.2, 1.0)
-    
-    # Combined mixing efficiency
-    eta_mix = smd_factor * evap_factor * turbulence_factor
-    
-    # Clamp to reasonable range
-    eta_mix = np.clip(eta_mix, 0.3, 1.0)
-    
-    return float(eta_mix)
 
+    tau_mix = (L_recirc ** 2) / (beta * D_total)
+    tau_mix = tau_mix / max(smd_factor, 0.1)
+    tau_mix = max(tau_mix, 1e-6)
+
+    Da_mix = tau_res_eff / tau_mix
+    Da_mix = np.clip(Da_mix, 0.0, 50.0)
+
+    eta_m = 1.0 - np.exp(-Da_mix)
+    return float(np.clip(eta_m, 0.0, 1.0))
 
 def calculate_combustion_efficiency_advanced(
     Lstar: float,
@@ -230,6 +362,9 @@ def calculate_combustion_efficiency_advanced(
     R: float,
     MR: float,
     config: CombustionEfficiencyConfig,
+    Ac: float,
+    Dinj: float,
+    m_dot_total: float,
     spray_diagnostics: Optional[Dict] = None,
     turbulence_intensity: float = 0.08,
 ) -> Dict[str, float]:
@@ -270,6 +405,12 @@ def calculate_combustion_efficiency_advanced(
         Mixture ratio
     config : CombustionEfficiencyConfig
         Efficiency configuration
+    Ac : float
+        Chamber area [m^2]
+    Dinj : float
+        Characteristic injector diameter [m]
+    m_dot_total : float
+        Total mass flow rate [kg/s]
     spray_diagnostics : dict, optional
         Spray diagnostics (SMD, evaporation length, etc.)
     turbulence_intensity : float
@@ -294,16 +435,18 @@ def calculate_combustion_efficiency_advanced(
         eta_Lstar = 1.0 - config.C * (1.0 - Lstar / 1.0)
         eta_Lstar = np.clip(eta_Lstar, 0.0, 1.0)
     else:  # exponential (default)
-        eta_Lstar = 1.0 - config.C * np.exp(-config.K * Lstar)
+        SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
+        print(f"the SMD is {SMD}")
+        eta_Lstar = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, SMD, Lstar)
     
     # Clamp L* efficiency
     eta_Lstar = np.clip(eta_Lstar, config.mixture_efficiency_floor, 1.0)
     
     # 2. Reaction kinetics efficiency (Damköhler number)
-    tau_res = calculate_residence_time(Lstar, Pc, cstar_ideal, gamma, R, Tc)
+    tau_res = calculate_residence_time(Lstar, Pc, cstar_ideal, gamma, R, Tc, Ac, m_dot_total)
     tau_chem = calculate_reaction_time_scale(Pc, Tc, MR, gamma)
     Da = calculate_damkohler_number(tau_res, tau_chem)
-    
+    print(f"Da: {Da}, tau_res: {tau_res}, tau_chem: {tau_chem}")
     # Efficiency based on Damköhler number
     # Da >> 1: equilibrium (eta → 1)
     # Da ~ 1: finite-rate (eta ~ 0.8-0.95)
@@ -326,6 +469,7 @@ def calculate_combustion_efficiency_advanced(
         chamber_length = Lstar  # Approximate
         eta_mixing = calculate_mixing_efficiency(
             SMD, x_star, chamber_length, turbulence_intensity,
+            Tc, Pc, R, Ac, Dinj, m_dot_total, Lstar,
             target_smd=config.target_smd_microns * 1e-6 if hasattr(config, 'target_smd_microns') else 50e-6
         )
     else:
@@ -351,6 +495,7 @@ def calculate_combustion_efficiency_advanced(
     eta_turbulence = np.clip(eta_turbulence, 0.85, 1.0)
     
     # 5. Combined efficiency
+    print(f"eta_Lstar: {eta_Lstar}, eta_kinetics: {eta_kinetics}, eta_mixing: {eta_mixing}, eta_turbulence: {eta_turbulence}")
     eta_total = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
     
     # Apply cooling efficiency if provided (external)

@@ -233,7 +233,7 @@ combustion:
     we_reference: 100.0
     we_penalty_exponent: 0.5
     smd_penalty_exponent: 1.0
-    use_advanced_model: false
+    use_advanced_model: True
     use_finite_rate_chemistry: true
     use_shifting_equilibrium: true
 
