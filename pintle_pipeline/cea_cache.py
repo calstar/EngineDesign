@@ -7,10 +7,48 @@ import json
 import sys
 from rocketcea.cea_obj import CEA_Obj
 from typing import Tuple, Optional, List, Dict, Any
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, Manager
 from functools import partial
 import time
 from .config_schemas import CEAConfig
+
+# Fix console encoding issues (Windows, WSL, etc.)
+_original_print = print
+def safe_print(*args, **kwargs):
+    """Print function that handles Unicode encoding errors gracefully"""
+    try:
+        _original_print(*args, **kwargs)
+    except UnicodeEncodeError:
+        # Replace problematic characters with ASCII equivalents
+        safe_args = []
+        for arg in args:
+            if isinstance(arg, str):
+                # Replace Unicode characters that can't be encoded
+                safe_str = arg.encode('ascii', errors='replace').decode('ascii')
+                safe_args.append(safe_str)
+            else:
+                safe_args.append(arg)
+        try:
+            _original_print(*safe_args, **kwargs)
+        except Exception:
+            # Last resort: convert everything to string and sanitize
+            safe_str_args = []
+            for arg in safe_args:
+                safe_str_args.append(str(arg).encode('ascii', errors='replace').decode('ascii'))
+            _original_print(*safe_str_args, **kwargs)
+
+# Replace built-in print with safe version
+print = safe_print
+
+# Also try to reconfigure stdout if possible
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    elif hasattr(sys.stdout, 'buffer'):
+        import io
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+except (AttributeError, ValueError, OSError):
+    pass  # Safe print wrapper will handle it
 
 
 def parse_cea_basic(out: str) -> Tuple[float, float, float, float, float, float]:
@@ -70,6 +108,7 @@ def _compute_cea_point_chunk(
     ox_name: str,
     fuel_name: str,
     expansion_ratio: Optional[float] = None,
+    lock: Optional[Any] = None,
 ) -> List[Tuple[int, int, int, float, float, float, float, float, float]]:
     """
     Worker function for parallel CEA cache building.
@@ -87,12 +126,15 @@ def _compute_cea_point_chunk(
         Fuel name
     expansion_ratio : float, optional
         Fixed expansion ratio (for 2D cache). If None, uses eps from chunk (3D cache)
+    lock : multiprocessing.Lock, optional
+        Lock to serialize RocketCEA calls (RocketCEA is not process-safe)
     
     Returns:
     --------
     results : List[Tuple[int, int, int, float, float, float, float, float, float]]
         List of (i, j, k_idx, cstar, Cf, Tc, gamma, R, M) tuples
     """
+    # Create CEA object per worker (each process gets its own)
     chamber = CEA_Obj(oxName=ox_name, fuelName=fuel_name)
     results = []
     
@@ -101,19 +143,30 @@ def _compute_cea_point_chunk(
         eps_to_use = eps if expansion_ratio is None else expansion_ratio
         
         try:
-            out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps_to_use)
-            Tc, gamma, R, cstar, M, Isp = parse_cea_basic(out)
-            
+            # Serialize RocketCEA calls if lock is provided (RocketCEA uses shared temp files)
+            if lock is not None:
+                lock.acquire()
             try:
-                Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
-            except:
-                # Fallback: estimate from Isp
-                isp = chamber.estimate_Ambient_Isp(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
-                Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
-            
-            results.append((i, j, k_idx, cstar, Cf_ideal, Tc, gamma, R, M))
+                out = chamber.get_full_cea_output(Pc=Pc_psia, MR=MR, eps=eps_to_use)
+                Tc, gamma, R, cstar, M, Isp = parse_cea_basic(out)
+                
+                try:
+                    Cf_ideal = chamber.get_PambCf(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
+                except Exception:
+                    # Fallback: estimate from Isp
+                    try:
+                        isp = chamber.estimate_Ambient_Isp(Pc=Pc_psia, MR=MR, eps=eps_to_use)[0]
+                        Cf_ideal = isp * 9.80665 / cstar if cstar > 0 else np.nan
+                    except Exception:
+                        Cf_ideal = np.nan
+                
+                results.append((i, j, k_idx, cstar, Cf_ideal, Tc, gamma, R, M))
+            finally:
+                if lock is not None:
+                    lock.release()
         except Exception as e:
-            # On failure, store NaN values
+            # On failure (including Fortran I/O errors), store NaN values
+            # This handles "I/O past end of record" and "End of file" errors
             results.append((i, j, k_idx, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan))
     
     return results
@@ -324,37 +377,37 @@ class CEACache:
             print(f"   [INFO] Sequential build would take ~{total_points * 0.5 / 60:.0f} minutes")
         
         # Check for parallel processing option
-        # On Windows, multiprocessing with 'spawn' can cause memory issues when workers import heavy modules
-        # Disable parallel by default on Windows unless explicitly enabled
+        # RocketCEA (Fortran) is NOT process-safe - multiple processes collide on temp files
+        # Parallel processing causes Fortran I/O errors and hangs
+        # Disable parallel by default - sequential is slower but reliable
         is_windows = sys.platform == 'win32'
-        use_parallel = getattr(self.config, 'use_parallel_cea_build', True)
+        use_parallel = getattr(self.config, 'use_parallel_cea_build', False)  # Default to False
         n_workers = getattr(self.config, 'cea_parallel_workers', None)
         
-        # Only parallelize for large grids and if not Windows (or Windows with explicit override)
+        # Only parallelize if explicitly enabled and for large grids
         should_use_parallel = use_parallel and total_points > 100
         
         if should_use_parallel and not is_windows:
-            # Linux/Mac: use parallel processing
+            # Linux/Mac: use parallel processing with lock (serialized RocketCEA calls)
             if n_workers is None:
-                n_workers = min(cpu_count(), 8)  # Limit to 8 workers
-            print(f"   [PARALLEL] Using {n_workers} workers for parallel processing")
+                n_workers = min(cpu_count(), 4)  # Limit to 4 workers (RocketCEA is not safe)
+            print(f"   [PARALLEL] Using {n_workers} workers with serialized RocketCEA calls")
+            print(f"   [WARNING] RocketCEA is not process-safe - using lock to serialize calls")
+            print(f"   [WARNING] Parallel mode may still hang - sequential is recommended")
             try:
                 self._build_cache_parallel(n_workers, total_points)
-            except (NameError, ImportError, MemoryError) as e:
-                print(f"   [WARNING] Parallel processing failed: {e}")
+            except (NameError, ImportError, MemoryError, Exception) as e:
+                print(f"   [ERROR] Parallel processing failed: {e}")
                 print(f"   [FALLBACK] Building cache sequentially")
                 self._build_cache_sequential(total_points)
         elif should_use_parallel and is_windows:
             # Windows: Default to sequential due to multiprocessing spawn issues
-            # Windows 'spawn' method requires re-importing the entire module in each worker,
-            # which causes memory issues with heavy imports (plotly, scipy, etc.)
-            # Sequential is slower but much more stable
             print(f"   [WARNING] Windows detected - using sequential mode to avoid multiprocessing issues")
-            print(f"   [INFO] On Windows, parallel processing can cause memory/import errors")
             print(f"   [INFO] Sequential mode is slower but stable (ETA: ~{total_points * 0.5 / 60:.1f} min)")
             self._build_cache_sequential(total_points)
         else:
-            print(f"   [SEQUENTIAL] Building cache sequentially")
+            print(f"   [SEQUENTIAL] Building cache sequentially (recommended for RocketCEA)")
+            print(f"   [INFO] Sequential mode avoids Fortran I/O conflicts (ETA: ~{total_points * 0.5 / 60:.1f} min)")
             self._build_cache_sequential(total_points)
         
         # Save to cache
@@ -459,6 +512,11 @@ class CEACache:
         chunks = [grid_points[i:i+chunk_size] for i in range(0, len(grid_points), chunk_size)]
         print(f"   [PARALLEL] Split into {len(chunks)} chunks of ~{chunk_size} points each")
         
+        # Create a shared lock to serialize RocketCEA calls (RocketCEA uses shared temp files)
+        # This prevents Fortran I/O errors when multiple processes access RocketCEA simultaneously
+        manager = Manager()
+        cea_lock = manager.Lock()
+        
         # Prepare worker function
         # The function is defined at module level (above), so it's directly accessible
         # On Windows with 'spawn', workers will re-import this module and find the function
@@ -467,6 +525,7 @@ class CEACache:
             ox_name=self.config.ox_name,
             fuel_name=self.config.fuel_name,
             expansion_ratio=self.config.expansion_ratio if not self.use_3d else None,
+            lock=cea_lock,  # Pass lock to serialize RocketCEA calls
         )
         
         # Process chunks in parallel

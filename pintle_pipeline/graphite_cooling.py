@@ -160,6 +160,17 @@ def compute_graphite_recession(
             "q_conduction": 0.0,
         }
     
+    # CRITICAL: Graphite inserts are designed to have ZERO or negligible recession
+    # The whole point is to keep throat area constant. If recession is enabled
+    # for sizing purposes only, use a configurable flag.
+    # By default, graphite should NOT recede at runtime.
+    allow_recession = getattr(graphite_config, "allow_runtime_recession", False)
+    if not allow_recession:
+        # Graphite insert purpose: keep throat area constant - return zero recession
+        # Still calculate thermal properties for diagnostics, but recession = 0
+        # This is the correct behavior - graphite is a non-ablating insert
+        pass  # Will calculate but set recession_rate = 0 at end
+    
     # Get optional config fields with safe defaults
     emissivity = getattr(graphite_config, "emissivity", 0.8) or 0.8
     T_env = getattr(graphite_config, "ambient_temperature", 300.0) or 300.0
@@ -781,10 +792,24 @@ def compute_graphite_recession(
     
     # Total recession rate (thermal + oxidation)
     # Oxidation is typically dominant at high temperatures
-    recession_rate_total = recession_rate_thermal + oxidation_rate
+    recession_rate_calculated = recession_rate_thermal + oxidation_rate
     
-    # Total mass flux
-    mass_flux_total = recession_rate_total * graphite_config.material_density
+    # CRITICAL FIX: Graphite inserts are designed to have ZERO recession at runtime
+    # The whole point is to keep throat area constant. The calculated recession
+    # is only for sizing purposes (how much material to include), NOT for runtime.
+    # At runtime, graphite should NOT recede - that's its design purpose.
+    allow_recession = getattr(graphite_config, "allow_runtime_recession", False)
+    if not allow_recession:
+        recession_rate_total = 0.0  # Graphite does NOT ablate - keeps throat constant
+        # Still report calculated values for diagnostics/sizing, but actual recession = 0
+        recession_rate_for_sizing = recession_rate_calculated
+    else:
+        recession_rate_total = recession_rate_calculated
+        recession_rate_for_sizing = recession_rate_calculated
+    
+    # Total mass flux (use calculated for heat transfer, but recession = 0)
+    mass_flux_total = recession_rate_calculated * graphite_config.material_density  # For heat transfer calc
+    mass_flux_actual = recession_rate_total * graphite_config.material_density  # Actual recession (0)
     
     # Heat removed by ablation
     heat_removed = q_net * throat_area * graphite_config.coverage_fraction
@@ -794,8 +819,10 @@ def compute_graphite_recession(
     
     return {
         "enabled": True,
-        "recession_rate": float(recession_rate_total),
-        "mass_flux": float(mass_flux_total),
+        "recession_rate": float(recession_rate_total),  # ZERO by default - graphite doesn't ablate
+        "recession_rate_calculated": float(recession_rate_calculated),  # For sizing/diagnostics only
+        "mass_flux": float(mass_flux_actual),  # Actual mass flux (0 if recession disabled)
+        "mass_flux_calculated": float(mass_flux_total),  # Calculated for heat transfer
         "surface_temperature": float(surface_temp),
         "effective_heat_flux": float(q_net),
         "radiative_relief": float(radiative_relief),
