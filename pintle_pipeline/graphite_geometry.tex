@@ -1,0 +1,173 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,siunitx,bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\sisetup{per-mode=symbol,detect-weight=true,detect-family=true}
+
+\title{Graphite Throat Insert Sizing for Kerolox Engines\\
+A physics-based method with oxidation heat feedback}
+\author{ }
+\date{ }
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note gives a practical method to determine the graphite throat insert geometry from engine operating points and a wall model that includes oxidation heat feedback. The goal is to pick the \emph{axial length} and \emph{radial thickness} that keep the back surface within a safe temperature while providing recession allowance and mechanical support. The method is compatible with a physics-based wall model that solves the surface energy balance with kinetic and diffusion-limited oxidation.
+\end{abstract}
+
+\section{Inputs and material data}
+Given or estimated at the design point:
+\begin{itemize}
+  \item Chamber pressure $p_c$, mass flow $\dot m$, free-stream gas temperature at throat $T_g$, burn time $t_b$, throat area $A_t$ and diameter $D_t$.
+  \item Peak convective heat flux at throat $q''_{\mathrm{peak}}$ (Bartz or CFD-based profile $q''(x)$).
+  \item Graphite properties: density $\rho_s$, conductivity $k$, specific heat $c_p$, emissivity $\varepsilon$, activation energy $E_a$, reference oxidation rate and exponents, and effective heat of ablation $H^\ast$.
+\end{itemize}
+
+From the attached shop note use conservative values when unknown: $k\simeq \SI{1500}{W/(m\cdot K)}$ (lower bound), $\rho_s\simeq \SI{2260}{kg/m^3}$, $c_p \in [\num{670},\num{720}]~\si{J/(kg\cdot K)}$, and a nominal erosion rate $\,\dot r_{\mathrm{erosion}}\approx \SI{6e-5}{m/s}$ for LOX/RP-1 if you need a quick check. Also use $H^\ast \approx \SI{5e7}{J/kg}$ for a first estimate when relating heat load and recession. :contentReference[oaicite:0]{index=0}
+
+\section{Surface energy balance with oxidation feedback}
+At the throat the wall model solves, per unit area,
+\begin{align}
+  \underbrace{q''_{\mathrm{conv}}(T_s)}_{\text{in}}
+  + \underbrace{q''_{\mathrm{fb}}}_{\text{oxidation feedback}}
+  - \underbrace{q''_{\mathrm{rad}}(T_s)}_{\text{out}}
+  = \underbrace{q''_{\mathrm{cond}}}_{\text{into solid}}
+  + \underbrace{\dot m''_{\mathrm{th}} H^\ast_{\mathrm{th}}}_{\text{thermal ablation}},
+  \label{eq:energy}
+\end{align}
+with $q''_{\mathrm{conv}}=h_g\,(T_g-T_s)$ and $q''_{\mathrm{rad}}=\varepsilon \sigma\,(T_s^4 - T_\infty^4)$. Thermal conduction is approximated as $q''_{\mathrm{cond}}=k\,(T_s - T_b)/t_{\mathrm{eff}}$, where $T_b$ is the back-face temperature target and $t_{\mathrm{eff}}$ is the conducting thickness that remains at time $t$.
+
+Oxidation mass flux uses the minimum of kinetic and diffusion limits,
+\begin{align}
+ \dot m''_{\mathrm{ox}} = \min\!\left[
+ \dot m''_{\mathrm{ox,kin}}(T_s,p_{\mathrm{O_2}}),\;
+ \dot m''_{\mathrm{ox,diff}}(T_s,\,\mathrm{Re},\,\mathrm{Sc},\,\mathrm{Sh})\right],
+\end{align}
+and the feedback heat is a fraction of the oxidation enthalpy release,
+\begin{align}
+ q''_{\mathrm{fb}} = f_{\mathrm{fb}}\,\dot m''_{\mathrm{ox}}\,\Delta h_{\mathrm{ox}},
+ \qquad
+ f_{\mathrm{fb}} = f_{\min} + (f_{\max}-f_{\min})\,
+ \frac{\mathrm{Da}}{1+\mathrm{Da}}\,\frac{1}{1+B_m},
+\end{align}
+where $\mathrm{Da}$ is a Damköhler number constructed from a surface rate and a mass-transfer rate, and $B_m$ is a blowing parameter using the total outward mass flux. When thermal ablation is active the model pins $T_s$ at $T_{\mathrm{abl}}$ and solves $\dot m''_{\mathrm{th}}$ from~\eqref{eq:energy}.
+
+\section{Relating heat load to recession}
+If one uses a single-parameter check between heat and recession, a conservative relation is
+\begin{align}
+  q'' \approx \rho_s\,H^\ast\,\dot r
+  \quad \Rightarrow \quad
+  \Delta_{\mathrm{ablate}} = \dot r\,t_b,
+  \label{eq:q_to_rdot}
+\end{align}
+with $H^\ast\simeq \SI{5e7}{J/kg}$ and $\dot r$ taken from model output or the empirical LOX/RP-1 value above. For $t_b=\SI{10}{s}$ and $\dot r=\SI{6e-5}{m/s}$ the allowance is $\Delta_{\mathrm{ablate}}\simeq \SI{0.6}{mm}$, which matches the shop note. :contentReference[oaicite:1]{index=1}
+
+\section{Transient conduction and penetration depth}
+Treat the insert locally as a 1D semi-infinite solid under a step heat load for a conservative thickness estimate. The thermal penetration depth is
+\begin{align}
+  \delta(t) = \sqrt{\alpha\,t},\qquad
+  \alpha = \frac{k}{\rho_s c_p}.
+\end{align}
+Using the conservative material bounds gives $\alpha\approx (9.2\text{ to }9.9)\times10^{-4}\ \si{m^2/s}$, so
+$\delta(\SI{10}{s}) \approx \SI{95}{mm}$ for a true step. This over-predicts for a real nozzle because the heat footprint is narrow and the flux decays strongly away from the throat and in time. Use it to \emph{bound} the thickness, not to set it directly. :contentReference[oaicite:2]{index=2}
+
+For a finite slab of remaining thickness $t_{\mathrm{eff}}$, a conservative back-face constraint under peak flux $q''_{\mathrm{peak}}$ is
+\begin{align}
+  t_{\mathrm{cond}} \ge
+  \frac{k\,\bigl(T_s - T_{b,\max}\bigr)}{q''_{\mathrm{peak}}},
+  \label{eq:tcond}
+\end{align}
+with $T_{b,\max}$ the allowable back-face temperature for the metal substrate or adhesive.
+
+\section{Axial length}
+Let $q''(x)$ be the axial profile from Bartz or CFD. Pick the graphite axial half-length $L_\pm$ so that the heat flux at the insert ends falls below what the neighboring liner or steel can handle:
+\begin{align}
+  q''(|x|=L_\pm)\;\le\; q''_{\mathrm{allow,adjacent}}.
+\end{align}
+If only a Bartz throat value is available, a practical rule is $L_\pm=(0.5\text{ to }1.0)\,D_t$ on each side of the throat, then iterate once you have a better $q''(x)$ or a measured recession map. Many teams converge to a total graphite length of $1.5$ to $2.5\,D_t$ around the minimum-area section.
+
+\section{Radial thickness}
+Select the initial radial thickness at the throat as
+\begin{align}
+  t_{\mathrm{insert,0}} \;=\;
+  \underbrace{\Delta_{\mathrm{ablate}}}_{\text{recession allowance}}
+  \;+\;
+  \underbrace{t_{\mathrm{cond}}}_{\text{conduction for }T_b}
+  \;+\;
+  \underbrace{t_{\mathrm{mech}}}_{\text{lip, fit, strength}}
+  \;+\;
+  \underbrace{\phi_{\mathrm{sf}}}_{\text{safety factor}},
+  \label{eq:thickness}
+\end{align}
+where
+\begin{itemize}
+  \item $\Delta_{\mathrm{ablate}}=\dot r\,t_b$ from the wall model output or \eqref{eq:q_to_rdot}.
+  \item $t_{\mathrm{cond}}$ from \eqref{eq:tcond} with $q''_{\mathrm{peak}}$ and a conservative $T_s$ from the model at the design point.
+  \item $t_{\mathrm{mech}}$ set by the groove and seating details, typical \SIrange{0.5}{1.5}{mm} at the ID for small throats and thicker for large bores.
+  \item $\phi_{\mathrm{sf}}$ to cover property scatter and profile uncertainty. Use $30\%$ to $50\%$ of $(\Delta_{\mathrm{ablate}}+t_{\mathrm{cond}})$ when properties or $q''$ are uncertain.
+\end{itemize}
+
+\paragraph{Back-face check.}
+After choosing $t_{\mathrm{insert,0}}$ run the wall model through the burn with the time-varying $q''(t)$ and verify $T_b(t)\le T_{b,\max}$ and that the remaining thickness never drops below the mechanical minimum.
+
+\section{Algorithm you can implement}
+For each candidate geometry:
+\begin{enumerate}
+  \item Compute $q''_{\mathrm{peak}}$ at the throat from Bartz at the design $p_c$, $\dot m$, $T_g$. If available, load $q''(x)$ and $q''(t)$.
+  \item Run the wall model to convergence at the design point to get $T_s$, $\dot m''_{\mathrm{ox}}$, $\dot m''_{\mathrm{th}}$, and $\dot r = (\dot m''_{\mathrm{ox}}+\dot m''_{\mathrm{th}})/\rho_s$.
+  \item Set $\Delta_{\mathrm{ablate}} = \dot r\,t_b$.
+  \item Compute $t_{\mathrm{cond}}$ from \eqref{eq:tcond} using $T_s$ from the model and the back-face limit $T_{b,\max}$.
+  \item Choose $t_{\mathrm{insert,0}}$ from \eqref{eq:thickness} and select axial half-length $L_\pm$ so $q''(|x|=L_\pm)\le q''_{\mathrm{allow,adjacent}}$. If no $q''(x)$ yet, start with $L_\pm=D_t/2$ to $D_t$ and iterate once you have a profile.
+  \item Transient check: march the wall model across the burn $t\in [0,t_b]$ with the time-varying heat flux and update the remaining thickness. Verify $T_b(t)$ and remaining wall never violate limits. Increase $t_{\mathrm{insert,0}}$ or $L_\pm$ if they do.
+\end{enumerate}
+
+\section{Quick numeric back-of-envelope}
+If you only have the shop-note numbers and want a first cut:
+\begin{align*}
+  \Delta_{\mathrm{ablate}} &\approx \SI{0.6}{mm}\quad (t_b=\SI{10}{s}), \\
+  t_{\mathrm{cond}} &\approx \frac{k\,(T_s - T_{b,\max})}{q''_{\mathrm{peak}}}, \\
+  t_{\mathrm{insert,0}} &\approx \Delta_{\mathrm{ablate}} + t_{\mathrm{cond}} + t_{\mathrm{mech}} + 0.3\left(\Delta_{\mathrm{ablate}} + t_{\mathrm{cond}}\right),
+\end{align*}
+with $k=\SI{1500}{W/(m\cdot K)}$, pick $T_s$ from your model at the throat, and choose $T_{b,\max}$ based on the steel or adhesive limit. The shop note’s material numbers and the \SI{0.6}{mm} ten-second recession reference are from the attached sheet. :contentReference[oaicite:3]{index=3}
+
+\section{Geometry handoffs}
+\begin{itemize}
+  \item \textbf{Inner profile:} throat ID follows the nozzle contour. Taper or blend the graphite exit to avoid a hard step into the downstream liner.
+  \item \textbf{Seat and lip:} include a radial shoulder that seats against the metal with a compliant gasket if needed. Avoid sharp internal corners.
+  \item \textbf{Bonding:} rely on axial seating plus anti-rotation features. Use high-temp adhesive as a positional aid, not as the primary load path.
+\end{itemize}
+
+\section{What to iterate}
+\begin{itemize}
+  \item $f_{\mathrm{fb}}$ bounds and oxidation pathway fraction (CO vs CO$_2$) since this shifts $\Delta h_{\mathrm{ox}}$.
+  \item $k$ low-end value and $c_p$ high-end value to make $\alpha$ small and the conduction requirement larger.
+  \item Axial length until the neighboring material stays under its heat limit with margin.
+\end{itemize}
+
+\section*{Symbols}
+\begin{tabular}{@{}ll@{}}
+$A_t$ & throat area \\
+$B_m$ & blowing parameter \\
+$c_p$ & specific heat of graphite \\
+$D_t$ & throat diameter \\
+$H^\ast_{\mathrm{th}}$ & effective heat for thermal ablation \\
+$k$ & thermal conductivity of graphite \\
+$q''$ & heat flux (various contributions) \\
+$T_b$ & back-face temperature \\
+$T_s$ & surface temperature \\
+$\alpha$ & thermal diffusivity $k/(\rho_s c_p)$ \\
+$\delta$ & thermal penetration depth \\
+$\rho_s$ & graphite density \\
+$\sigma$ & Stefan–Boltzmann constant \\
+$\dot r$ & net recession rate
+\end{tabular}
+
+\vfill
+\noindent\textit{Notes source:} shop graphite insert worksheet with property ranges and a ten-second LOX/RP-1 recession reference. :contentReference[oaicite:4]{index=4}
+
+\end{document}

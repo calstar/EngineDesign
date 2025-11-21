@@ -247,9 +247,11 @@ def compute_graphite_recession(
     B_m = 0.0
     
     # Iterative solution for surface temperature
+    # Following theory: q''_in + q''_fb - q''_rad = q''_cond + m''_th * H*_th
     T_s = throat_temperature  # Initial guess
     max_iter = 50
     tol = 1.0  # K - convergence tolerance
+    residual_tol = 100.0  # W/m² - energy balance residual tolerance
     damp = 0.5  # Damping factor for Newton step
     feedback_max_iter = 10  # Max iterations for feedback loop convergence
     feedback_tol = 1e-6  # Relative tolerance for feedback loop convergence
@@ -467,33 +469,76 @@ def compute_graphite_recession(
                     break
         
         # 9. ENERGY BALANCE RESIDUAL
-        # If ablating, residual should be zero (T_s is pinned, m_dot_th balances energy)
+        # Energy balance: q''_in + q''_fb - q''_rad = q''_cond + m''_th * H*_th
+        # Residual = (q_in + q_fb - q_rad) - (q_cond + m_dot_th * H_star_th)
+        # When ablating or in transition region, m_dot_th is calculated from energy balance,
+        # so residual should be ~0. But we still need a residual for Newton iteration.
+        # In transition region, use the fact that m_dot_th should satisfy the balance.
         if is_ablating:
+            # When ablating, T_s is pinned and m_dot_th balances energy exactly
+            residual = 0.0
+        elif m_dot_th > 0 and T_s > 2800.0 and T_s < T_abl:
+            # In transition region, m_dot_th is calculated from energy balance, so residual is ~0
+            # But for Newton iteration, we need a non-zero residual. Use the energy balance directly:
+            # We're solving for T_s such that the energy balance is satisfied.
+            # The residual should reflect how far we are from satisfying the balance.
+            # Since m_dot_th = q_net_available / H_star_th, the residual is zero by construction.
+            # Instead, use a residual based on the fact that we want q_net_available to be consistent.
+            # Actually, the residual IS zero, so we can't use Newton. Use a simple update instead.
             residual = 0.0
         else:
+            # Normal case: no thermal ablation, residual is standard energy balance
             residual = q_in + q_fb - q_rad - q_cond - m_dot_th * H_star_th
         
         # 10. NEWTON-RAPHSON UPDATE FOR T_s
-        # Skip Newton update if ablating (T_s is pinned)
-        if iter > 0 and not is_ablating:
+        # Skip Newton update if ablating (T_s is pinned) or in transition region (residual is zero)
+        in_transition = (m_dot_th > 0 and T_s > 2800.0 and T_s < T_abl)
+        if iter > 0 and not is_ablating and not in_transition:
             # Derivatives for Newton step
             dq_in_dT = -heat_transfer_coefficient  # d/dT_s [h_g * (T_g - T_s)]
             dq_rad_dT = 4.0 * emissivity * SIGMA * T_s**3
             dq_cond_dT = k_s / max(effective_thickness, 0.001)
             
-            # Derivative of oxidation feedback (simplified - assume f_fb and m_dot_ox change slowly)
+            # Derivative of oxidation feedback: d(q_fb)/dT_s = f_fb * oxidation_enthalpy * d(m_dot_ox)/dT_s
+            # Note: f_fb depends on B_m which depends on m_dot_th, but we approximate f_fb as constant for derivative
             dq_fb_dT = 0.0
-            if m_dot_ox > 0:
-                # Simplified: d(m_dot_ox)/dT_s ~ m_dot_ox * (Ea / (R_GAS * T_s^2))
-                dm_dot_ox_dT = m_dot_ox * (Ea / (R_GAS * T_s**2)) * 0.1  # Small factor for stability
+            if m_dot_ox > 0 and T_s > graphite_config.oxidation_temperature:
+                # For kinetic-limited: m_dot_ox_kin = j_ref * exp(-Ea/R * (1/T_s - 1/T_ref)) * (p_O2/P_ref)^n
+                # d(m_dot_ox_kin)/dT_s = m_dot_ox_kin * (Ea / (R_GAS * T_s^2))
+                # For diffusion-limited, temperature dependence is weaker (through film temperature)
+                # Use kinetic-limited derivative as approximation (dominant at high T)
+                if m_dot_ox_kin > 0:
+                    dm_dot_ox_dT = m_dot_ox_kin * (Ea / (R_GAS * T_s**2))
+                else:
+                    # Diffusion-limited: weaker T dependence through film temperature
+                    dm_dot_ox_dT = m_dot_ox * (Ea / (R_GAS * T_s**2)) * 0.3  # Reduced factor for diffusion-limited
                 dq_fb_dT = f_fb * oxidation_enthalpy * dm_dot_ox_dT
             
-            # Derivative of thermal ablation term
+            # Derivative of thermal ablation term: d(m_dot_th * H_star_th)/dT_s
+            # In transition region (T_s > 2800K but < T_abl), m_dot_th = q_net_available / H_star_th
+            # where H_star_th = H_ablation + cp_s * (T_s - 300)
+            # Since m_dot_th * H_star_th = q_net_available, the residual R = 0 by construction
+            # But we need dR/dT_s for Newton iteration. Since R = q_in + q_fb - q_rad - q_cond - m_dot_th * H_star_th
+            # and m_dot_th * H_star_th = q_net_available, we have:
+            # dR/dT_s = d(q_in + q_fb - q_rad - q_cond)/dT_s - d(m_dot_th * H_star_th)/dT_s
+            # = dq_net_available/dT_s - dq_net_available/dT_s = 0
+            # This means the residual is always zero in transition region, so Newton won't work.
+            # Instead, we need to think: we're solving for T_s such that when m_dot_th = q_net_available/H_star_th,
+            # the energy balance is satisfied. But since m_dot_th is calculated from the balance, it's always satisfied.
+            # The issue is that we're iterating on T_s, but the residual doesn't change with T_s in this region.
+            # Actually, wait - the residual IS zero, but we're still iterating because the terms depend on T_s.
+            # The correct approach: in transition region, treat m_dot_th as a function of T_s through the energy balance.
+            # The derivative d(m_dot_th * H_star_th)/dT_s = dq_net_available/dT_s = dq_in_dT + dq_fb_dT - dq_rad_dT - dq_cond_dT
             dm_dot_th_dT = 0.0
-            if m_dot_th > 0:
-                # d(m_dot_th * H_star_th)/dT_s = m_dot_th * cp_s + (dm_dot_th/dT_s) * H_star_th
-                # For stability, approximate dm_dot_th/dT_s as small
-                dm_dot_th_dT = m_dot_th * cp_s * 0.1  # Small factor for stability
+            if m_dot_th > 0 and T_s > 2800.0 and T_s < T_abl:
+                # In transition region: m_dot_th * H_star_th = q_net_available
+                # d(m_dot_th * H_star_th)/dT_s = dq_net_available/dT_s
+                dq_net_dT = dq_in_dT + dq_fb_dT - dq_rad_dT - dq_cond_dT
+                dm_dot_th_dT = dq_net_dT
+            elif m_dot_th > 0:
+                # When ablating (T_s >= T_abl), T_s is pinned, so this shouldn't be used
+                # But if it is, only H_star_th depends on T_s: d(m_dot_th * H_star_th)/dT_s = m_dot_th * cp_s
+                dm_dot_th_dT = m_dot_th * cp_s
             
             # Total derivative
             dresidual_dT = dq_in_dT + dq_fb_dT - dq_rad_dT - dq_cond_dT - dm_dot_th_dT
@@ -507,12 +552,30 @@ def compute_graphite_recession(
                     T_s = T_s + 10.0
                 else:
                     T_s = T_s - 10.0
+        elif iter > 0 and in_transition:
+            # In transition region, residual is zero by construction, so use simple update
+            # Based on energy balance: if q_net_available > 0, T_s might need to increase
+            # to allow more thermal ablation, or decrease if too much ablation
+            # Simple heuristic: adjust T_s based on q_net_available
+            if q_net_available > 0:
+                # Positive net heat available - might need higher T_s for more ablation
+                # But we're in transition, so just small adjustment
+                T_s = T_s + 5.0
+            else:
+                # Negative net heat - reduce T_s
+                T_s = T_s - 5.0
         
-        # Bound surface temperature
-        T_s = np.clip(T_s, 300.0, graphite_config.surface_temperature_limit)
+        # Bound surface temperature to reasonable physical limits
+        # Note: No artificial limit on T_s - let physics determine it from energy balance
+        # Graphite can handle very high temperatures (sublimation ~4000K)
+        T_s = np.clip(T_s, 300.0, 5000.0)  # Only prevent unphysical extremes
         
-        # Check convergence
-        if abs(T_s - T_s_old) < tol:
+        # Check convergence: both T_s change and energy balance residual
+        # Energy balance: q_in + q_fb - q_rad = q_cond + m_dot_th * H_star_th
+        T_s_converged = abs(T_s - T_s_old) < tol
+        residual_converged = abs(residual) < residual_tol
+        
+        if T_s_converged and residual_converged:
             break
     
     # Final calculations with converged T_s

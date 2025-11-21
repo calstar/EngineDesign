@@ -1,0 +1,87 @@
+\section{Oxidation Heat Feedback and Graphite Recession Theory}
+
+\subsection{Overview}
+Graphite nozzle inserts in oxygen-rich combustion environments experience surface recession due to two coupled processes:
+\begin{enumerate}
+  \item \textbf{Thermal ablation} (sublimation or pyrolysis) driven by high surface temperature and heat flux.
+  \item \textbf{Chemical oxidation}, primarily via
+  \begin{align*}
+  \mathrm{C(s)} + \tfrac{1}{2}\mathrm{O_2} &\rightarrow \mathrm{CO}, &\Delta h^\circ = -110~\text{kJ mol}^{-1},\\
+  \mathrm{C(s)} + \mathrm{O_2} &\rightarrow \mathrm{CO_2}, &\Delta h^\circ = -394~\text{kJ mol}^{-1}.
+  \end{align*}
+\end{enumerate}
+
+The oxidation reactions release heat near the wall. Only a fraction of this chemical energy returns to the surface; most is convected away by the high-speed flow. Neglecting this fact and adding the full oxidation enthalpy to the surface energy balance leads to overprediction of wall temperature and recession rate. This phenomenon is known as \emph{oxidation heat feedback}.
+
+\subsection{Interface Balances}
+
+\paragraph{Mass balance.}
+Let $m''_{ox}$ and $m''_{th}$ denote the mass fluxes (kg\,m$^{-2}$\,s$^{-1}$) of carbon removed by oxidation and thermal ablation, respectively. The local surface recession rate is
+\begin{equation}
+\dot{r} = \frac{m''_{ox} + m''_{th}}{\rho_s},
+\end{equation}
+where $\rho_s$ is the solid density.
+
+\paragraph{Energy balance.}
+At the surface, the steady-state one-dimensional energy balance can be written as
+\begin{equation}
+q''_{in} + q''_{fb} - q''_{rad} = q''_{cond} + m''_{th} H^{*}_{th},
+\label{eq:energy_balance}
+\end{equation}
+where
+\begin{align*}
+q''_{in} &= h_g (T_g - T_s) + q''_{rad,g\rightarrow s},\\
+q''_{rad} &= \epsilon \sigma (T_s^4 - T_{env}^4),\\
+q''_{fb} &= f_{fb}\, m''_{ox}\, |\Delta h_{ox}|,\\
+H^{*}_{th} &= \text{effective heat of sublimation (latent + sensible).}
+\end{align*}
+Here $T_g$ is the gas temperature, $T_s$ the surface temperature, $\sigma$ the Stefan–Boltzmann constant, and $f_{fb}$ a dimensionless feedback fraction ($0 \le f_{fb} \le 1$) describing how much of the reaction heat is transferred back into the solid. The chemical reaction enthalpy $|\Delta h_{ox}|$ represents the weighted mean of CO and CO$_2$ formation energies depending on local oxygen partial pressure and surface chemistry.
+
+Equation~\eqref{eq:energy_balance} shows that oxidation affects the surface both through mass removal ($m''_{ox}$) and via partial heat feedback ($q''_{fb}$). The oxidation heat should \emph{not} be directly added to $q''_{in}$ in full magnitude, as this double-counts the energy release.
+
+\subsection{Oxidation Kinetics}
+
+The oxidation rate can be expressed as the minimum of kinetic- and diffusion-limited fluxes:
+\begin{align}
+m''_{ox,kin} &= M_C\, k_0 \exp\!\left(-\frac{E}{R T_s}\right)
+\left(\frac{p_{O_2}}{p_0}\right)^n,\\[4pt]
+m''_{ox,diff} &= \frac{W_C}{W_{O_2}}\, k_m\,(Y_{O_2,\infty} - Y_{O_2,s}),
+\qquad
+k_m = \frac{Sh\,D_{O_2}}{L_{char}},\\[4pt]
+m''_{ox} &= \min(m''_{ox,kin},\, m''_{ox,diff}),
+\end{align}
+where $k_m$ is the mass-transfer coefficient, $Sh$ the Sherwood number, and $D_{O_2}$ the oxygen diffusivity. The Sherwood number may be estimated by the Chilton–Colburn correlation,
+\[
+Sh = 0.023\,Re^{0.8}Sc^{1/3}.
+\]
+
+\subsection{Thermal Ablation}
+If the surface temperature exceeds the sublimation threshold ($\approx 2800{-}3000~\text{K}$), thermal ablation contributes an additional term:
+\begin{equation}
+m''_{th} = \frac{q''_{in} + q''_{fb} - q''_{rad} - q''_{cond}}{H^{*}_{th}}.
+\end{equation}
+In kerosene–LOX engines, oxidation typically dominates below these temperatures.
+
+\subsection{Feedback Fraction}
+The feedback factor $f_{fb}$ depends on the ratio of chemical to convective time scales and on blowing effects:
+\begin{align}
+\mathrm{Da} &= \frac{k_{surf} C_{ox,s}^n}{k_m C_{ox,\infty}}, &
+B_m &= \frac{m''_{tot}}{\rho_g v_\tau},\\
+f_{fb} &\approx f_{min} + (f_{max}-f_{min})
+\frac{\mathrm{Da}}{1+\mathrm{Da}}\frac{1}{1+B_m}.
+\end{align}
+In diffusion-limited or high-blowing conditions, $f_{fb}$ is small (a few percent). For design studies, $f_{fb}$ values of $0{-}0.2$ are typical upper and lower bounds.
+
+\subsection{Numerical Implementation}
+At each time step or axial station:
+\begin{enumerate}
+  \item Assume $T_s$.
+  \item Evaluate $m''_{ox}$ from kinetic and diffusion limits.
+  \item Compute $q''_{fb} = f_{fb} m''_{ox} |\Delta h_{ox}|$.
+  \item Solve the surface energy balance (\ref{eq:energy_balance}) for $T_s$ via iteration.
+  \item Update the local recession rate $\dot{r} = (m''_{ox} + m''_{th})/\rho_s$.
+\end{enumerate}
+This approach couples the oxidation chemistry and heat transfer without overestimating the surface heating due to exothermic reactions.
+
+\subsection{Physical Insight}
+The ``oxidation heat feedback loop'' arises because the surface temperature affects the oxidation rate, which in turn releases heat that feeds back into the wall. Overestimating this feedback leads to runaway surface temperatures and unrealistic recession predictions. A controlled feedback fraction $f_{fb}$ ensures physically consistent coupling between oxidation chemistry and thermal ablation.
