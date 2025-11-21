@@ -59,7 +59,28 @@ def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=1000):
     
     if len(depletion_idx) > 0:
         # Tank would be depleted at this time
-        cutoff_time = times[depletion_idx[0]]
+        idx = depletion_idx[0]
+        if idx == 0:
+            return 0.0
+            
+        # Interpolate to find exact time
+        # m(t) ≈ m[i-1] + (m[i] - m[i-1]) * (t - t[i-1]) / (t[i] - t[i-1])
+        t_prev = times[idx-1]
+        t_curr = times[idx]
+        m_prev = cumulative_mass[idx-1]
+        m_curr = cumulative_mass[idx]
+        
+        if m_curr > m_prev:
+            fraction = (m_initial - m_prev) / (m_curr - m_prev)
+            cutoff_time = t_prev + fraction * (t_curr - t_prev)
+        else:
+            cutoff_time = t_prev # Should not happen if mdot > 0
+            
+        # Apply a small safety margin (e.g. 20ms) to ensure we don't slightly exceed mass 
+        # due to floating point or integration differences. 
+        # 10ms margin was insufficient for ~1kg/s flow (resulted in -0.01kg).
+        cutoff_time = max(0.0, cutoff_time - 2e-2)
+        
         return float(cutoff_time)
     else:
         # Tank never depletes during the burn
@@ -130,8 +151,9 @@ def truncate_thrust_curve(thrust_curve, cutoff_time):
         # Sample up to cutoff_time, then add a point at cutoff_time with 0 thrust
         times = np.linspace(0, cutoff_time, 100)
         curve = [(float(t), float(thrust_curve(t))) for t in times]
-        # Add cutoff point with 0 thrust
+        # Add cutoff point with 0 thrust and another point further out to ensure it stays 0
         curve.append((cutoff_time, 0.0))
+        curve.append((cutoff_time + 1000.0, 0.0))  # Ensure zero thrust continues
         return curve
     elif isinstance(thrust_curve, list):
         # It's already a list of (t, F) tuples
@@ -157,18 +179,25 @@ def truncate_thrust_curve(thrust_curve, cutoff_time):
                     # No previous points, just add cutoff with 0
                     truncated.append((cutoff_time, 0.0))
                 break
-        # Ensure we end with 0 thrust at cutoff_time
+        
+        # Ensure we end with 0 thrust at cutoff_time and keep it 0
+        # First, make sure we have a point at cutoff_time
         if len(truncated) == 0:
-            truncated.append((cutoff_time, 0.0))
+             truncated.append((0.0, 0.0)) # Should generally not happen unless cutoff is 0
+             truncated.append((cutoff_time, 0.0))
         elif truncated[-1][0] < cutoff_time:
-            # Add cutoff point if we haven't reached it yet
-            if len(truncated) > 0:
-                prev_t, prev_F = truncated[-1]
-                truncated.append((cutoff_time, prev_F))
-            truncated.append((cutoff_time, 0.0))
-        elif truncated[-1][0] == cutoff_time and truncated[-1][1] != 0.0:
-            # We're at cutoff_time but thrust isn't 0, add a 0 point
-            truncated.append((cutoff_time, 0.0))
+             # Last point is before cutoff, interpolate or extend
+             prev_t, prev_F = truncated[-1]
+             truncated.append((cutoff_time, prev_F)) # Step to cutoff
+             truncated.append((cutoff_time, 0.0))    # Drop to zero
+        elif truncated[-1][0] == cutoff_time:
+             # We are exactly at cutoff, just ensure we add a zero point if not already 0
+             if truncated[-1][1] != 0.0:
+                 truncated.append((cutoff_time, 0.0))
+        
+        # Add a final point far in the future with 0 thrust to clamp it
+        truncated.append((cutoff_time + 1000.0, 0.0))
+        
         return truncated
     else:
         raise TypeError(f"Unsupported thrust_curve type: {type(thrust_curve)}")
@@ -191,33 +220,27 @@ def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
     truncated_func : Function
         Function that returns mdot_func(t) for t <= cutoff_time, 0 otherwise
     """
+    # Create time points including critical cutoff points
+    times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+    # Add cutoff point and point just after to ensure sharp transition
+    times = np.append(times, [cutoff_time, cutoff_time + 1e-6])
+    times = np.sort(np.unique(times))
+    
     if isinstance(mdot_func, Function):
         # Create a piecewise function
         def truncated_mdot(t):
             if t <= cutoff_time:
-                return mdot_func(t)
+                return float(mdot_func(t))
             else:
                 return 0.0
-        # Convert to RocketPy Function by sampling
-        times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+
         values = np.array([truncated_mdot(t) for t in times])
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times)
-        times_sorted = times[order]
-        values_sorted = values[order]
-        # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, values_sorted))
+        source = np.column_stack((times, values))
         return Function(source)
     else:
-        # It's a constant - create a function that's constant until cutoff, then 0
-        times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+        # It's a constant
         values = np.array([float(mdot_func) if t <= cutoff_time else 0.0 for t in times])
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times)
-        times_sorted = times[order]
-        values_sorted = values[order]
-        # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, values_sorted))
+        source = np.column_stack((times, values))
         return Function(source)
 
 def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
@@ -472,7 +495,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         inclination=90,
         heading=0,
         max_time_step=0.02,
-        terminate_on_apogee=True,
+        terminate_on_apogee=False,
     )
 
     apogee = float(flight.apogee)

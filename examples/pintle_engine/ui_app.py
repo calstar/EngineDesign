@@ -235,7 +235,12 @@ def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: st
 def _series_to_np(series_obj) -> np.ndarray:
     """RocketPy series to numpy, handling versions with/without get_source."""
     try:
-        return np.asarray(series_obj.get_source(), dtype=float)
+        data = np.asarray(series_obj.get_source(), dtype=float)
+        # If get_source returned (N, 2), we likely want the second column (values)
+        # RocketPy Function source is typically [[x0, y0], [x1, y1], ...]
+        if data.ndim == 2 and data.shape[1] >= 2:
+            return data[:, 1]
+        return data
     except Exception:
         return np.asarray(series_obj, dtype=float)
 
@@ -5670,8 +5675,41 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     # Plot flight results
                     if flight_time.size > 0:
                         plot_flight_results(flight_time, flight_z, flight_vz)
+                        
+                        # Create comprehensive flight dataframe for download/plotting
+                        flight_df = pd.DataFrame({
+                            "Time (s)": flight_time,
+                            "Altitude (m)": flight_z,
+                            "Velocity_z (m/s)": flight_vz
+                        })
+                        
+                        # Interpolate input thrust/mdot onto flight timeline
+                        f_thrust = [float(thrust_func(t)) for t in flight_time]
+                        f_mdot_o = [float(mdot_lox_func(t)) for t in flight_time]
+                        f_mdot_f = [float(mdot_fuel_func(t)) for t in flight_time]
+                        
+                        flight_df["Thrust (N)"] = f_thrust
+                        flight_df["mdot_O (kg/s)"] = f_mdot_o
+                        flight_df["mdot_F (kg/s)"] = f_mdot_f
+
+                        with st.expander("Thrust curve (flight)"):
+                            st.plotly_chart(
+                                px.line(flight_df, x="Time (s)", y="Thrust (N)", title="Thrust vs Time (Flight)"), 
+                                width='stretch', 
+                                key="flight_thrust_plot_ds_actual"
+                            )
+
                         render_rocket_view(flight_obj)
                         plot_additional_rocket_plots(flight_obj, flight_time)
+                        
+                        # Download button for full flight data
+                        csv_data = flight_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download Flight Dataset (CSV)",
+                            data=csv_data,
+                            file_name="flight_simulation_data_dataset_mode.csv",
+                            mime="text/csv"
+                        )
                         
                 except Exception as exc:
                     st.error(f"Flight simulation failed: {exc}")
@@ -5741,10 +5779,46 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     # Extract and plot flight data
                     flight_time, flight_z, flight_vz = extract_flight_series(flight_obj)
                     if flight_time.size > 0:
+                        # Add flight data to truncated_df or create new DF for download
+                        # To align time series, we might need to interpolate since RocketPy uses adaptive steps
+                        # For now, let's create a separate dataframe for flight results
+                        flight_df = pd.DataFrame({
+                            "Time (s)": flight_time,
+                            "Altitude (m)": flight_z,
+                            "Velocity_z (m/s)": flight_vz
+                        })
+                        
+                        # Also interpolate thrust/mdot onto this timeline for a complete dataset
+                        # thrust_func(t), mdot_lox_func(t), mdot_fuel_func(t) are RocketPy Functions
+                        f_thrust = [float(thrust_func(t)) for t in flight_time]
+                        f_mdot_o = [float(mdot_lox_func(t)) for t in flight_time]
+                        f_mdot_f = [float(mdot_fuel_func(t)) for t in flight_time]
+                        
+                        flight_df["Thrust (N)"] = f_thrust
+                        flight_df["mdot_O (kg/s)"] = f_mdot_o
+                        flight_df["mdot_F (kg/s)"] = f_mdot_f
+                        
                         plot_flight_results(flight_time, flight_z, flight_vz)
+                        
+                        with st.expander("Thrust curve (flight)"):
+                            st.plotly_chart(
+                                px.line(flight_df, x="Time (s)", y="Thrust (N)", title="Thrust vs Time (Flight)"), 
+                                width='stretch', 
+                                key="flight_thrust_plot_actual"
+                            )
+                        
                         render_rocket_view(flight_obj)
                         plot_additional_rocket_plots(flight_obj, flight_time)
                         
+                        # Download button
+                        csv_data = flight_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download Flight Dataset (CSV)",
+                            data=csv_data,
+                            file_name="flight_simulation_data.csv",
+                            mime="text/csv"
+                        )
+
                 except Exception as exc:
                     st.error(f"Flight simulation failed: {exc}")
                     import traceback
