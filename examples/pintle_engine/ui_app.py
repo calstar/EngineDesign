@@ -252,6 +252,12 @@ def _series_to_np(series_obj) -> np.ndarray:
         if data.ndim == 2 and data.shape[1] >= 2:
             return data[:, 1]
         return data
+        data = np.asarray(series_obj.get_source(), dtype=float)
+        # If get_source returned (N, 2), we likely want the second column (values)
+        # RocketPy Function source is typically [[x0, y0], [x1, y1], ...]
+        if data.ndim == 2 and data.shape[1] >= 2:
+            return data[:, 1]
+        return data
     except Exception:
         return np.asarray(series_obj, dtype=float)
 
@@ -6257,6 +6263,15 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                             mime="text/csv"
                         )
                         
+                        # Download button for full flight data
+                        csv_data = flight_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download Flight Dataset (CSV)",
+                            data=csv_data,
+                            file_name="flight_simulation_data_dataset_mode.csv",
+                            mime="text/csv"
+                        )
+                        
                 except Exception as exc:
                     st.error(f"Flight simulation failed: {exc}")
                     import traceback
@@ -6359,8 +6374,26 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                                 key="flight_thrust_plot_actual"
                             )
                         
+                        
+                        with st.expander("Thrust curve (flight)"):
+                            st.plotly_chart(
+                                px.line(flight_df, x="Time (s)", y="Thrust (N)", title="Thrust vs Time (Flight)"), 
+                                width='stretch', 
+                                key="flight_thrust_plot_actual"
+                            )
+                        
                         render_rocket_view(flight_obj)
                         plot_additional_rocket_plots(flight_obj, flight_time)
+                        
+                        # Download button
+                        csv_data = flight_df.to_csv(index=False).encode('utf-8')
+                        st.download_button(
+                            label="Download Flight Dataset (CSV)",
+                            data=csv_data,
+                            file_name="flight_simulation_data.csv",
+                            mime="text/csv"
+                        )
+
                         
                         # Download button
                         csv_data = flight_df.to_csv(index=False).encode('utf-8')
