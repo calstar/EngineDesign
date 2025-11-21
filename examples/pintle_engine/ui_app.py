@@ -38,6 +38,7 @@ from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight, detect_tank_underfill_time
+from examples.pintle_engine.design_optimization_view import design_optimization_view
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
 )
@@ -2593,6 +2594,89 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
 
             if errors:
                 st.warning("Some time steps did not converge. Affected rows contain NaNs in the output dataset.")
+            
+            # Recession animation (if ablative cooling enabled)
+            if (hasattr(runner.config, 'ablative_cooling') and 
+                runner.config.ablative_cooling and 
+                runner.config.ablative_cooling.enabled and
+                runner.config.ablative_cooling.track_geometry_evolution):
+                st.markdown("### 🎬 Recession Animation")
+                if st.checkbox("Generate Recession Animation", value=False, key="recession_anim_gen"):
+                    try:
+                        from pintle_pipeline.recession_animation_fixed import create_recession_animation
+                        from pintle_pipeline.localized_ablation import calculate_impingement_zones
+                        from pintle_pipeline.time_varying_solver import TimeVaryingSolver
+                        
+                        with st.spinner("Generating recession animation..."):
+                            # Get time-varying solver results
+                            times = df["time"].to_numpy()
+                            P_tank_O = df["P_tank_O"].to_numpy() * PSI_TO_PA
+                            P_tank_F = df["P_tank_F"].to_numpy() * PSI_TO_PA
+                            
+                            # Use time-varying solver to get geometry history
+                            solver = TimeVaryingSolver(runner.config, runner.cea_cache)
+                            states = solver.solve_time_series(times, P_tank_O, P_tank_F)
+                            
+                            # Build geometry history
+                            geometry_history = []
+                            for i, state in enumerate(states):
+                                try:
+                                    from pintle_models.chamber_profiles import calculate_complete_chamber_geometry
+                                    
+                                    # Calculate chamber length from volume and diameter
+                                    if state.D_chamber > 0:
+                                        A_chamber = np.pi * (state.D_chamber / 2.0) ** 2
+                                        L_chamber = state.V_chamber / A_chamber if A_chamber > 0 else 0.2
+                                    else:
+                                        L_chamber = 0.2
+                                    
+                                    geometry = calculate_complete_chamber_geometry(
+                                        V_chamber=state.V_chamber,
+                                        A_throat=state.A_throat,  # This should stay constant with graphite
+                                        L_chamber=L_chamber,
+                                        D_chamber_initial=state.D_chamber,
+                                        D_throat_initial=state.D_throat,  # This should stay constant with graphite
+                                        ablative_config=runner.config.ablative_cooling if hasattr(runner.config, 'ablative_cooling') else None,
+                                        graphite_config=runner.config.graphite_insert if hasattr(runner.config, 'graphite_insert') else None,
+                                        recession_chamber=state.recession_chamber,
+                                        recession_graphite=state.recession_graphite,
+                                    )
+                                    
+                                    # Add recession data
+                                    if "positions" in geometry and len(geometry["positions"]) > 0:
+                                        geometry["recession"] = np.full(len(geometry["positions"]), state.recession_chamber).tolist()
+                                        geometry_history.append(geometry)
+                                    else:
+                                        st.warning(f"Skipping state {i}: no positions in geometry")
+                                except Exception as e:
+                                    st.warning(f"Error processing state {i}: {e}")
+                                    continue
+                            
+                            # Calculate impingement zones
+                            if len(geometry_history) > 0:
+                                first_geometry = geometry_history[0]
+                                chamber_length = first_geometry["positions"][-1] if len(first_geometry["positions"]) > 0 else 0.2
+                                chamber_diameter = first_geometry.get("D_chamber_initial", 0.1)
+                                impingement_data = calculate_impingement_zones(
+                                    runner.config, chamber_length, chamber_diameter, n_points=len(first_geometry["positions"])
+                                )
+                                
+                                # Create animation
+                                fig_anim = create_recession_animation(
+                                    times,
+                                    geometry_history,
+                                    runner.config,
+                                    impingement_data=impingement_data,
+                                )
+                                
+                                st.plotly_chart(fig_anim, use_container_width=True)
+                                st.success("✅ Recession animation generated! Use the play button to animate.")
+                            else:
+                                st.warning("No geometry history available for animation.")
+                    except Exception as e:
+                        st.error(f"Failed to generate recession animation: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
 
             with st.expander("Data table"):
                 st.dataframe(df)
@@ -4660,18 +4744,10 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
     st.subheader("Chamber Contour")
     
     # Try to create enhanced multi-layer visualization if available
-    # CRITICAL: Check config_obj is not None and has required attributes before accessing
+    # CRITICAL: Show layers even if only some components are enabled (not all required)
+    # This will display ablative, graphite, and stainless steel layers when available
     if (calculate_complete_chamber_geometry is not None and 
-        config_obj is not None and
-        hasattr(config_obj, 'ablative_cooling') and 
-        config_obj.ablative_cooling is not None and
-        getattr(config_obj.ablative_cooling, 'enabled', False) and
-        hasattr(config_obj, 'graphite_insert') and 
-        config_obj.graphite_insert is not None and
-        getattr(config_obj.graphite_insert, 'enabled', False) and
-        hasattr(config_obj, 'stainless_steel_case') and 
-        config_obj.stainless_steel_case is not None and
-        getattr(config_obj.stainless_steel_case, 'enabled', False)):
+        config_obj is not None):
         
         try:
             # Get current geometry from results
@@ -4732,14 +4808,19 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
                 showlegend=False,
             ))
             
-            # Ablative layer
-            if geometry["ablative_thickness"][0] > 0:
+            # Ablative layer (show if present or enabled in config)
+            ablative_enabled = (config_obj and hasattr(config_obj, 'ablative_cooling') and 
+                               config_obj.ablative_cooling and 
+                               getattr(config_obj.ablative_cooling, 'enabled', False))
+            
+            if ablative_enabled and "D_ablative_outer" in geometry:
                 D_ablative = np.array(geometry["D_ablative_outer"]) / 2.0
+                # Ablative outer boundary (brown dashed line - NOT red!)
                 fig_contour.add_trace(go.Scatter(
                     x=positions,
                     y=D_ablative,
                     mode='lines',
-                    name='Phenolic Ablator',
+                    name='Phenolic Ablator (Outer)',
                     line=dict(color='brown', width=2, dash='dash'),
                     fill='tonexty',
                     fillcolor='rgba(139, 69, 19, 0.3)',
@@ -4755,8 +4836,13 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
                     showlegend=False,
                 ))
             
-            # Stainless steel case (chamber)
-            if geometry["stainless_thickness"] > 0:
+            # Stainless steel case (chamber) - show if present
+            stainless_enabled = (config_obj and hasattr(config_obj, 'stainless_steel_case') and 
+                                config_obj.stainless_steel_case and 
+                                getattr(config_obj.stainless_steel_case, 'enabled', False))
+            
+            stainless_thickness = geometry.get("stainless_thickness", 0.0)
+            if (stainless_thickness > 0 or stainless_enabled) and "D_stainless_outer" in geometry:
                 D_stainless = np.array(geometry["D_stainless_outer"]) / 2.0
                 fig_contour.add_trace(go.Scatter(
                     x=positions,
@@ -4778,40 +4864,103 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
                     showlegend=False,
                 ))
             
-            # Throat region with graphite
-            throat_pos = positions[-1]
-            D_throat = geometry["D_throat_current"] / 2.0
-            D_graphite = geometry["D_graphite_outer"] / 2.0
-            D_stainless_throat = geometry["D_stainless_throat_outer"] / 2.0
+            # Throat region with graphite insert (CRITICAL: Graphite is ONLY at throat region, not entire chamber)
+            # Graphite insert is a small annular region around the throat, not along the whole chamber
+            throat_pos = positions[-1] if len(positions) > 0 else 0.0  # Throat is at the end of chamber
+            D_throat_diameter = geometry.get("D_throat_current", D_gas[-1] * 2.0 if len(D_gas) > 0 else 0.02)
+            D_throat = D_throat_diameter / 2.0  # Radius
+            D_graphite_outer_diameter = geometry.get("D_graphite_outer", D_throat_diameter)
+            D_graphite_outer = D_graphite_outer_diameter / 2.0  # Radius
+            D_stainless_throat_diameter = geometry.get("D_stainless_throat_outer", D_graphite_outer_diameter)
+            D_stainless_throat = D_stainless_throat_diameter / 2.0  # Radius
             
-            # Draw throat region
-            if geometry["graphite_thickness"] > 0:
-                # Graphite insert (circular cross-section at throat)
-                theta = np.linspace(0, 2*np.pi, 100)
-                fig_contour.add_trace(go.Scatter(
-                    x=[throat_pos] * len(theta),
-                    y=D_graphite * np.cos(theta),
-                    mode='lines',
-                    name='Graphite Insert',
-                    line=dict(color='black', width=2),
-                ))
-                # Throat (gas boundary at throat)
-                fig_contour.add_trace(go.Scatter(
-                    x=[throat_pos] * len(theta),
-                    y=D_throat * np.cos(theta),
-                    mode='lines',
-                    name='Throat',
-                    line=dict(color='red', width=3),
-                ))
-                # Stainless steel at throat
-                if geometry["stainless_thickness"] > 0:
+            graphite_enabled = (config_obj and hasattr(config_obj, 'graphite_insert') and 
+                               config_obj.graphite_insert and 
+                               getattr(config_obj.graphite_insert, 'enabled', False))
+            
+            # Get graphite axial length - graphite extends upstream and downstream from throat
+            # Typical: 0.5-1.0 * D_throat on each side (total length ~1.5-2.5 * D_throat)
+            if graphite_enabled and config_obj.graphite_insert:
+                # Try to get from config, otherwise use default
+                graphite_axial_half_length = getattr(config_obj.graphite_insert, 'axial_half_length', None)
+                if graphite_axial_half_length is None or graphite_axial_half_length <= 0:
+                    graphite_axial_half_length = 0.75 * D_throat_diameter  # Default: 0.75 * D_throat on each side
+            else:
+                graphite_axial_half_length = 0.0
+            
+            if graphite_enabled and graphite_axial_half_length > 0 and throat_pos > 0:
+                # Graphite insert ONLY in throat region (small axial extent around throat)
+                # Create axial positions for graphite region ONLY - make it very small and clearly at throat
+                graphite_start = max(throat_pos - graphite_axial_half_length, positions[0] if len(positions) > 0 else 0.0)
+                graphite_end = min(throat_pos + graphite_axial_half_length, positions[-1] if len(positions) > 0 else throat_pos)
+                
+                # Ensure we have a valid range
+                if graphite_end > graphite_start:
+                    graphite_positions = np.linspace(graphite_start, graphite_end, max(10, int(30 * (graphite_end - graphite_start) / (positions[-1] - positions[0]) if len(positions) > 1 else 30)))
+                    
+                    # Graphite insert - show as filled region at throat ONLY
+                    # Inner radius (throat)
+                    # Outer radius (graphite outer)
                     fig_contour.add_trace(go.Scatter(
-                        x=[throat_pos] * len(theta),
-                        y=D_stainless_throat * np.cos(theta),
+                        x=np.concatenate([graphite_positions, graphite_positions[::-1]]),
+                        y=np.concatenate([[D_throat] * len(graphite_positions), [D_graphite_outer] * len(graphite_positions)]),
                         mode='lines',
-                        name='Stainless Steel (Throat)',
-                        line=dict(color='gray', width=2, dash='dot'),
+                        name='Graphite Insert',
+                        line=dict(color='black', width=3),
+                        fill='toself',
+                        fillcolor='rgba(0, 0, 0, 0.4)',
                     ))
+                    fig_contour.add_trace(go.Scatter(
+                        x=np.concatenate([graphite_positions, graphite_positions[::-1]]),
+                        y=np.concatenate([[-D_throat] * len(graphite_positions), [-D_graphite_outer] * len(graphite_positions)]),
+                        mode='lines',
+                        name='Graphite Insert (Lower)',
+                        line=dict(color='black', width=3),
+                        fill='toself',
+                        fillcolor='rgba(0, 0, 0, 0.4)',
+                        showlegend=False,
+                    ))
+                    
+                    # Throat markers (red circles at minimum diameter)
+                    fig_contour.add_trace(go.Scatter(
+                        x=[throat_pos],
+                        y=[D_throat],
+                        mode='markers',
+                        marker=dict(size=15, color='red', symbol='circle', line=dict(width=3, color='darkred')),
+                        name='Throat',
+                        showlegend=True,
+                    ))
+                    fig_contour.add_trace(go.Scatter(
+                        x=[throat_pos],
+                        y=[-D_throat],
+                        mode='markers',
+                        marker=dict(size=15, color='red', symbol='circle', line=dict(width=3, color='darkred')),
+                        showlegend=False,
+                    ))
+                    
+                    # Stainless steel at throat (behind graphite, gray dotted)
+                    stainless_enabled = (config_obj and hasattr(config_obj, 'stainless_steel_case') and 
+                                        config_obj.stainless_steel_case and 
+                                        getattr(config_obj.stainless_steel_case, 'enabled', False))
+                    if stainless_enabled and D_stainless_throat > D_graphite_outer:
+                        fig_contour.add_trace(go.Scatter(
+                            x=np.concatenate([graphite_positions, graphite_positions[::-1]]),
+                            y=np.concatenate([[D_graphite_outer] * len(graphite_positions), [D_stainless_throat] * len(graphite_positions)]),
+                            mode='lines',
+                            name='Stainless Steel (Throat)',
+                            line=dict(color='gray', width=2, dash='dot'),
+                            fill='toself',
+                            fillcolor='rgba(128, 128, 128, 0.2)',
+                        ))
+                        fig_contour.add_trace(go.Scatter(
+                            x=np.concatenate([graphite_positions, graphite_positions[::-1]]),
+                            y=np.concatenate([[-D_graphite_outer] * len(graphite_positions), [-D_stainless_throat] * len(graphite_positions)]),
+                            mode='lines',
+                            line=dict(color='gray', width=2, dash='dot'),
+                            fill='toself',
+                            fillcolor='rgba(128, 128, 128, 0.2)',
+                            showlegend=False,
+                        ))
             
             # Add centerline
             x_min, x_max = positions[0], positions[-1]
@@ -4835,7 +4984,10 @@ def _display_chamber_results(results: dict, config_obj=None) -> None:
             st.plotly_chart(fig_contour, use_container_width=True)
             
         except Exception as e:
+            import traceback
             st.warning(f"Could not generate enhanced multi-layer visualization: {e}")
+            with st.expander("Error details"):
+                st.code(traceback.format_exc())
             # Fall back to simple contour
             fig_contour = go.Figure()
             fig_contour.add_trace(go.Scatter(
@@ -6223,7 +6375,8 @@ def main():
         # Reuse cached runner
         runner = cached_runner
 
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+        "🎯 Design Optimization",  # NEW: Comprehensive optimization workflow
         "Forward Mode",
         "Inverse Mode",
         "Time-Series Analysis",
@@ -6237,12 +6390,12 @@ def main():
     
     # Run chamber design tab - it updates st.session_state["config_dict"] when Calculate is pressed
     # The download button uses st.session_state["config_dict"] which is the source of truth
-    with tab8:
+    with tab9:
         config_obj = chamber_design_view(config_obj, runner)
         # chamber_design_view updates st.session_state["config_dict"] with calculated values
     
     # Run graphite insert tab - it updates st.session_state["config_dict"] when Calculate is pressed
-    with tab9:
+    with tab10:
         config_obj = graphite_insert_view(config_obj, runner)
         # graphite_insert_view updates st.session_state["config_dict"] with calculated values
     
@@ -6262,18 +6415,27 @@ def main():
         st.sidebar.success("✓ Runner updated with new chamber geometry!")
     
     with tab1:
-        forward_view(runner)
+        # Design Optimization - comprehensive workflow
+        config_obj = design_optimization_view(config_obj, runner)
+        # Update runner if config changed
+        if "optimized_config" in st.session_state:
+            config_obj = st.session_state["optimized_config"]
+            runner = PintleEngineRunner(config_obj)
+            st.session_state["cached_runner"] = runner
+    
     with tab2:
-        inverse_view(runner, config_label)
+        forward_view(runner)
     with tab3:
-        timeseries_view(runner, config_label)
+        inverse_view(runner, config_label)
     with tab4:
-        copv_view(config_obj)
+        timeseries_view(runner, config_label)
     with tab5:
-        plots_analysis_view(runner)
+        copv_view(config_obj)
     with tab6:
-        custom_plot_builder()
+        plots_analysis_view(runner)
     with tab7:
+        custom_plot_builder()
+    with tab8:
         flight_sim_view(runner, config_obj, config_label)
 
 

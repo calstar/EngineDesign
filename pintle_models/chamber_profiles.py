@@ -262,7 +262,10 @@ def calculate_chamber_intrinsics(
     
     # Validate all values
     residence_time = max(residence_time, 1e-6)  # Minimum 1 µs
-    mach_number = max(min(mach_number, 0.3), 0.001)  # Subsonic
+    # CRITICAL FIX: Mach number should be calculated dynamically, not clamped to 0.3
+    # It should change over time as geometry and flow conditions change
+    # Only clamp to reasonable subsonic range (0.001 to 0.99, not hardcoded 0.3)
+    mach_number = max(min(mach_number, 0.99), 0.001)  # Subsonic (allow up to 0.99, not hardcoded 0.3)
     reynolds_number = max(reynolds_number, 100.0)  # Minimum Re
     
     return {

@@ -99,6 +99,12 @@ class TimeVaryingState:
     ablative_recession_rate: float  # [m/s]
     graphite_recession_rate: float  # [m/s]
     
+    # Chamber intrinsics (TIME-VARYING - these change as geometry evolves)
+    mach_number: float  # Chamber Mach number (should change over time, not hardcoded)
+    eta_cstar: float  # Combustion efficiency n* (should change over time)
+    reynolds_number: float  # Reynolds number
+    residence_time: float  # [s]
+    
     # Multi-layer thermal analysis
     T_ablative_surface: float  # [K] - Phenolic ablator surface temperature
     T_stainless_chamber: float  # [K] - Stainless steel back-face (chamber)
@@ -237,6 +243,21 @@ class TimeVaryingCoupledSolver:
         R_chamber = diagnostics["R"]
         cstar_actual = diagnostics["cstar_actual"]
         cstar_ideal = diagnostics["cstar_ideal"]
+        eta_cstar = diagnostics.get("eta_cstar", cstar_actual / cstar_ideal if cstar_ideal > 0 else 0.85)
+        
+        # CRITICAL: Calculate chamber intrinsics (Mach number, etc.) - these should change over time
+        # as geometry evolves. This was missing before!
+        from pintle_models.chamber_profiles import calculate_chamber_intrinsics
+        chamber_intrinsics = calculate_chamber_intrinsics(
+            V_chamber=V_chamber,
+            A_throat=A_throat,
+            mdot_total=mdot_total,
+            Tc=Tc,
+            gamma=gamma_chamber,
+            R=R_chamber,
+            Lstar=Lstar,
+        )
+        mach_number = chamber_intrinsics["mach_number"]  # Now calculated dynamically, not hardcoded
         
         # Calculate reaction progress (TIME-VARYING - depends on current L*)
         # This is the KEY coupling: L* changes → reaction progress changes → shifting equilibrium changes
@@ -337,24 +358,41 @@ class TimeVaryingCoupledSolver:
         
         # CRITICAL: Graphite insert behavior
         # Graphite DOES erode, which means throat area DOES grow (just slower than ablative)
-        # Graphite is designed to minimize throat growth, not eliminate it
+        # CRITICAL: Graphite insert is designed to keep throat area CONSTANT
+        # Graphite does NOT ablate at runtime - that's its whole purpose
+        # The throat area should remain constant when graphite is present
         if graphite_cfg and graphite_cfg.enabled and graphite_thickness_remaining > 0:
-            # Graphite insert is present - throat area grows with graphite recession
-            # Track graphite thickness erosion
-            recession_graphite_new = recession_graphite + recession_rate_graphite * dt
-            graphite_thickness_remaining_new = max(
-                graphite_thickness_remaining - recession_rate_graphite * dt,
-                0.0  # Can't go negative
-            )
+            # Graphite insert is present - throat area stays CONSTANT (graphite doesn't ablate)
+            # Check if recession is allowed (default: False - graphite doesn't ablate)
+            allow_recession = getattr(graphite_cfg, 'allow_runtime_recession', False)
             
-            # Throat area grows with graphite recession (graphite erodes, exposing larger throat)
-            # Graphite recession increases throat diameter
-            D_throat_current = np.sqrt(4.0 * A_throat / np.pi)
-            D_throat_new = D_throat_current + 2.0 * recession_rate_graphite * dt * graphite_cfg.coverage_fraction
-            A_throat_new = np.pi * (D_throat_new / 2.0) ** 2
+            if not allow_recession:
+                # Graphite doesn't recede - throat area stays CONSTANT
+                recession_graphite_new = recession_graphite  # Graphite doesn't recede
+                graphite_thickness_remaining_new = graphite_thickness_remaining  # Constant
+                
+                # THROAT AREA STAYS CONSTANT - this is the whole point of graphite insert
+                # Graphite is a non-ablating insert that maintains throat geometry
+                D_throat_current = np.sqrt(4.0 * A_throat / np.pi)
+                D_throat_new = D_throat_current  # NO CHANGE - graphite keeps it constant
+                A_throat_new = A_throat  # NO CHANGE - constant throat area
+            else:
+                # Recession allowed (for testing/debugging only)
+                recession_rate_graphite = compute_graphite_recession(
+                    heat_flux_throat,
+                    T_graphite_surface if 'T_graphite_surface' in locals() else 2000.0,
+                    graphite_cfg,
+                )
+                recession_graphite_new = recession_graphite + recession_rate_graphite * dt
+                graphite_thickness_remaining_new = max(0.0, graphite_thickness_remaining - recession_rate_graphite * dt)
+                
+                # Throat area grows with graphite recession
+                D_throat_current = np.sqrt(4.0 * A_throat / np.pi)
+                D_throat_new = D_throat_current + 2.0 * recession_rate_graphite * dt
+                A_throat_new = np.pi * (D_throat_new / 2.0) ** 2
             
             # Throat recession from ablative (if any) doesn't affect throat area when graphite is present
-            # The ablative is behind the graphite insert
+            # The ablative is behind the graphite insert and is protected
             recession_throat_new = recession_throat  # No change (graphite protects it)
             
             # Update chamber volume (ablative recession still affects chamber)
@@ -613,6 +651,10 @@ class TimeVaryingCoupledSolver:
             mdot_total=mdot_total,
             F=F,
             Isp=Isp,
+            mach_number=mach_number,  # TIME-VARYING - calculated dynamically
+            eta_cstar=eta_cstar,  # TIME-VARYING - calculated from actual/ideal c*
+            reynolds_number=chamber_intrinsics.get("reynolds_number", 10000.0),
+            residence_time=chamber_intrinsics.get("residence_time", 0.001),
             v_exit=v_exit,
             P_exit=P_exit,
             T_exit=T_exit,
@@ -730,6 +772,11 @@ class TimeVaryingCoupledSolver:
             "heat_flux_throat": np.array([s.heat_flux_throat for s in self.state_history]),
             "ablative_recession_rate": np.array([s.ablative_recession_rate for s in self.state_history]),
             "graphite_recession_rate": np.array([s.graphite_recession_rate for s in self.state_history]),
+            # CRITICAL: Add time-varying chamber intrinsics (these change over time!)
+            "mach_number": np.array([s.mach_number for s in self.state_history]),  # TIME-VARYING - not hardcoded
+            "eta_cstar": np.array([s.eta_cstar for s in self.state_history]),  # TIME-VARYING n* - changes with L*
+            "reynolds_number": np.array([s.reynolds_number for s in self.state_history]),
+            "residence_time": np.array([s.residence_time for s in self.state_history]),
             "T_ablative_surface": np.array([s.T_ablative_surface for s in self.state_history]),
             "T_stainless_chamber": np.array([s.T_stainless_chamber for s in self.state_history]),
             "T_graphite_surface": np.array([s.T_graphite_surface for s in self.state_history]),
