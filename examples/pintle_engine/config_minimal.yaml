@@ -134,6 +134,7 @@ ablative_cooling:
 
 # Graphite Throat Insert (separate from chamber ablator)
 # Graphite inserts prevent burn-through in nozzle throat/exit
+
 graphite_insert:
   enabled: true
   material_density: 2260.0
