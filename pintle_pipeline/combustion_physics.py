@@ -182,7 +182,7 @@ def calculate_reaction_time_scale(
     T_ref = 3500.0  # 3500 K
     
     # Pressure exponent (typically 0.5-1.0 for gas-phase reactions)
-    n_pressure = 0.7
+    n_pressure = 1.5
     
     # Normalized activation energy (dimensionless)
     # Higher for more complex reactions (e.g., hydrocarbon combustion)
@@ -196,7 +196,7 @@ def calculate_reaction_time_scale(
         Ea_norm = 10.0
     
     # Reference reaction time (typical: 1-10 ms)
-    tau_ref = 0.005  # 5 ms
+    tau_ref = 5e-5  # 5 ms
     
     # Pressure effect (higher pressure → faster reactions)
     pressure_factor = (P_ref / max(Pc, 1e5)) ** n_pressure
@@ -207,8 +207,8 @@ def calculate_reaction_time_scale(
     tau_chem = tau_ref * pressure_factor * temp_factor
     
     # Clamp to reasonable range (0.1 ms to 100 ms)
-    tau_chem = np.clip(tau_chem, 0.0001, 0.1)
-    
+    tau_chem = np.clip(tau_chem, 0.1e-5, 1e-2)
+    print(f"tau_chem: {tau_chem}")
     return float(tau_chem)
 
 
@@ -257,7 +257,7 @@ def calculate_mixing_efficiency(
     m_dot_total: float,
     Lstar: float,
     target_smd: float = 50e-6,  # 50 microns
-    beta: float = 3.0,  # recirculation/mixing strength factor
+    beta: float = 8.0,  # recirculation/mixing strength factor
 ) -> float:
     """
     Calculate mixing efficiency based on spray quality and evaporation.
@@ -299,41 +299,66 @@ def calculate_mixing_efficiency(
     eta_mix : float
         Mixing efficiency (0-1)
     """
+    # Calculate gas density and bulk velocity from chamber conditions
     rho_g = Pc / max(R * Tc, 1e-6)
     U = m_dot_total / max(rho_g * Ac, 1e-8)
 
     # --- turbulence-based transport properties ---
+    # Use representative hot-gas viscosity for Reynolds number calculation
     mu_g = 7.0e-5  # Pa·s, representative hot-gas viscosity
-    Dinj_eff = Dinj if Dinj and Dinj > 0 else np.sqrt(4.0 * Ac / np.pi)
 
-    Re = rho_g * U * Dinj_eff / max(mu_g, 1e-8)
+    # Calculate Reynolds number based on injector diameter and bulk flow
+    Re = rho_g * U * Dinj / max(mu_g, 1e-8)
+    #print(f"rho_g: {rho_g}, U: {U}, Dinj: {Dinj}, mu_g: {mu_g}")
     Re = max(Re, 1.0)
-    I_est = np.clip(0.16 * Re ** (-1.0 / 8.0), 0.02, 0.3)  # canonical high-Re estimate
+
+    # Estimate turbulence intensity from canonical high-Re pipe flow correlation
+    I_est = np.clip(0.055 * Re ** (-0.0407), 0.02, 0.3)
+
+    # Use maximum of estimated and user-provided turbulence intensity
     I_eff = max(I_est, turbulence_intensity)
-    Lt = max(0.07 * Dinj_eff, 1e-5)
+
+    # Integral length scale: typically 7% of injector diameter for pipe flow
+    Lt = max(0.07 * Dinj, 1e-5)
+
+    # k-epsilon model constant (standard value)
     C_mu = 0.09
+
+    # Turbulent kinetic energy: k = (3/2) * (u'^2) where u' = U * I
     k_est = 1.5 * (U * I_eff) ** 2
+
+    # Dissipation rate: epsilon = C_mu^(3/4) * k^(3/2) / Lt (k-epsilon scaling)
     epsilon_est = C_mu ** 0.75 * k_est ** 1.5 / max(Lt, 1e-6)
     epsilon_est = max(epsilon_est, 1e-8)
+
+    # Eddy viscosity: mu_t = rho * C_mu * k^2 / epsilon
     mu_t = rho_g * C_mu * (k_est ** 2) / epsilon_est
     mu_t = max(mu_t, 0.0)
 
+    # Turbulent diffusivity: D_t = mu_t / rho (turbulent Schmidt number ≈ 1)
     D_t = mu_t / max(rho_g, 1e-8)
+
+    # Molecular diffusivity: scales with temperature^1.75 and inversely with pressure
     D_m = 2.0e-5 * (Tc / 300.0) ** 1.75 * (101325.0 / max(Pc, 1e3))
+
+    # Total effective diffusivity: sum of molecular and turbulent contributions
     D_total = max(D_m + D_t, 1e-8)
 
     if chamber_length > 0:
         evap_ratio = min(evaporation_length / chamber_length, 2.0)  # Cap at 2x
-        evap_factor = 1.0 / (1.0 + 0.3 * (evap_ratio - 1.0))
+        print(f"evaporation_length: {evaporation_length}, evap_ratio: {evap_ratio}")
+        evap_factor = 1.0 / (1.0 + 0.5 * (evap_ratio - 1.0))
     else:
         evap_factor = 0.5
-    evap_factor = np.clip(evap_factor, 0.1, 1.0)
+    evap_factor = np.clip(evap_factor, 0.3, 1.0)
+    print(f"evap_factor: {evap_factor}")
 
     tau_res_eff = (Lstar / max(U, 1e-4)) * (1.0 / evap_factor)
 
     # Recirculation length scale (fraction of chamber length or injector diameter)
     Dc = np.sqrt(4.0 * Ac / np.pi)
     L_recirc = 0.25 * Dc # pick a calibrated factor
+    print(f"Dc: {Dc}, L_recirc: {L_recirc}")
 
     # Droplet size effect
     # Smaller droplets → better mixing
@@ -343,13 +368,14 @@ def calculate_mixing_efficiency(
     else:
         smd_factor = 0.5  # Unknown → assume poor
 
+    #print(f"D_total: {D_total}")
     tau_mix = (L_recirc ** 2) / (beta * D_total)
     tau_mix = tau_mix / max(smd_factor, 0.1)
     tau_mix = max(tau_mix, 1e-6)
 
     Da_mix = tau_res_eff / tau_mix
     Da_mix = np.clip(Da_mix, 0.0, 50.0)
-
+    print(f'tau_res_eff: {tau_res_eff}, tau_mix: {tau_mix}, Da_mix: {Da_mix}')
     eta_m = 1.0 - np.exp(-Da_mix)
     return float(np.clip(eta_m, 0.0, 1.0))
 
@@ -436,7 +462,7 @@ def calculate_combustion_efficiency_advanced(
         eta_Lstar = np.clip(eta_Lstar, 0.0, 1.0)
     else:  # exponential (default)
         SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
-        print(f"the SMD is {SMD}")
+        #print(f"the SMD is {SMD}")
         eta_Lstar = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, SMD, Lstar)
     
     # Clamp L* efficiency
@@ -446,19 +472,14 @@ def calculate_combustion_efficiency_advanced(
     tau_res = calculate_residence_time(Lstar, Pc, cstar_ideal, gamma, R, Tc, Ac, m_dot_total)
     tau_chem = calculate_reaction_time_scale(Pc, Tc, MR, gamma)
     Da = calculate_damkohler_number(tau_res, tau_chem)
-    print(f"Da: {Da}, tau_res: {tau_res}, tau_chem: {tau_chem}")
+    #print(f"Da: {Da}, tau_res: {tau_res}, tau_chem: {tau_chem}")
     # Efficiency based on Damköhler number
     # Da >> 1: equilibrium (eta → 1)
     # Da ~ 1: finite-rate (eta ~ 0.8-0.95)
     # Da << 1: slow chemistry (eta ~ 0.5-0.8)
-    if Da > 10.0:
-        eta_kinetics = 1.0  # Fast chemistry, equilibrium achieved
-    elif Da > 1.0:
-        eta_kinetics = 0.95 + 0.05 * (1.0 - np.exp(-(Da - 1.0) / 2.0))
-    elif Da > 0.1:
-        eta_kinetics = 0.8 + 0.15 * (Da / 1.0)
-    else:
-        eta_kinetics = 0.5 + 0.3 * (Da / 0.1)
+    print(f"Da: {Da}")
+    eta_kinetics = 1 - np.exp(-Da**0.5)
+        #eta_kinetics = 0.5 + 0.3 * (Da / 0.1)
     
     eta_kinetics = np.clip(eta_kinetics, 0.5, 1.0)
     
