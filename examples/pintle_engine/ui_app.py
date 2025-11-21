@@ -5639,6 +5639,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     apogee = result["apogee"]
                     max_velocity = result["max_velocity"]
                     flight_obj = result["flight"]
+                    trunc_info = result.get("truncation_info", {})
                     
                     st.success("Flight simulation completed!")
                     col1, col2 = st.columns(2)
@@ -5683,10 +5684,22 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                             "Velocity_z (m/s)": flight_vz
                         })
                         
+                        # Determine effective cutoff time for CSV generation
+                        # Use the one from simulation result if available, otherwise fall back to configured burn time
+                        sim_cutoff = trunc_info.get("cutoff_time") if trunc_info.get("truncated") else None
+                        # Also respect the burn time from config (which matches dataset duration/truncation)
+                        config_burn_time = config_for_flight.thrust.burn_time
+                        
+                        # The effective cutoff is the minimum of available limits
+                        effective_cutoff = config_burn_time
+                        if sim_cutoff is not None:
+                            effective_cutoff = min(effective_cutoff, sim_cutoff)
+
                         # Interpolate input thrust/mdot onto flight timeline
-                        f_thrust = [float(thrust_func(t)) for t in flight_time]
-                        f_mdot_o = [float(mdot_lox_func(t)) for t in flight_time]
-                        f_mdot_f = [float(mdot_fuel_func(t)) for t in flight_time]
+                        # Ensure we zero out values after the effective cutoff time
+                        f_thrust = [float(thrust_func(t)) if t <= effective_cutoff else 0.0 for t in flight_time]
+                        f_mdot_o = [float(mdot_lox_func(t)) if t <= effective_cutoff else 0.0 for t in flight_time]
+                        f_mdot_f = [float(mdot_fuel_func(t)) if t <= effective_cutoff else 0.0 for t in flight_time]
                         
                         flight_df["Thrust (N)"] = f_thrust
                         flight_df["mdot_O (kg/s)"] = f_mdot_o
@@ -5768,6 +5781,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     apogee = result["apogee"]
                     max_velocity = result["max_velocity"]
                     flight_obj = result["flight"]
+                    trunc_info = result.get("truncation_info", {})
                     
                     st.success("Flight simulation completed!")
                     col1, col2 = st.columns(2)
@@ -5788,11 +5802,16 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                             "Velocity_z (m/s)": flight_vz
                         })
                         
+                        # Determine effective cutoff time for CSV generation
+                        # Use the one from simulation result if available, otherwise use configured burn time
+                        effective_cutoff = trunc_info.get("cutoff_time") if trunc_info.get("truncated") else config_for_flight.thrust.burn_time
+
                         # Also interpolate thrust/mdot onto this timeline for a complete dataset
                         # thrust_func(t), mdot_lox_func(t), mdot_fuel_func(t) are RocketPy Functions
-                        f_thrust = [float(thrust_func(t)) for t in flight_time]
-                        f_mdot_o = [float(mdot_lox_func(t)) for t in flight_time]
-                        f_mdot_f = [float(mdot_fuel_func(t)) for t in flight_time]
+                        # Ensure we zero out values after the effective cutoff time
+                        f_thrust = [float(thrust_func(t)) if t <= effective_cutoff else 0.0 for t in flight_time]
+                        f_mdot_o = [float(mdot_lox_func(t)) if t <= effective_cutoff else 0.0 for t in flight_time]
+                        f_mdot_f = [float(mdot_fuel_func(t)) if t <= effective_cutoff else 0.0 for t in flight_time]
                         
                         flight_df["Thrust (N)"] = f_thrust
                         flight_df["mdot_O (kg/s)"] = f_mdot_o

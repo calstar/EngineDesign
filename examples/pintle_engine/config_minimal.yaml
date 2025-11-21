@@ -17,34 +17,37 @@ fluids:
     specific_heat: 2000.0
     thermal_conductivity: 0.13
     temperature: 293.0
+
 injector:
   type: pintle
   geometry:
     lox:
       n_orifices: 16
-      d_orifice: 0.003979
+      d_orifice: 0.004079250999345852
       theta_orifice: 30.01
-      A_entry: 1.0e-05
+      A_entry: 1.3069252195685896e-05
       d_hydraulic: 0.003979
     fuel:
       d_pintle_tip: 0.01905
       d_reservoir_inner: 0.019676
-      h_gap: 0.000313
-      A_entry: 1.5e-05
+      h_gap: 0.0021120344468724666
+      A_entry: 0.0001263996437411605
       d_hydraulic: 0.000626
+
 feed_system:
   oxidizer:
-    d_inlet: 0.009525
+    d_inlet: 0.0127
     A_hydraulic: 7.13e-05
     K0: 2.0
     K1: 0.0
     phi_type: none
   fuel:
-    d_inlet: 0.009525
+    d_inlet: 0.0127
     A_hydraulic: 7.13e-05
     K0: 2.0
     K1: 0.0
     phi_type: none
+
 regen_cooling:
   enabled: false
   d_inlet: 0.009525
@@ -77,6 +80,7 @@ regen_cooling:
   gas_turbulence_intensity: 0.1
   coolant_turbulence_intensity: 0.05
   hot_gas_cp: 2200.0
+
 film_cooling:
   enabled: false
   mass_fraction: 0.05
@@ -94,6 +98,7 @@ film_cooling:
   reference_wall_temperature: 1100.0
   density_override: null
   cp_override: null
+
 ablative_cooling:
   enabled: true
   material_density: 1600.0
@@ -114,6 +119,7 @@ ablative_cooling:
   char_layer_thickness: 0.001
   track_geometry_evolution: true
   nozzle_ablative: false
+
 graphite_insert:
   enabled: true
   material_density: 2260.0
@@ -131,6 +137,7 @@ graphite_insert:
   char_layer_conductivity: 5.0
   char_layer_thickness: 0.0005
   coverage_fraction: 1.0
+
 discharge:
   oxidizer:
     Cd_inf: 0.4
@@ -152,6 +159,7 @@ discharge:
     use_temperature_correction: false
     T_ref: 300.0
     a_T: 0.0
+
 spray:
   momentum_flux_ratio: true
   spray_angle:
@@ -172,6 +180,7 @@ spray:
   use_turbulence_corrections: false
   turbulence_breakup_gain: 1.0
   turbulence_penetration_gain: 0.5
+
 combustion:
   cea:
     use_parallel_cea_build: true
@@ -213,21 +222,24 @@ combustion:
     use_advanced_model: false
     use_finite_rate_chemistry: true
     use_shifting_equilibrium: true
+
 chamber:
-  volume: 0.005221309
-  A_throat: 0.002650007
-  length: 0.9214335
-  Lstar: 1.9703
-  chamber_inner_diameter: 0.08491
+  volume: 0.012598100720363305
+  A_throat: 0.006299050360181652
+  length: 0.5714285714285714
+  Lstar: 2.0
+  chamber_inner_diameter: 0.16754312891018666
   design_pressure: 2068000.0
   design_thrust: 7672.3
   design_force_coefficient: 1.4
+
 nozzle:
-  A_throat: 0.002650007
-  A_exit: 0.02675254
-  expansion_ratio: 10.0953
-  exit_diameter: 0.18456
+  A_throat: 0.006299050360181652
+  A_exit: 0.07068583470577035
+  expansion_ratio: 11.221665277134235
+  exit_diameter: 0.3
   efficiency: 0.98
+
 solver:
   method: brentq
   Pc_bounds:
@@ -239,21 +251,25 @@ solver:
     max_iterations: 6
     Cd_reduction_factor: 0.95
     tolerance: 0.0001
+
 lox_tank:
   lox_h: 1.14
   lox_radius: 0.0762
   ox_tank_pos: 0.6
   mass: 22.0
+
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
   fuel_tank_pos: -0.2
   mass: 4.0
+
 press_tank:
   press_h: 0.457
   press_radius: 0.0762
   pres_tank_pos: 1.2
   mass: null
+
 rocket:
   mass: 90.72
   inertia:
@@ -279,6 +295,7 @@ rocket:
     - 0.1
     - 0.1
     - 0.1
+
 environment:
   date:
   - 2025
@@ -289,5 +306,6 @@ environment:
   longitude: -117.8099547
   elevation: 626.67
   p_amb: 101325.0
+
 thrust:
   burn_time: 10.0

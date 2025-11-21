@@ -314,11 +314,13 @@ def comprehensive_stability_analysis(
     if config.feed_system:
         # Handle both dict and object access
         if isinstance(config.feed_system, dict):
-            lox_config = config.feed_system.get('lox', {})
+            # Try 'oxidizer' first (standard), then 'lox' (legacy)
+            lox_config = config.feed_system.get('oxidizer', config.feed_system.get('lox', {}))
             feed_length = lox_config.get('length', 1.0) if isinstance(lox_config, dict) else getattr(lox_config, 'length', 1.0)
             feed_diameter = lox_config.get('d_inlet', 0.01) if isinstance(lox_config, dict) else getattr(lox_config, 'd_inlet', 0.01)
         else:
-            lox_config = getattr(config.feed_system, 'lox', None)
+            # Try 'oxidizer' first, then 'lox'
+            lox_config = getattr(config.feed_system, 'oxidizer', getattr(config.feed_system, 'lox', None))
             if lox_config:
                 feed_length = getattr(lox_config, 'length', 1.0)
                 feed_diameter = getattr(lox_config, 'd_inlet', 0.01)
