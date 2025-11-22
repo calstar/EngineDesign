@@ -209,18 +209,23 @@ def calculate_chamber_intrinsics(
     if not v_valid.passed:
         velocity_mean = 50.0  # Fallback [m/s]
     
-    # Throat velocity (sonic)
-    # Physics: At throat, flow is choked (M = 1.0)
-    # v_throat = a_throat = sqrt(gamma * R * T_throat)
-    # For isentropic flow: T_throat = Tc * [2/(gamma+1)]
-    # Therefore: v_throat = sqrt(gamma * R * Tc * [2/(gamma+1)])
-    # Simplified: v_throat ≈ sqrt(gamma * R * Tc / (gamma + 1))
+    # CRITICAL PHYSICS: Throat velocity (sonic)
+    # At the throat, flow is ALWAYS choked (M_throat = 1.0 by definition)
+    # This is the fundamental physics: the throat is defined as the location where M = 1.0
+    # 
+    # Isentropic relations at throat (M = 1.0):
+    # - T_throat/Tc = 2/(γ+1)  (critical temperature ratio)
+    # - P_throat/Pc = [2/(γ+1)]^(γ/(γ-1))  (critical pressure ratio)
+    # - v_throat = a_throat = sqrt(γ × R × T_throat)
+    #
+    # Therefore: v_throat = sqrt(γ × R × Tc × [2/(γ+1)])
+    # This is the sonic velocity at the throat
     throat_velocity_factor, factor_valid = NumericalStability.safe_divide(
         gamma, gamma + 1.0, 0.5, "gamma/(gamma+1)"
     )
     if factor_valid.passed:
         # v_throat^2 = gamma * R * Tc * [2/(gamma+1)]
-        # Factor = 2*gamma/(gamma+1) for exact sonic velocity
+        # This is the exact sonic velocity at throat (M = 1.0)
         throat_velocity_squared = 2.0 * gamma * R * Tc / (gamma + 1.0)
         velocity_throat, throat_v_valid = NumericalStability.safe_sqrt(
             throat_velocity_squared, "velocity_throat"
@@ -230,9 +235,16 @@ def calculate_chamber_intrinsics(
     else:
         velocity_throat = sound_speed  # Fallback
     
-    # Mach number
+    # CRITICAL: M_throat = 1.0 (always, by definition of throat)
+    # This is NOT the chamber Mach number (which is subsonic)
+    # This is NOT the exit Mach number (which is supersonic)
+    
+    # CRITICAL: This is the CHAMBER Mach number (mean flow in chamber), NOT throat or exit
+    # - Chamber: Subsonic (typically 0.01-0.1) - this is what we're calculating
+    # - Throat: Always M = 1.0 (sonic) - defined by throat geometry
+    # - Exit: Supersonic (M > 1.0) - calculated from area ratio in nozzle.py
     mach_number, mach_valid = NumericalStability.safe_divide(
-        velocity_mean, sound_speed, 0.01, "mach_number"
+        velocity_mean, sound_speed, 0.01, "mach_number_chamber"
     )
     if not mach_valid.passed:
         mach_number = 0.01  # Fallback
@@ -262,20 +274,23 @@ def calculate_chamber_intrinsics(
     
     # Validate all values
     residence_time = max(residence_time, 1e-6)  # Minimum 1 µs
-    # CRITICAL FIX: Mach number should be calculated dynamically, not clamped to 0.3
-    # It should change over time as geometry and flow conditions change
-    # Only clamp to reasonable subsonic range (0.001 to 0.99, not hardcoded 0.3)
-    mach_number = max(min(mach_number, 0.99), 0.001)  # Subsonic (allow up to 0.99, not hardcoded 0.3)
+    # CRITICAL: Chamber Mach number is subsonic (M < 1.0)
+    # Typical range: 0.01 to 0.1 for rocket chambers
+    # This is NOT the throat Mach number (which is always M = 1.0)
+    # This is NOT the exit Mach number (which is supersonic, M > 1.0)
+    mach_number = max(min(mach_number, 0.99), 0.001)  # Subsonic chamber flow
     reynolds_number = max(reynolds_number, 100.0)  # Minimum Re
     
     return {
         "Lstar": float(Lstar),
         "residence_time": float(residence_time),
         "velocity_mean": float(velocity_mean),
-        "velocity_throat": float(velocity_throat),
+        "velocity_throat": float(velocity_throat),  # Sonic velocity (M_throat = 1.0)
         "density": float(rho),
         "sound_speed": float(sound_speed),
-        "mach_number": float(mach_number),
+        "mach_number": float(mach_number),  # CHAMBER Mach number (subsonic, ~0.01-0.1)
+        "mach_number_chamber": float(mach_number),  # Explicit: this is chamber Mach number
+        "mach_number_throat": 1.0,  # Throat is always M = 1.0 (sonic) - by definition
         "reynolds_number": float(reynolds_number),
         "viscosity": float(viscosity),
         "volume": float(V_chamber),

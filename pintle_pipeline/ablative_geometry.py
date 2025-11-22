@@ -158,8 +158,22 @@ def calculate_throat_recession_multiplier(
     heat_flux_ratio = velocity_factor * pressure_factor
     
     # Recession rate is proportional to heat flux
-    # Add a base factor for enhanced turbulence at throat
-    turbulence_enhancement = 1.1
+    # Calculate turbulence enhancement from physics
+    from pintle_pipeline.physics_based_replacements import calculate_turbulence_enhancement_physics
+    
+    # Estimate Reynolds number at throat
+    # Re = ρ × V × D / μ
+    # Use chamber conditions as approximation
+    rho_approx = chamber_pressure / (287.0 * 3000.0)  # Approximate
+    mu_approx = 4e-5  # Pa·s, typical hot gas
+    Re_throat_approx = rho_approx * throat_velocity * D_throat / mu_approx if D_throat > 0 else 1e5
+    
+    turbulence_enhancement = calculate_turbulence_enhancement_physics(
+        Re_throat=Re_throat_approx,
+        velocity_ratio=throat_velocity / chamber_velocity,
+        D_chamber=D_chamber,
+        D_throat=D_throat,
+    )
     
     multiplier = heat_flux_ratio * turbulence_enhancement
     

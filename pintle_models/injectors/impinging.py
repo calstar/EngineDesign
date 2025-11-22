@@ -108,6 +108,7 @@ class ImpingingInjector(InjectorModel):
                 else:
                     delta_p_feed_F = delta_p_feed_F_base
 
+                # CRITICAL: Calculate injector pressures AFTER feed loss calculation (always, not just in else block)
                 P_inj_O = P_tank_O - delta_p_feed_O
                 P_inj_F = P_tank_F - delta_p_feed_F
 

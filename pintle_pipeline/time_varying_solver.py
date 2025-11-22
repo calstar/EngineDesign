@@ -110,6 +110,13 @@ class TimeVaryingState:
     T_stainless_chamber: float  # [K] - Stainless steel back-face (chamber)
     T_graphite_surface: float  # [K] - Graphite surface temperature
     T_stainless_throat: float  # [K] - Stainless steel back-face (throat)
+    
+    # Nozzle dynamics
+    nozzle_efficiency: float  # Nozzle efficiency (0-1)
+    nozzle_max_heat_flux: float  # [W/m²] - Maximum heat flux in nozzle
+    nozzle_max_wall_temp: float  # [K] - Maximum wall temperature in nozzle
+    nozzle_is_melting: bool  # Whether nozzle is melting
+    nozzle_hotspot_count: int  # Number of hotspots detected
 
 
 class TimeVaryingCoupledSolver:
@@ -297,11 +304,30 @@ class TimeVaryingCoupledSolver:
         heat_flux_chamber = heat_flux_chamber_dict["heat_flux_total"]
         h_hot_chamber = heat_flux_chamber_dict.get("h_g", 50000.0)  # Convective coefficient
         
-        # Throat heat flux (higher - use Bartz correlation approximation)
-        # q_throat ≈ q_chamber × (V_throat/V_chamber)^0.8 × (P_throat/P_chamber)^0.2
-        # Simplified: q_throat ≈ 1.5 × q_chamber (typical)
-        heat_flux_throat = heat_flux_chamber * 1.5
-        h_hot_throat = h_hot_chamber * 1.5  # Higher at throat
+        # Throat heat flux using physics-based Bartz correlation
+        from pintle_pipeline.physics_based_replacements import calculate_throat_heat_flux_physics
+        
+        # Calculate chamber velocity
+        rho_chamber = Pc / (R_chamber * Tc)
+        A_chamber = np.pi * (D_chamber_new / 2.0) ** 2
+        V_chamber = mdot_total / (rho_chamber * A_chamber)
+        
+        # Throat velocity (sonic)
+        V_throat = np.sqrt(gamma_chamber * R_chamber * Tc * 2.0 / (gamma_chamber + 1.0))
+        
+        # Physics-based throat heat flux
+        heat_flux_throat = calculate_throat_heat_flux_physics(
+            heat_flux_chamber=heat_flux_chamber,
+            Pc=Pc,
+            V_chamber=V_chamber,
+            V_throat=V_throat,
+            gamma=gamma_chamber,
+            D_chamber=D_chamber_new,
+            D_throat=D_throat_new,
+        )
+        
+        # Convective coefficient scales with heat flux (h = q / (T_gas - T_wall))
+        h_hot_throat = h_hot_chamber * (heat_flux_throat / (heat_flux_chamber + 1e-10))
         
         # Calculate ablative recession rate
         ablative_cfg = self.config.ablative_cooling
@@ -371,11 +397,15 @@ class TimeVaryingCoupledSolver:
                 recession_graphite_new = recession_graphite  # Graphite doesn't recede
                 graphite_thickness_remaining_new = graphite_thickness_remaining  # Constant
                 
-                # THROAT AREA STAYS CONSTANT - this is the whole point of graphite insert
+                # CRITICAL PHYSICS: THROAT AREA STAYS CONSTANT - this is the whole point of graphite insert
                 # Graphite is a non-ablating insert that maintains throat geometry
+                # IMPORTANT: When throat area is constant, throat Mach number remains M = 1.0 (sonic)
+                # The flow automatically adjusts to maintain sonic conditions at the throat
+                # This is the fundamental physics: throat is defined as the location where M = 1.0
                 D_throat_current = np.sqrt(4.0 * A_throat / np.pi)
                 D_throat_new = D_throat_current  # NO CHANGE - graphite keeps it constant
                 A_throat_new = A_throat  # NO CHANGE - constant throat area
+                # M_throat = 1.0 (always, by definition of throat)
             else:
                 # Recession allowed (for testing/debugging only)
                 recession_rate_graphite = compute_graphite_recession(
@@ -393,7 +423,13 @@ class TimeVaryingCoupledSolver:
             
             # Throat recession from ablative (if any) doesn't affect throat area when graphite is present
             # The ablative is behind the graphite insert and is protected
-            recession_throat_new = recession_throat  # No change (graphite protects it)
+            # BUT: We still track throat recession for diagnostics (even though it doesn't affect area)
+            if ablative_cfg.enabled:
+                # Calculate what throat recession WOULD be (for tracking/diagnostics)
+                # This doesn't affect throat area (graphite protects it), but we track it
+                recession_throat_new = recession_throat + recession_rate_ablative * throat_multiplier * dt
+            else:
+                recession_throat_new = recession_throat  # No ablative = no recession
             
             # Update chamber volume (ablative recession still affects chamber)
             if ablative_cfg.enabled:
@@ -483,30 +519,174 @@ class TimeVaryingCoupledSolver:
         R_exit = thrust_results["R_exit"]
         equilibrium_factor = thrust_results["equilibrium_factor"]
         
-        # Calculate stability (TIME-VARYING - depends on current geometry and conditions)
-        chugging = calculate_chugging_frequency(
-            V_chamber_new,
-            A_throat_new,
-            cstar_actual,
-            gamma_chamber,
-            Pc,
-        )
+        # Calculate nozzle dynamics (efficiency, melting, hotspots)
+        try:
+            from pintle_pipeline.nozzle_dynamics import (
+                calculate_nozzle_exit_velocity,
+                calculate_nozzle_heat_flux,
+                detect_nozzle_hotspots,
+                calculate_nozzle_melting,
+            )
+            
+            # Nozzle exit velocity and efficiency (already have v_exit, but calculate efficiency)
+            nozzle_velocity_results = calculate_nozzle_exit_velocity(
+                Pc=Pc,
+                Tc=Tc,
+                gamma=gamma_exit,
+                R=R_exit,
+                expansion_ratio=eps_new,
+                P_exit=P_exit,
+                P_ambient=101325.0,
+            )
+            nozzle_efficiency = nozzle_velocity_results["efficiency"]
+            
+            # Nozzle heat flux distribution
+            L_nozzle = getattr(config_current.nozzle, 'length', 0.1)
+            n_nozzle_points = 50
+            nozzle_positions = np.linspace(0.0, L_nozzle, n_nozzle_points)
+            
+            nozzle_heat_flux_results = calculate_nozzle_heat_flux(
+                positions=nozzle_positions,
+                Pc=Pc,
+                Tc=Tc,
+                mdot=mdot_total,
+                gamma=gamma_exit,
+                R=R_exit,
+                D_throat=D_throat_new,
+                expansion_ratio=eps_new,
+            )
+            
+            # Detect hotspots
+            hotspots = detect_nozzle_hotspots(
+                heat_flux=nozzle_heat_flux_results["heat_flux"],
+                positions=nozzle_positions,
+            )
+            
+            # Check for melting
+            material_melting_temp = 2000.0  # K, typical nozzle material
+            melting_results = calculate_nozzle_melting(
+                heat_flux=nozzle_heat_flux_results["heat_flux"],
+                positions=nozzle_positions,
+                material_melting_temp=material_melting_temp,
+            )
+            
+            nozzle_dynamics = {
+                "efficiency": nozzle_efficiency,
+                "max_heat_flux": float(np.max(nozzle_heat_flux_results["heat_flux"])),
+                "avg_heat_flux": float(np.mean(nozzle_heat_flux_results["heat_flux"])),
+                "max_wall_temp": melting_results["max_temperature"],
+                "is_melting": bool(np.any(melting_results["is_melting"])),
+                "hotspot_count": int(np.sum(hotspots["is_hotspot"])),
+                "hotspot_max_intensity": float(np.max(hotspots["hotspot_intensity"])),
+            }
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Nozzle dynamics calculation failed: {e}")
+            nozzle_efficiency = 0.95  # Default
+            nozzle_dynamics = {
+                "efficiency": nozzle_efficiency,
+                "max_heat_flux": 0.0,
+                "avg_heat_flux": 0.0,
+                "max_wall_temp": 0.0,
+                "is_melting": False,
+                "hotspot_count": 0,
+                "hotspot_max_intensity": 1.0,
+            }
         
-        acoustic = calculate_acoustic_modes(
-            self.L_chamber,
-            D_chamber_new,
-            gamma_chamber,
-            R_chamber,
-            Tc,
-        )
-        
-        # Feed system stability (simplified - would need feed line geometry)
-        # For now, use a simplified check
-        feed_stability = {
-            "pogo_frequency": np.nan,  # Would need feed line geometry
-            "surge_frequency": np.nan,
-            "stability_margin": 1.0,  # Assume stable if no data
-        }
+        # Calculate stability with pintle geometry, impingement, and recirculation
+        # Use enhanced physics-based spatial stability analysis
+        try:
+            from pintle_pipeline.pintle_stability_enhanced import calculate_pintle_stability_enhanced
+            from pintle_pipeline.localized_ablation import calculate_impingement_zones
+            
+            # Create position array for spatial analysis
+            n_stability_points = 50
+            positions_stability = np.linspace(0.0, self.L_chamber, n_stability_points)
+            
+            # Calculate local properties (simplified - assume uniform for now)
+            P_local = np.full(n_stability_points, Pc)
+            c_local = np.full(n_stability_points, np.sqrt(gamma_chamber * R_chamber * Tc))
+            rho_local = np.full(n_stability_points, Pc / (R_chamber * Tc))
+            mdot_local = np.full(n_stability_points, mdot_total)
+            
+            # Recession profile (spatial variation)
+            recession_profile = None
+            if ablative_cfg and ablative_cfg.enabled:
+                # Create spatial recession profile (more at impingement zones)
+                impingement_data = calculate_impingement_zones(
+                    config_current, self.L_chamber, D_chamber_new, n_points=n_stability_points
+                )
+                # Recession is enhanced at impingement zones
+                recession_base = recession_chamber_new
+                recession_profile = recession_base * impingement_data["impingement_heat_flux_multiplier"]
+            
+            # Get injection velocities for recirculation calculation
+            # These would come from injector solve, but use estimates for now
+            fuel_velocity = 50.0  # [m/s] - typical fuel injection velocity
+            lox_velocity = 30.0   # [m/s] - typical LOX injection velocity
+            
+            # Calculate enhanced pintle-based stability with recirculation
+            stability_spatial = calculate_pintle_stability_enhanced(
+                config_current,
+                positions_stability,
+                P_local,
+                c_local,
+                rho_local,
+                mdot_local,
+                recession_profile=recession_profile,
+                L_chamber=self.L_chamber,
+                D_chamber=D_chamber_new,
+                fuel_velocity=fuel_velocity,
+                lox_velocity=lox_velocity,
+            )
+            
+            # Use average values for single-point metrics
+            chugging_freq = float(np.mean(stability_spatial["chugging_frequency"]))
+            stability_margin = float(np.mean(stability_spatial["stability_margin"]))
+            
+            # Acoustic modes (use base calculation for now, could be enhanced)
+            acoustic = calculate_acoustic_modes(
+                self.L_chamber,
+                D_chamber_new,
+                gamma_chamber,
+                R_chamber,
+                Tc,
+            )
+            
+            # Feed system stability
+            feed_stability = {
+                "pogo_frequency": np.nan,
+                "surge_frequency": np.nan,
+                "stability_margin": stability_margin,
+            }
+            
+        except Exception as e:
+            # Fallback to simple calculation
+            import warnings
+            warnings.warn(f"Pintle stability calculation failed, using fallback: {e}")
+            chugging = calculate_chugging_frequency(
+                V_chamber_new,
+                A_throat_new,
+                cstar_actual,
+                gamma_chamber,
+                Pc,
+            )
+            chugging_freq = chugging["frequency"]
+            stability_margin = chugging.get("stability_margin", 0.5)
+            
+            acoustic = calculate_acoustic_modes(
+                self.L_chamber,
+                D_chamber_new,
+                gamma_chamber,
+                R_chamber,
+                Tc,
+            )
+            
+            feed_stability = {
+                "pogo_frequency": np.nan,
+                "surge_frequency": np.nan,
+                "stability_margin": 1.0,
+            }
         
         # Multi-layer thermal analysis (phenolic → stainless steel)
         # Calculate temperature profile through wall to check stainless steel temperature
@@ -626,10 +806,11 @@ class TimeVaryingCoupledSolver:
         state = TimeVaryingState(
             time=time,
             V_chamber=V_chamber_new,
-            A_throat=A_throat_new,
+            A_throat=A_throat_new,  # CRITICAL: This stays constant with graphite, grows without graphite
             A_exit=A_exit_new,
             Lstar=Lstar_new,
             D_chamber=D_chamber_new,
+            D_throat=D_throat_new,  # CRITICAL: This stays constant with graphite, grows without graphite
             D_throat=D_throat_new,
             D_exit=D_exit_new,
             eps=eps_new,
@@ -664,8 +845,8 @@ class TimeVaryingCoupledSolver:
             R_chamber=R_chamber,
             R_exit=R_exit,
             equilibrium_factor=equilibrium_factor,
-            chugging_frequency=chugging["frequency"],
-            chugging_stability_margin=chugging["stability_margin"],
+            chugging_frequency=chugging_freq,
+            chugging_stability_margin=stability_margin,
             acoustic_modes=acoustic,
             feed_stability=feed_stability,
             heat_flux_chamber=heat_flux_chamber,
@@ -676,6 +857,12 @@ class TimeVaryingCoupledSolver:
             T_stainless_chamber=T_stainless_chamber,
             T_graphite_surface=T_graphite_surface,
             T_stainless_throat=T_stainless_throat,
+            # Nozzle dynamics
+            nozzle_efficiency=nozzle_dynamics["efficiency"],
+            nozzle_max_heat_flux=nozzle_dynamics["max_heat_flux"],
+            nozzle_max_wall_temp=nozzle_dynamics["max_wall_temp"],
+            nozzle_is_melting=nozzle_dynamics["is_melting"],
+            nozzle_hotspot_count=nozzle_dynamics["hotspot_count"],
         )
         
         return state
@@ -763,9 +950,11 @@ class TimeVaryingCoupledSolver:
             "A_exit": np.array([s.A_exit for s in self.state_history]),
             "eps": np.array([s.eps for s in self.state_history]),
             "recession_chamber": np.array([s.recession_chamber for s in self.state_history]),
-            "recession_throat": np.array([s.recession_throat for s in self.state_history]),
+            "recession_throat": np.array([s.recession_throat for s in self.state_history]),  # Throat recession (tracked even with graphite)
             "recession_exit": np.array([s.recession_exit for s in self.state_history]),
             "recession_graphite": np.array([s.recession_graphite for s in self.state_history]),
+            "D_throat": np.array([s.D_throat for s in self.state_history]),  # Throat diameter (constant with graphite, grows without)
+            "throat_area_change_pct": np.array([(s.A_throat - self.A_throat_initial) / self.A_throat_initial * 100.0 for s in self.state_history]),
             "chugging_frequency": np.array([s.chugging_frequency for s in self.state_history]),
             "chugging_stability_margin": np.array([s.chugging_stability_margin for s in self.state_history]),
             "heat_flux_chamber": np.array([s.heat_flux_chamber for s in self.state_history]),
@@ -781,6 +970,12 @@ class TimeVaryingCoupledSolver:
             "T_stainless_chamber": np.array([s.T_stainless_chamber for s in self.state_history]),
             "T_graphite_surface": np.array([s.T_graphite_surface for s in self.state_history]),
             "T_stainless_throat": np.array([s.T_stainless_throat for s in self.state_history]),
+            # Nozzle dynamics
+            "nozzle_efficiency": np.array([s.nozzle_efficiency for s in self.state_history]),
+            "nozzle_max_heat_flux": np.array([s.nozzle_max_heat_flux for s in self.state_history]),
+            "nozzle_max_wall_temp": np.array([s.nozzle_max_wall_temp for s in self.state_history]),
+            "nozzle_is_melting": np.array([s.nozzle_is_melting for s in self.state_history]),
+            "nozzle_hotspot_count": np.array([s.nozzle_hotspot_count for s in self.state_history]),
         }
         
         # Extract reaction progress arrays

@@ -344,29 +344,56 @@ def calculate_mixing_efficiency(
     # Total effective diffusivity: sum of molecular and turbulent contributions
     D_total = max(D_m + D_t, 1e-8)
 
+    # Physics-based evaporation factor
+    from pintle_pipeline.physics_based_replacements import (
+        calculate_evaporation_factor_physics,
+        calculate_smd_factor_physics,
+        calculate_recirculation_length_physics,
+    )
+    
+    # Calculate Reynolds number for physics-based calculations
+    Re_chamber = rho_g * U * np.sqrt(4.0 * Ac / np.pi) / max(mu_g, 1e-8)
+    
     if chamber_length > 0:
-        evap_ratio = min(evaporation_length / chamber_length, 2.0)  # Cap at 2x
-        print(f"evaporation_length: {evaporation_length}, evap_ratio: {evap_ratio}")
-        evap_factor = 1.0 / (1.0 + 0.5 * (evap_ratio - 1.0))
+        evap_factor = calculate_evaporation_factor_physics(
+            evaporation_length=evaporation_length,
+            chamber_length=chamber_length,
+            SMD=SMD,
+            target_smd=target_smd,
+            Pc=Pc,
+            Tc=Tc,
+        )
     else:
-        evap_factor = 0.5
-    evap_factor = np.clip(evap_factor, 0.3, 1.0)
-    print(f"evap_factor: {evap_factor}")
+        evap_factor = 0.5  # Unknown
+    print(f"evaporation_length: {evaporation_length}, evap_factor: {evap_factor}")
 
     tau_res_eff = (Lstar / max(U, 1e-4)) * (1.0 / evap_factor)
 
-    # Recirculation length scale (fraction of chamber length or injector diameter)
+    # Physics-based recirculation length
     Dc = np.sqrt(4.0 * Ac / np.pi)
-    L_recirc = 0.25 * Dc # pick a calibrated factor
+    # Need injector velocity for recirculation calculation
+    # Estimate from mass flow: U_inj ≈ mdot / (rho × A_inj)
+    # For now, use chamber velocity as proxy
+    U_inj_estimate = U  # Approximate
+    L_recirc = calculate_recirculation_length_physics(
+        D_chamber=Dc,
+        d_pintle_tip=Dinj,  # Use injector diameter as proxy for pintle tip
+        fuel_velocity=U_inj_estimate,
+        lox_velocity=U_inj_estimate,
+        Re_chamber=Re_chamber,
+    )
     print(f"Dc: {Dc}, L_recirc: {L_recirc}")
 
-    # Droplet size effect
-    # Smaller droplets → better mixing
-    if SMD > 0 and target_smd > 0:
-        smd_ratio = min(SMD / target_smd, 10.0)  # Cap at 10x
-        smd_factor = 1.0 / (1.0 + 0.5 * (smd_ratio - 1.0))
-    else:
-        smd_factor = 0.5  # Unknown → assume poor
+    # Physics-based SMD factor
+    # Calculate injector Reynolds and Weber for physics-based calculation
+    Re_injector = Re_chamber  # Approximate
+    We_injector = 20.0  # Typical for pintle injectors
+    smd_factor = calculate_smd_factor_physics(
+        SMD=SMD,
+        target_smd=target_smd,
+        Re_injector=Re_injector,
+        We_injector=We_injector,
+    )
 
     #print(f"D_total: {D_total}")
     tau_mix = (L_recirc ** 2) / (beta * D_total)

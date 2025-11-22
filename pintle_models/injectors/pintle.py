@@ -133,29 +133,30 @@ class PintleInjector(InjectorModel):
                 delta_p_feed_F = delta_p_feed_F_base + delta_p_regen
             else:
                 delta_p_feed_F = delta_p_feed_F_base
+            
+            # CRITICAL: Calculate injector pressures AFTER feed loss calculation (always, not just in else block)
+            P_inj_O = P_tank_O - delta_p_feed_O
+            P_inj_F = P_tank_F - delta_p_feed_F
 
-                P_inj_O = P_tank_O - delta_p_feed_O
-                P_inj_F = P_tank_F - delta_p_feed_F
+            if feed_iter < 2:
+                delta_p_inj_O = max(0.0, P_inj_O - Pc)
+                delta_p_inj_F = max(0.0, P_inj_F - Pc)
 
-                if feed_iter < 2:
-                    delta_p_inj_O = max(0.0, P_inj_O - Pc)
-                    delta_p_inj_F = max(0.0, P_inj_F - Pc)
+                u_O_quick = np.sqrt(2 * delta_p_inj_O / rho_O) if delta_p_inj_O > 0 else 0.0
+                u_F_quick = np.sqrt(2 * delta_p_inj_F / rho_F) if delta_p_inj_F > 0 else 0.0
 
-                    u_O_quick = np.sqrt(2 * delta_p_inj_O / rho_O) if delta_p_inj_O > 0 else 0.0
-                    u_F_quick = np.sqrt(2 * delta_p_inj_F / rho_F) if delta_p_inj_F > 0 else 0.0
+                Re_O_quick = calculate_reynolds_number(rho_O, u_O_quick, d_hyd_O, mu_O)
+                Re_F_quick = calculate_reynolds_number(rho_F, u_F_quick, d_hyd_F, mu_F)
 
-                    Re_O_quick = calculate_reynolds_number(rho_O, u_O_quick, d_hyd_O, mu_O)
-                    Re_F_quick = calculate_reynolds_number(rho_F, u_F_quick, d_hyd_F, mu_F)
+                T_tank_O = 90.0
+                T_tank_F = 300.0
+                Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
+                Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
+                Cd_O_quick = min(Cd_O_quick_base, Cd_O_eff)
+                Cd_F_quick = min(Cd_F_quick_base, Cd_F_eff)
 
-                    T_tank_O = 90.0
-                    T_tank_F = 300.0
-                    Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
-                    Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
-                    Cd_O_quick = min(Cd_O_quick_base, Cd_O_eff)
-                    Cd_F_quick = min(Cd_F_quick_base, Cd_F_eff)
-
-                    mdot_O = Cd_O_quick * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O)
-                    mdot_F = Cd_F_quick * A_fuel * np.sqrt(2 * rho_F * delta_p_inj_F)
+                mdot_O = Cd_O_quick * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O)
+                mdot_F = Cd_F_quick * A_fuel * np.sqrt(2 * rho_F * delta_p_inj_F)
 
             delta_p_inj_O = max(0.0, P_inj_O - Pc)
             delta_p_inj_F = max(0.0, P_inj_F - Pc)
