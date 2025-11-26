@@ -307,13 +307,25 @@ class TimeVaryingCoupledSolver:
         # Throat heat flux using physics-based Bartz correlation
         from pintle_pipeline.physics_based_replacements import calculate_throat_heat_flux_physics
         
+        # Calculate current chamber diameter (use previous state or initial)
+        if previous_state is not None:
+            D_chamber_current = previous_state.D_chamber
+        else:
+            D_chamber_current = self.D_chamber_initial
+        
         # Calculate chamber velocity
         rho_chamber = Pc / (R_chamber * Tc)
-        A_chamber = np.pi * (D_chamber_new / 2.0) ** 2
+        A_chamber = np.pi * (D_chamber_current / 2.0) ** 2
         V_chamber = mdot_total / (rho_chamber * A_chamber)
         
         # Throat velocity (sonic)
         V_throat = np.sqrt(gamma_chamber * R_chamber * Tc * 2.0 / (gamma_chamber + 1.0))
+        
+        # Current throat diameter (use previous state or initial)
+        if previous_state is not None:
+            D_throat_current = previous_state.D_throat
+        else:
+            D_throat_current = self.D_throat_initial
         
         # Physics-based throat heat flux
         heat_flux_throat = calculate_throat_heat_flux_physics(
@@ -322,8 +334,8 @@ class TimeVaryingCoupledSolver:
             V_chamber=V_chamber,
             V_throat=V_throat,
             gamma=gamma_chamber,
-            D_chamber=D_chamber_new,
-            D_throat=D_throat_new,
+            D_chamber=D_chamber_current,
+            D_throat=D_throat_current,
         )
         
         # Convective coefficient scales with heat flux (h = q / (T_gas - T_wall))
@@ -432,12 +444,18 @@ class TimeVaryingCoupledSolver:
                 recession_throat_new = recession_throat  # No ablative = no recession
             
             # Update chamber volume (ablative recession still affects chamber)
+            # Initialize D_chamber_new based on current state
+            if previous_state is not None:
+                D_chamber_base = previous_state.D_chamber
+            else:
+                D_chamber_base = self.D_chamber_initial
+                
             if ablative_cfg.enabled:
-                D_chamber_new = self.D_chamber_initial + 2.0 * recession_chamber_new * ablative_cfg.coverage_fraction
+                D_chamber_new = D_chamber_base + 2.0 * recession_chamber_new * ablative_cfg.coverage_fraction
                 V_chamber_new = np.pi * (D_chamber_new / 2.0) ** 2 * self.L_chamber
             else:
                 V_chamber_new = V_chamber
-                D_chamber_new = self.D_chamber_initial
+                D_chamber_new = D_chamber_base
         elif graphite_cfg and graphite_cfg.enabled and graphite_thickness_remaining <= 0:
             # Graphite insert fully consumed - now ablative recession affects throat area
             recession_graphite_new = recession_graphite  # No more graphite to erode

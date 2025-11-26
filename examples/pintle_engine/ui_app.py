@@ -2603,30 +2603,63 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
                 st.markdown("### 🎬 Recession Animation")
                 if st.checkbox("Generate Recession Animation", value=False, key="recession_anim_gen"):
                     try:
-                        from pintle_pipeline.recession_animation_simple import create_simple_recession_animation
+                        from pintle_pipeline.animation_fixed import create_working_animation
                         import traceback
                         
                         # Simple approach: use recession data directly from time series
                         times = df["time"].to_numpy()
-                        recession_data = df["recession_chamber"].values if "recession_chamber" in df.columns else np.zeros_like(times)
+                        # Try multiple possible column names
+                        if "Cumulative Chamber Recession (µm)" in df.columns:
+                            recession_data = df["Cumulative Chamber Recession (µm)"].values * 1e-6  # Convert µm to m
+                        elif "recession_chamber" in df.columns:
+                            recession_data = df["recession_chamber"].values
+                        elif "Ablative Recession (µm/s)" in df.columns:
+                            # Integrate recession rate
+                            dt = np.diff(times, prepend=times[0])
+                            recession_rate = df["Ablative Recession (µm/s)"].values * 1e-6  # Convert µm/s to m/s
+                            recession_data = np.cumsum(recession_rate * dt)
+                        else:
+                            recession_data = np.zeros_like(times)
+                            st.warning("⚠️ No recession data found. Using zero recession.")
                         
-                        # Get initial diameters
-                        D_chamber_initial = runner.config.chamber.D_chamber_initial
-                        D_throat_initial = runner.config.chamber.D_throat_initial
-                        L_chamber = runner.config.chamber.L_chamber
+                        # Get initial diameters (calculate if not in config)
+                        if hasattr(runner.config.chamber, 'D_chamber_initial'):
+                            D_chamber_initial = runner.config.chamber.D_chamber_initial
+                        else:
+                            # Calculate from volume and length
+                            V_chamber = runner.config.chamber.volume
+                            L_chamber = runner.config.chamber.length if runner.config.chamber.length else 0.18
+                            D_chamber_initial = np.sqrt(4.0 * V_chamber / (np.pi * L_chamber))
                         
-                        with st.spinner("Creating simple animation..."):
-                            fig_anim = create_simple_recession_animation(
-                                time_history=times,
-                                recession_history=recession_data,
-                                D_chamber_initial=D_chamber_initial,
-                                D_throat_initial=D_throat_initial,
-                                L_chamber=L_chamber,
-                                max_frames=20,
-                            )
-                            
-                            st.plotly_chart(fig_anim, use_container_width=True)
-                            st.success("✅ Animation generated! Shows recession vs time and diameter evolution over time.")
+                        if hasattr(runner.config.chamber, 'D_throat_initial'):
+                            D_throat_initial = runner.config.chamber.D_throat_initial
+                        else:
+                            # Calculate from throat area
+                            A_throat = runner.config.chamber.A_throat
+                            D_throat_initial = np.sqrt(4.0 * A_throat / np.pi)
+                        
+                        if hasattr(runner.config.chamber, 'L_chamber'):
+                            L_chamber = runner.config.chamber.L_chamber
+                        else:
+                            L_chamber = runner.config.chamber.length if runner.config.chamber.length else 0.18
+                        
+                        with st.spinner("Creating recession animation..."):
+                            try:
+                                fig_anim = create_working_animation(
+                                    time_history=times,
+                                    recession_history=recession_data,
+                                    D_chamber_initial=D_chamber_initial,
+                                    D_throat_initial=D_throat_initial,
+                                    L_chamber=L_chamber,
+                                    max_frames=min(20, len(times)),  # Don't exceed available frames
+                                )
+                                
+                                st.plotly_chart(fig_anim, use_container_width=True)
+                                st.success("✅ Animation generated! Use the play button to see recession evolution over time.")
+                            except Exception as anim_e:
+                                st.error(f"Animation creation failed: {anim_e}")
+                                import traceback
+                                st.code(traceback.format_exc())
                     except Exception as e:
                         st.error(f"❌ Failed to generate recession animation: {e}")
                         with st.expander("🔍 Error Details"):
@@ -3886,13 +3919,14 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
             chamber_volume = 1e-3
         chamber_A_throat = chamber.get("A_throat")
         if chamber_A_throat is None:
-            chamber_A_throat = 0.000857892  # Default throat area
+            # Default for small-scale engine: 20mm diameter = 0.000314 m²
+            chamber_A_throat = 0.000314  # Default throat area (20mm diameter)
         chamber_length = chamber.get("length")
         if chamber_length is None:
             chamber_length = 0.5
         chamber_lstar = chamber.get("Lstar")
         if chamber_lstar is None:
-            chamber_lstar = 0.5
+            chamber_lstar = 1.27  # Default L* for small engines (50 inches)
         
         # Make keys include a hash of the config values so they change when config changes
         # This makes length and Lstar work identically to volume and A_throat (which have no keys)
@@ -3906,7 +3940,17 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         
         # Now render inputs - they will use config values since keys are cleared if values don't match
         chamber["volume"] = st.number_input("Chamber volume [m³]", min_value=1e-6, max_value=1.0, value=float(chamber_volume), format="%.6f")
-        chamber["A_throat"] = st.number_input("Throat area [m²]", min_value=1e-5, max_value=0.01, value=float(chamber_A_throat), format="%.6f")
+        # For small-scale engines: 20mm throat = 0.000314 m², so min should be smaller
+        # Allow down to 5mm diameter = 0.0000196 m² ≈ 2e-5 m²
+        chamber["A_throat"] = st.number_input(
+            "Throat area [m²]", 
+            min_value=1e-6,  # Allow very small engines (5mm diameter = ~2e-5 m²)
+            max_value=0.01, 
+            value=float(chamber_A_throat), 
+            step=1e-6,  # Small step for precision
+            format="%.6f",
+            help="For 20mm diameter throat: ~0.000314 m²"
+        )
         chamber["length"] = length_number_input(
             "Chamber length",
             float(chamber_length),
@@ -6211,11 +6255,21 @@ def main():
     with tab1:
         # Design Optimization - comprehensive workflow
         config_obj = design_optimization_view(config_obj, runner)
-        # Update runner if config changed
+        # CRITICAL: Use optimized config if available and update config_dict
         if "optimized_config" in st.session_state:
-            config_obj = st.session_state["optimized_config"]
+            optimized_config = st.session_state["optimized_config"]
+            config_obj = optimized_config
+            
+            # Update config_dict so changes persist across tabs
+            config_dict_updated = optimized_config.model_dump(exclude_none=False)
+            st.session_state["config_dict"] = config_dict_updated
+            
+            # Recreate runner with optimized config
             runner = PintleEngineRunner(config_obj)
             st.session_state["cached_runner"] = runner
+            
+            # Show notification
+            st.sidebar.success("✅ Using optimized configuration!")
     
     with tab2:
         forward_view(runner)

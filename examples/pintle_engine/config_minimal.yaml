@@ -21,17 +21,17 @@ injector:
   type: pintle
   geometry:
     lox:
-      n_orifices: 16
-      d_orifice: 0.003979
-      theta_orifice: 30.01
-      A_entry: 1.0e-05
-      d_hydraulic: 0.003979
+      n_orifices: 12  # 12 orifices (realistic for ~7kN engine)
+      d_orifice: 0.003  # 3mm orifice diameter (realistic)
+      theta_orifice: 30.0  # 30° injection angle (typical)
+      A_entry: 8.0e-06  # Entry area
+      d_hydraulic: 0.003  # Hydraulic diameter
     fuel:
-      d_pintle_tip: 0.01905
-      d_reservoir_inner: 0.019676
-      h_gap: 0.000313
-      A_entry: 1.5e-05
-      d_hydraulic: 0.000626
+      d_pintle_tip: 0.015  # 15mm pintle tip (realistic)
+      d_reservoir_inner: 0.016  # 16mm reservoir
+      h_gap: 0.0005  # 0.5mm gap (realistic)
+      A_entry: 1.2e-05  # Entry area
+      d_hydraulic: 0.001  # Hydraulic diameter
 feed_system:
   oxidizer:
     d_inlet: 0.009525
@@ -100,9 +100,9 @@ ablative_cooling:
   heat_of_ablation: 2.5e6  # J/kg - Effective heat of ablation
   thermal_conductivity: 0.35  # W/(m·K)
   specific_heat: 1500.0  # J/(kg·K)
-  initial_thickness: 0.01  # m - 10mm ablative liner
+  initial_thickness: 0.008  # m - 8mm ablative liner (realistic for 10s burn)
   surface_temperature_limit: 1200.0  # K
-  coverage_fraction: 0.85  # 85% of chamber surface protected
+  coverage_fraction: 0.9  # 90% of chamber surface protected
   pyrolysis_temperature: 950.0  # K - Characteristic pyrolysis temp
   # Blowing effect (pyrolysis gas protection)
   use_physics_based_blowing: true  # If true, computes B = m_dot_pyrolysis/m_dot_external
@@ -131,21 +131,22 @@ ablative_cooling:
 # Graphite inserts prevent burn-through in nozzle throat/exit
 graphite_insert:
   enabled: true
-  material_density: 2260.0
-  heat_of_ablation: 1.5e7 #J/kg
-  thermal_conductivity: 100.0
-  specific_heat: 710.0
-  activation_energy: 1.9e5 #J/mol
-  initial_thickness: 0.005
-  surface_temperature_limit: 2500.0
-  oxidation_temperature: 800.0
-  oxidation_rate: 1.0e-06 #https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
-  oxidation_reference_temperature: 973 #https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
-  oxidation_reference_pressure: 21000 #https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
-  recession_multiplier: null
-  char_layer_conductivity: 5.0
-  char_layer_thickness: 0.0005
-  coverage_fraction: 1.0
+  material_density: 2260.0  # kg/m³ - Graphite density
+  heat_of_ablation: 1.5e7  # J/kg - High heat of ablation
+  thermal_conductivity: 100.0  # W/(m·K) - High thermal conductivity
+  specific_heat: 710.0  # J/(kg·K)
+  activation_energy: 1.9e5  # J/mol
+  initial_thickness: 0.006  # m - 6mm graphite insert (realistic for throat)
+  surface_temperature_limit: 2500.0  # K - Graphite can handle high temps
+  oxidation_temperature: 800.0  # K
+  oxidation_rate: 1.0e-06  # https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
+  oxidation_reference_temperature: 973  # https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
+  oxidation_reference_pressure: 21000  # https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
+  recession_multiplier: null  # Use physics-based calculation
+  char_layer_conductivity: 5.0  # W/(m·K)
+  char_layer_thickness: 0.0005  # m - 0.5mm char layer
+  coverage_fraction: 1.0  # 100% coverage at throat
+  axial_half_length: 0.02  # 20mm half-length (40mm total, realistic)
 discharge:
   oxidizer:
     Cd_inf: 0.4
@@ -229,20 +230,20 @@ combustion:
     use_finite_rate_chemistry: true
     use_shifting_equilibrium: true
 chamber:
-  volume: 0.005221309
-  A_throat: 0.002650007
-  length: 0.9214335
-  Lstar: 1.9703
-  chamber_inner_diameter: 0.08491
-  design_pressure: 2068000.0
-  design_thrust: 7672.3
+  volume: 0.0035  # ~3.5L chamber volume (realistic for ~7kN engine)
+  A_throat: 0.000857892  # ~33mm throat diameter (realistic)
+  length: 0.25  # 25cm chamber length (realistic)
+  Lstar: 1.2  # 1.2m L* (typical for pintle, good combustion)
+  chamber_inner_diameter: 0.085  # 85mm chamber diameter (realistic)
+  design_pressure: 3000000.0  # 3 MPa design pressure (realistic)
+  design_thrust: 7000.0  # 7 kN thrust (realistic)
   design_force_coefficient: 1.4
 nozzle:
-  A_throat: 0.002650007
-  A_exit: 0.02675254
-  expansion_ratio: 10.0953
-  exit_diameter: 0.18456
-  efficiency: 0.98
+  A_throat: 0.000857892  # Match chamber throat
+  A_exit: 0.00857892  # 10:1 expansion ratio
+  expansion_ratio: 10.0  # 10:1 expansion (realistic for sea level)
+  exit_diameter: 0.1044  # ~104mm exit diameter
+  efficiency: 0.95  # 95% nozzle efficiency (realistic)
 solver:
   method: brentq
   Pc_bounds:

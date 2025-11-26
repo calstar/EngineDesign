@@ -165,10 +165,20 @@ class ChamberOptimizer:
         # Run diagnostics
         diagnostics = self.diagnostics.diagnose_all(P_tank_O, P_tank_F)
         
-        # Calculate burn analysis
+        # Calculate burn analysis with time-varying dynamics
         burn_analysis = self._calculate_burn_analysis(
             optimized_config, optimized_runner, target_burn_time, P_tank_O, P_tank_F
         )
+        
+        # Extract optimized parameters for display
+        optimized_params = {
+            "A_throat": optimized_config.chamber.A_throat,
+            "A_exit": optimized_config.nozzle.A_exit,
+            "Lstar": optimized_config.chamber.Lstar,
+            "chamber_diameter": optimized_config.chamber.chamber_inner_diameter if hasattr(optimized_config.chamber, 'chamber_inner_diameter') else np.sqrt(4.0 * optimized_config.chamber.volume / (np.pi * optimized_config.chamber.length)),
+            "chamber_length": optimized_config.chamber.length,
+            "expansion_ratio": optimized_config.nozzle.expansion_ratio,
+        }
         
         return {
             "optimized_config": optimized_config,
@@ -179,6 +189,7 @@ class ChamberOptimizer:
             "burn_analysis": burn_analysis,
             "design_requirements": design_requirements,
             "constraints": constraints,
+            "optimized_parameters": optimized_params,  # NEW: For UI display
         }
     
     def _generate_initial_guess(self, target_thrust: float, constraints: Dict) -> Dict[str, float]:
@@ -198,8 +209,9 @@ class ChamberOptimizer:
         
         A_exit_estimate = A_throat_estimate * eps_estimate
         
-        # L* estimate (typical: 0.8-1.5 m for pintle)
-        Lstar_estimate = 1.2
+        # L* estimate (typical: 0.8-1.5 m for pintle, but small engines can be 1.0-1.5 m)
+        # For small-scale engines (20mm throat), L* is typically 1.0-1.5 m (40-60 inches)
+        Lstar_estimate = 1.27  # 50 inches - good default for small engines
         Lstar_estimate = np.clip(Lstar_estimate, constraints.get("min_Lstar", 0.5), 
                                 constraints.get("max_Lstar", 2.5))
         
@@ -220,7 +232,8 @@ class ChamberOptimizer:
     def _setup_bounds(self, constraints: Dict, initial_guess: Dict) -> Bounds:
         """Set up optimization bounds."""
         # Bounds: [A_throat, A_exit, Lstar, chamber_diameter]
-        A_throat_min = 1e-6  # m² (1 mm²)
+        # For small-scale engines: 20mm throat = 0.000314 m², so allow down to 5mm = 0.00002 m²
+        A_throat_min = 1e-6  # m² (1 mm²) - allows very small engines
         A_throat_max = 0.01  # m² (100 cm²)
         
         min_eps = constraints.get("min_expansion_ratio", 3.0)
@@ -243,7 +256,7 @@ class ChamberOptimizer:
     def _setup_constraints(
         self, constraints: Dict, design_requirements: Dict, P_tank_O: float, P_tank_F: float
     ) -> List[Dict]:
-        """Set up optimization constraints."""
+        """Set up optimization constraints including airframe and system constraints."""
         constraint_list = []
         
         # Constraint: Expansion ratio within bounds
@@ -272,11 +285,129 @@ class ChamberOptimizer:
             A_chamber = np.pi * (chamber_diameter / 2) ** 2
             L_chamber = V_chamber / A_chamber if A_chamber > 0 else 0.0
             max_length = constraints.get("max_chamber_length", 1.0)
+            # Also check airframe max_length if provided
+            airframe_max_length = constraints.get("max_vehicle_length", None)
+            if airframe_max_length is not None:
+                max_length = min(max_length, airframe_max_length)
             return max_length - L_chamber
         
         constraint_list.append({
             "type": "ineq",
             "fun": chamber_length_constraint,
+        })
+        
+        # Constraint: Chamber diameter within airframe limits
+        def chamber_diameter_constraint(x):
+            chamber_diameter = x[3]
+            max_diameter = constraints.get("max_chamber_diameter", 0.3)
+            # Also check airframe max_diameter if provided
+            airframe_max_diameter = constraints.get("max_vehicle_diameter", None)
+            if airframe_max_diameter is not None:
+                max_diameter = min(max_diameter, airframe_max_diameter)
+            return max_diameter - chamber_diameter
+        
+        constraint_list.append({
+            "type": "ineq",
+            "fun": chamber_diameter_constraint,
+        })
+        
+        # Constraint: Total engine weight (if weight limits provided)
+        def weight_constraint(x):
+            try:
+                config = self._update_config_from_x(x, self.base_config)
+                runner = PintleEngineRunner(config)
+                results = runner.evaluate(P_tank_O, P_tank_F)
+                
+                # Estimate engine weight (chamber + nozzle + injector)
+                # Rough estimates: chamber wall, ablative, graphite, nozzle
+                A_throat, A_exit, Lstar, chamber_diameter = x[0], x[1], x[2], x[3]
+                
+                # Chamber wall weight (stainless steel, ~3mm thick)
+                L_chamber = (Lstar * A_throat) / (np.pi * (chamber_diameter / 2) ** 2) if chamber_diameter > 0 else 0.25
+                chamber_wall_area = np.pi * chamber_diameter * L_chamber
+                chamber_wall_volume = chamber_wall_area * 0.003  # 3mm thickness
+                chamber_wall_mass = chamber_wall_volume * 8000.0  # Stainless density [kg/m³]
+                
+                # Ablative weight (if enabled)
+                ablative_mass = 0.0
+                if config.ablative_cooling and config.ablative_cooling.enabled:
+                    ablative_thickness = config.ablative_cooling.initial_thickness
+                    ablative_area = chamber_wall_area * config.ablative_cooling.coverage_fraction
+                    ablative_volume = ablative_area * ablative_thickness
+                    ablative_mass = ablative_volume * config.ablative_cooling.material_density
+                
+                # Graphite insert weight (if enabled)
+                graphite_mass = 0.0
+                if hasattr(config, 'graphite_insert') and config.graphite_insert and config.graphite_insert.enabled:
+                    graphite_thickness = config.graphite_insert.initial_thickness
+                    graphite_area = np.pi * (np.sqrt(4.0 * A_throat / np.pi) / 2.0) ** 2  # Throat area
+                    graphite_volume = graphite_area * graphite_thickness
+                    graphite_mass = graphite_volume * config.graphite_insert.material_density
+                
+                # Nozzle weight (simplified - conical nozzle)
+                nozzle_length = constraints.get("nozzle_length", 0.1)  # Default 10cm
+                nozzle_wall_thickness = 0.002  # 2mm
+                D_exit = np.sqrt(4.0 * A_exit / np.pi)
+                D_throat = np.sqrt(4.0 * A_throat / np.pi)
+                nozzle_avg_diameter = (D_exit + D_throat) / 2.0
+                nozzle_wall_area = np.pi * nozzle_avg_diameter * nozzle_length
+                nozzle_wall_volume = nozzle_wall_area * nozzle_wall_thickness
+                nozzle_wall_mass = nozzle_wall_volume * 8000.0  # Stainless
+                
+                # Total engine mass
+                total_mass = chamber_wall_mass + ablative_mass + graphite_mass + nozzle_wall_mass
+                
+                # Check against weight limit
+                max_weight = constraints.get("max_engine_weight", None)
+                if max_weight is not None:
+                    return max_weight - total_mass
+                else:
+                    return 1.0  # No constraint
+                    
+            except Exception:
+                return -1e6  # Penalty for invalid configuration
+        
+        max_weight = constraints.get("max_engine_weight", None)
+        if max_weight is not None:
+            constraint_list.append({
+                "type": "ineq",
+                "fun": weight_constraint,
+            })
+        
+        # Constraint: Stability margin (must meet minimum)
+        def stability_constraint(x):
+            try:
+                config = self._update_config_from_x(x, self.base_config)
+                runner = PintleEngineRunner(config)
+                results = runner.evaluate(P_tank_O, P_tank_F)
+                
+                stability = results.get("stability_results", {})
+                chugging = stability.get("chugging", {})
+                stability_margin = chugging.get("stability_margin", 0.0)
+                
+                min_stability = design_requirements.get("target_stability_margin", 1.2)
+                return stability_margin - min_stability
+                
+            except Exception:
+                return -1e6  # Penalty for invalid configuration
+        
+        constraint_list.append({
+            "type": "ineq",
+            "fun": stability_constraint,
+        })
+        
+        # Constraint: Manufacturing tolerances (throat and exit areas)
+        def manufacturing_constraint(x):
+            A_throat, A_exit = x[0], x[1]
+            tolerance = constraints.get("manufacturing_tolerance", 0.0001)  # 0.1mm default
+            
+            # Minimum area based on manufacturing capability
+            min_area = np.pi * (tolerance / 2.0) ** 2
+            return min(A_throat - min_area, A_exit - min_area)
+        
+        constraint_list.append({
+            "type": "ineq",
+            "fun": manufacturing_constraint,
         })
         
         return constraint_list
@@ -292,11 +423,22 @@ class ChamberOptimizer:
         config.chamber.A_throat = A_throat
         config.chamber.volume = Lstar * A_throat  # V = L* * A_throat
         config.chamber.Lstar = Lstar
+        config.chamber.chamber_inner_diameter = chamber_diameter
+        
+        # Calculate chamber length from volume and diameter
+        A_chamber = np.pi * (chamber_diameter / 2.0) ** 2
+        if A_chamber > 0:
+            config.chamber.length = config.chamber.volume / A_chamber
+        else:
+            config.chamber.length = 0.25  # Default fallback
         
         # Update nozzle
         config.nozzle.A_throat = A_throat
         config.nozzle.A_exit = A_exit
         config.nozzle.expansion_ratio = A_exit / A_throat if A_throat > 0 else 1.0
+        # Calculate exit diameter
+        D_exit = np.sqrt(4.0 * A_exit / np.pi) if A_exit > 0 else 0.0
+        config.nozzle.exit_diameter = D_exit
         
         # Update CEA cache expansion ratio
         if hasattr(config.combustion, 'cea'):
@@ -312,13 +454,23 @@ class ChamberOptimizer:
         self, config: PintleEngineConfig, runner: PintleEngineRunner,
         burn_time: float, P_tank_O: float, P_tank_F: float
     ) -> Dict[str, Any]:
-        """Calculate burn analysis for the optimized configuration."""
+        """Calculate burn analysis for the optimized configuration with full dynamics."""
         from pintle_pipeline.burn_analysis import analyze_burn_degradation
         
-        # Run time-series evaluation
+        # Run time-series evaluation with coupled solver (includes chamber/nozzle dynamics and ablative)
         time_array = np.linspace(0.0, burn_time, 100)
+        
+        # Use constant tank pressures for now (could be made time-varying)
+        P_tank_O_array = np.full_like(time_array, P_tank_O)
+        P_tank_F_array = np.full_like(time_array, P_tank_F)
+        
+        # Use fully-coupled solver with ablative geometry tracking
         results_array = runner.evaluate_arrays_with_time(
-            P_tank_O, P_tank_F, time_array
+            time_array,
+            P_tank_O_array,
+            P_tank_F_array,
+            track_ablative_geometry=True,  # Enable ablative geometry tracking
+            use_coupled_solver=True,  # Use fully-coupled solver (chamber + nozzle dynamics)
         )
         
         # Analyze degradation

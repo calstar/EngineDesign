@@ -14,9 +14,39 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 import plotly.graph_objects as go
 from pintle_pipeline.config_schemas import PintleEngineConfig, AblativeCoolingConfig, GraphiteInsertConfig
+from pintle_pipeline.chamber_geometry_fixed import calculate_chamber_geometry_fixed
 
 
 def calculate_chamber_geometry_clear(
+    L_chamber: float,
+    D_chamber: float,
+    D_throat: float,
+    L_nozzle: float = 0.0,
+    expansion_ratio: float = 10.0,
+    ablative_config: Optional[AblativeCoolingConfig] = None,
+    graphite_config: Optional[GraphiteInsertConfig] = None,
+    recession_chamber: float = 0.0,
+    recession_graphite: float = 0.0,
+    n_points: int = 200,
+) -> Dict[str, np.ndarray]:
+    """
+    Calculate chamber geometry - delegates to fixed version.
+    """
+    return calculate_chamber_geometry_fixed(
+        L_chamber=L_chamber,
+        D_chamber=D_chamber,
+        D_throat=D_throat,
+        L_nozzle=L_nozzle,
+        expansion_ratio=expansion_ratio,
+        ablative_config=ablative_config,
+        graphite_config=graphite_config,
+        recession_chamber=recession_chamber,
+        recession_graphite=recession_graphite,
+        n_points=n_points,
+    )
+
+
+def calculate_chamber_geometry_clear_OLD(
     L_chamber: float,
     D_chamber: float,
     D_throat: float,
