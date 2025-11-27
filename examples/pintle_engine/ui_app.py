@@ -251,21 +251,39 @@ def _series_to_np(series_obj) -> np.ndarray:
         return np.asarray(series_obj, dtype=float)
 
 
-def _to_1d(arr_like) -> np.ndarray:
+def _to_1d(arr_like, *, column: int = 1) -> np.ndarray:
+    """Convert array to 1D.
+    
+    RocketPy Function.get_source() returns (N, 2) arrays where column 0 is time
+    and column 1 is the value. By default we extract column 1 (values).
+    Use column=0 to extract time instead.
+    """
     arr = np.asarray(arr_like)
     if arr.ndim == 0:
         arr = arr.reshape(1)
+    elif arr.ndim == 2 and arr.shape[1] == 2:
+        # RocketPy (N, 2) format: extract the specified column
+        arr = arr[:, column]
     elif arr.ndim > 1:
         squeezed = np.squeeze(arr)
         arr = squeezed if squeezed.ndim == 1 else np.ravel(arr)
     return arr.astype(float, copy=False)
 
 
-def extract_flight_series(flight) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return time, altitude, and vertical velocity arrays aligned and 1-D."""
-    t_series = _to_1d(_series_to_np(getattr(flight, "time", [])))
-    z_series = _to_1d(_series_to_np(getattr(flight, "z", [])))
-    vz_series = _to_1d(_series_to_np(getattr(flight, "vz", [])))
+def extract_flight_series(flight, elevation: float = 0.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return time, altitude AGL, and vertical velocity arrays aligned and 1-D.
+    
+    Args:
+        flight: RocketPy Flight object
+        elevation: Launch site elevation (m) to subtract from z for AGL
+    """
+    # RocketPy returns (N, 2) arrays from get_source(): col 0 = time, col 1 = value
+    # For time, we extract column 0; for values (z, vz), we extract column 1
+    z_raw = _series_to_np(getattr(flight, "z", []))
+    t_series = _to_1d(z_raw, column=0)  # time from any (N, 2) source
+    z_series = _to_1d(z_raw, column=1)  # altitude values (ASL from RocketPy)
+    z_series = z_series - elevation  # Convert to AGL
+    vz_series = _to_1d(_series_to_np(getattr(flight, "vz", [])), column=1)
     n = int(min(len(t_series), len(z_series), len(vz_series)))
     if n == 0:
         return np.array([]), np.array([]), np.array([])
@@ -277,8 +295,8 @@ def plot_flight_results(t: np.ndarray, z: np.ndarray, vz: np.ndarray, *, key_suf
     if t.size == 0:
         st.warning("Flight produced empty time series.")
         return
-    df = pd.DataFrame({"time": t, "Altitude (m)": z, "Vertical Velocity (m/s)": vz})
-    st.plotly_chart(px.line(df, x="time", y="Altitude (m)", title="Altitude vs Time"), width='stretch', key=f"flight_alt_plot{key_suffix}")
+    df = pd.DataFrame({"time": t, "Altitude AGL (m)": z, "Vertical Velocity (m/s)": vz})
+    st.plotly_chart(px.line(df, x="time", y="Altitude AGL (m)", title="Altitude AGL vs Time"), width='stretch', key=f"flight_alt_plot{key_suffix}")
     st.plotly_chart(px.line(df, x="time", y="Vertical Velocity (m/s)", title="Vertical Velocity vs Time"), width='stretch', key=f"flight_vel_plot{key_suffix}")
 
 
@@ -317,7 +335,8 @@ def plot_additional_rocket_plots(flight, t_series: np.ndarray, *, key_suffix: st
         series_obj = getattr(flight, attr, None)
         if series_obj is not None:
             try:
-                vals = _to_1d(_series_to_np(series_obj))
+                # RocketPy (N, 2) arrays: column 1 contains the values
+                vals = _to_1d(_series_to_np(series_obj), column=1)
                 if vals.size > 0:
                     plots.append((label, vals))
             except Exception:
@@ -3138,9 +3157,10 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             apogee = sim_result.get("apogee")
             max_v = sim_result.get("max_velocity")
             flight = sim_result.get("flight")
+            elevation = sim_result.get("elevation", 0.0)
 
             colm1, colm2 = st.columns(2)
-            colm1.metric("Apogee", f"{apogee:.1f} m" if isinstance(apogee, (int, float)) else "N/A")
+            colm1.metric("Apogee AGL", f"{apogee:.1f} m ({apogee * 3.28084:.0f} ft)" if isinstance(apogee, (int, float)) else "N/A")
             if isinstance(max_v, (int, float)) and max_v is not None:
                 colm2.metric("Max Velocity", f"{max_v:.1f} m/s")
             else:
@@ -3148,7 +3168,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
 
             # Plot altitude/velocity
             try:
-                t_series, z_series, vz_series = extract_flight_series(flight)
+                t_series, z_series, vz_series = extract_flight_series(flight, elevation)
                 plot_flight_results(t_series, z_series, vz_series, key_suffix="_ds")
             except Exception as exc:
                 st.warning(f"Could not extract time series: {exc}")
@@ -3189,9 +3209,10 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         apogee = sim_result.get("apogee")
         max_v = sim_result.get("max_velocity")
         flight = sim_result.get("flight")
+        elevation = sim_result.get("elevation", 0.0)
 
         colm1, colm2 = st.columns(2)
-        colm1.metric("Apogee", f"{apogee:.1f} m" if isinstance(apogee, (int, float)) else "N/A")
+        colm1.metric("Apogee AGL", f"{apogee:.1f} m ({apogee * 3.28084:.0f} ft)" if isinstance(apogee, (int, float)) else "N/A")
         if isinstance(max_v, (int, float)) and max_v is not None:
             colm2.metric("Max Velocity", f"{max_v:.1f} m/s")
         else:
@@ -3199,7 +3220,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
 
         # Extract and plot time series
         try:
-            t_series, z_series, vz_series = extract_flight_series(flight)
+            t_series, z_series, vz_series = extract_flight_series(flight, elevation)
             plot_flight_results(t_series, z_series, vz_series)
         except Exception as exc:
             st.warning(f"Could not extract time series: {exc}")
@@ -5973,13 +5994,45 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             if cutoff_time is not None and cutoff_time < burn_time_ds:
                 # Find index where time exceeds cutoff
                 trunc_idx = np.searchsorted(t_vals_normalized, cutoff_time, side='right')
-                if trunc_idx < len(t_vals_normalized):
-                    t_vals_normalized = t_vals_normalized[:trunc_idx+1]
-                    thrust_vals_SI = thrust_vals_SI[:trunc_idx+1]
-                    mdot_O_vals = mdot_O_vals[:trunc_idx+1]
-                    mdot_F_vals = mdot_F_vals[:trunc_idx+1]
-                    burn_time_ds = float(t_vals_normalized[-1])
-                    st.info(f"Truncated burn at {cutoff_time:.2f} s due to propellant depletion")
+                if trunc_idx < len(t_vals_normalized) and trunc_idx > 0:
+                    # Keep points before cutoff
+                    t_before = t_vals_normalized[:trunc_idx]
+                    thrust_before = thrust_vals_SI[:trunc_idx]
+                    mdot_O_before = mdot_O_vals[:trunc_idx]
+                    mdot_F_before = mdot_F_vals[:trunc_idx]
+                    
+                    # Interpolate values at exact cutoff_time
+                    # Find the two bounding points for interpolation
+                    idx_after = trunc_idx
+                    idx_before = trunc_idx - 1
+                    
+                    if idx_before >= 0 and idx_after < len(t_vals_normalized):
+                        t0, t1 = t_vals_normalized[idx_before], t_vals_normalized[idx_after]
+                        if t1 > t0:
+                            frac = (cutoff_time - t0) / (t1 - t0)
+                            # Linear interpolation for each array
+                            thrust_at_cutoff = thrust_vals_SI[idx_before] + frac * (thrust_vals_SI[idx_after] - thrust_vals_SI[idx_before])
+                            mdot_O_at_cutoff = mdot_O_vals[idx_before] + frac * (mdot_O_vals[idx_after] - mdot_O_vals[idx_before])
+                            mdot_F_at_cutoff = mdot_F_vals[idx_before] + frac * (mdot_F_vals[idx_after] - mdot_F_vals[idx_before])
+                        else:
+                            thrust_at_cutoff = thrust_vals_SI[idx_before]
+                            mdot_O_at_cutoff = mdot_O_vals[idx_before]
+                            mdot_F_at_cutoff = mdot_F_vals[idx_before]
+                    else:
+                        # Fallback: use the last values before cutoff
+                        thrust_at_cutoff = thrust_before[-1] if len(thrust_before) > 0 else 0.0
+                        mdot_O_at_cutoff = mdot_O_before[-1] if len(mdot_O_before) > 0 else 0.0
+                        mdot_F_at_cutoff = mdot_F_before[-1] if len(mdot_F_before) > 0 else 0.0
+                    
+                    # Append exact cutoff point and zero point just after for sharp transition
+                    eps = 1e-6
+                    t_vals_normalized = np.concatenate([t_before, [cutoff_time, cutoff_time + eps]])
+                    thrust_vals_SI = np.concatenate([thrust_before, [thrust_at_cutoff, 0.0]])
+                    mdot_O_vals = np.concatenate([mdot_O_before, [mdot_O_at_cutoff, 0.0]])
+                    mdot_F_vals = np.concatenate([mdot_F_before, [mdot_F_at_cutoff, 0.0]])
+                    
+                    burn_time_ds = float(cutoff_time)
+                    st.info(f"Truncated burn at {cutoff_time:.4f} s due to propellant depletion")
             
             # Build RocketPy Functions
             thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
@@ -6005,11 +6058,12 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     apogee = result["apogee"]
                     max_velocity = result["max_velocity"]
                     flight_obj = result["flight"]
+                    elevation = result.get("elevation", 0.0)
                     
                     st.success("Flight simulation completed!")
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Apogee", f"{apogee:.1f} m")
+                        st.metric("Apogee AGL", f"{apogee:.1f} m ({apogee * 3.28084:.0f} ft)")
                     with col2:
                         st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
                     
@@ -6021,10 +6075,10 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                         "mdot_F (kg/s)": mdot_F_vals,
                     })
                     
-                    # Extract flight data
-                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj)
+                    # Extract flight data (with elevation subtracted for AGL)
+                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
                     if flight_time.size > 0:
-                        truncated_df["Altitude above sea level (m)"] = np.interp(
+                        truncated_df["Altitude AGL (m)"] = np.interp(
                             t_vals_normalized, 
                             flight_time, 
                             flight_z
@@ -6101,16 +6155,17 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     apogee = result["apogee"]
                     max_velocity = result["max_velocity"]
                     flight_obj = result["flight"]
+                    elevation = result.get("elevation", 0.0)
                     
                     st.success("Flight simulation completed!")
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Apogee", f"{apogee:.1f} m")
+                        st.metric("Apogee AGL", f"{apogee:.1f} m ({apogee * 3.28084:.0f} ft)")
                     with col2:
                         st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
                     
-                    # Extract and plot flight data
-                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj)
+                    # Extract and plot flight data (with elevation subtracted for AGL)
+                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
                     if flight_time.size > 0:
                         plot_flight_results(flight_time, flight_z, flight_vz)
                         render_rocket_view(flight_obj)

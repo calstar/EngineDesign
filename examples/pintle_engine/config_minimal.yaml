@@ -21,17 +21,17 @@ injector:
   type: pintle
   geometry:
     lox:
-      n_orifices: 12  # 12 orifices (realistic for ~7kN engine)
-      d_orifice: 0.003  # 3mm orifice diameter (realistic)
-      theta_orifice: 30.0  # 30° injection angle (typical)
-      A_entry: 8.0e-06  # Entry area
-      d_hydraulic: 0.003  # Hydraulic diameter
+      n_orifices: 12
+      d_orifice: 0.003
+      theta_orifice: 30.0
+      A_entry: 8.0e-06
+      d_hydraulic: 0.003
     fuel:
-      d_pintle_tip: 0.015  # 15mm pintle tip (realistic)
-      d_reservoir_inner: 0.016  # 16mm reservoir
-      h_gap: 0.0005  # 0.5mm gap (realistic)
-      A_entry: 1.2e-05  # Entry area
-      d_hydraulic: 0.001  # Hydraulic diameter
+      d_pintle_tip: 0.015
+      d_reservoir_inner: 0.016
+      h_gap: 0.0005
+      A_entry: 1.2e-05
+      d_hydraulic: 0.001
 feed_system:
   oxidizer:
     d_inlet: 0.009525
@@ -77,6 +77,7 @@ regen_cooling:
   gas_turbulence_intensity: 0.1
   coolant_turbulence_intensity: 0.05
   hot_gas_cp: 2200.0
+  recovery_factor: null
 film_cooling:
   enabled: false
   mass_fraction: 0.05
@@ -95,58 +96,60 @@ film_cooling:
   density_override: null
   cp_override: null
 ablative_cooling:
-  enabled: true  # ENABLE for 3D CEA cache testing!
-  material_density: 1600.0  # kg/m³ - Phenolic ablator typical
-  heat_of_ablation: 2.5e6  # J/kg - Effective heat of ablation
-  thermal_conductivity: 0.35  # W/(m·K)
-  specific_heat: 1500.0  # J/(kg·K)
-  initial_thickness: 0.008  # m - 8mm ablative liner (realistic for 10s burn)
-  surface_temperature_limit: 1200.0  # K
-  coverage_fraction: 0.9  # 90% of chamber surface protected
-  pyrolysis_temperature: 950.0  # K - Characteristic pyrolysis temp
-  # Blowing effect (pyrolysis gas protection)
-  use_physics_based_blowing: true  # If true, computes B = m_dot_pyrolysis/m_dot_external
-  blowing_coefficient: 0.5  # Coefficient c in f(B) = 1/(1 + c*B). Typical range: 0.3-0.8
-  blowing_min_reduction_factor: 0.1  # Minimum fraction of convective heat that remains (max reduction = 1 - this). Default 0.1 = max 90% reduction
-  blowing_efficiency: 0.75  # Legacy constant factor (used if use_physics_based_blowing=false)
-  # Radiative heat transfer
-  surface_emissivity: 0.85  # Emissivity for radiative heat transfer (0-1, typical 0.8-0.9 for charred ablators)
-  ambient_temperature: 300.0  # K - Ambient/surrounding temperature for radiative heat transfer
-  radiative_sink_minimum_threshold: 400.0  # K - If ambient_temperature is below this, uses fallback temperature
-  radiative_sink_fallback_temperature: 600.0  # K - Fallback temperature when ambient is too low (represents heated steel layer)
-  # Turbulence effects
+  enabled: true
+  material_density: 1600.0
+  heat_of_ablation: 2500000.0
+  thermal_conductivity: 0.35
+  specific_heat: 1500.0
+  initial_thickness: 0.008
+  surface_temperature_limit: 1200.0
+  coverage_fraction: 0.9
+  pyrolysis_temperature: 950.0
+  blowing_efficiency: 0.75
+  use_physics_based_blowing: true
+  blowing_coefficient: 0.5
+  blowing_min_reduction_factor: 0.1
   turbulence_reference_intensity: 0.08
   turbulence_sensitivity: 1.5
   turbulence_exponent: 1.0
   turbulence_max_multiplier: 3.0
-  # Geometry evolution parameters
-  throat_recession_multiplier: null  # null = calculate from physics (Bartz correlation)
-                                     # or specify 1.2-2.0 for fixed multiplier
-  char_layer_conductivity: 0.2  # W/(m·K) - Protective char layer
-  char_layer_thickness: 0.001  # m - 1mm char layer
-  track_geometry_evolution: true  # Enable time-varying L* tracking
-  nozzle_ablative: false  # Chamber ablator only (graphite insert is separate)
-
-# Graphite Throat Insert (separate from chamber ablator)
-# Graphite inserts prevent burn-through in nozzle throat/exit
+  throat_recession_multiplier: null
+  char_layer_conductivity: 0.2
+  char_layer_thickness: 0.001
+  surface_emissivity: 0.85
+  ambient_temperature: 300.0
+  radiative_sink_minimum_threshold: 400.0
+  radiative_sink_fallback_temperature: 600.0
+  track_geometry_evolution: true
+  nozzle_ablative: false
 graphite_insert:
   enabled: true
-  material_density: 2260.0  # kg/m³ - Graphite density
-  heat_of_ablation: 1.5e7  # J/kg - High heat of ablation
-  thermal_conductivity: 100.0  # W/(m·K) - High thermal conductivity
-  specific_heat: 710.0  # J/(kg·K)
-  activation_energy: 1.9e5  # J/mol
-  initial_thickness: 0.006  # m - 6mm graphite insert (realistic for throat)
-  surface_temperature_limit: 2500.0  # K - Graphite can handle high temps
-  oxidation_temperature: 800.0  # K
-  oxidation_rate: 1.0e-06  # https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
-  oxidation_reference_temperature: 973  # https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
-  oxidation_reference_pressure: 21000  # https://info.ornl.gov/sites/publications/Files/Pub172937.pdf
-  recession_multiplier: null  # Use physics-based calculation
-  char_layer_conductivity: 5.0  # W/(m·K)
-  char_layer_thickness: 0.0005  # m - 0.5mm char layer
-  coverage_fraction: 1.0  # 100% coverage at throat
-  axial_half_length: 0.02  # 20mm half-length (40mm total, realistic)
+  material_density: 2260.0
+  heat_of_ablation: 15000000.0
+  thermal_conductivity: 100.0
+  specific_heat: 710.0
+  initial_thickness: 0.006
+  surface_temperature_limit: 2500.0
+  oxidation_temperature: 800.0
+  oxidation_rate: 1.0e-06
+  activation_energy: 190000.0
+  oxidation_reference_temperature: 973.0
+  oxidation_reference_pressure: 21000.0
+  recession_multiplier: null
+  char_layer_conductivity: 5.0
+  char_layer_thickness: 0.0005
+  coverage_fraction: 1.0
+  emissivity: null
+  ambient_temperature: null
+  feedback_fraction_min: null
+  feedback_fraction_max: null
+  oxidation_enthalpy: null
+  ablation_surface_temperature: null
+  oxidation_pressure_exponent: null
+  oxidation_pre_exponential: null
+  mixture_mw: null
+  oxidation_stoichiometry_ratio: null
+stainless_steel_case: null
 discharge:
   oxidizer:
     Cd_inf: 0.4
@@ -194,7 +197,7 @@ combustion:
     cea_parallel_workers: null
     ox_name: LOX
     fuel_name: RP-1
-    expansion_ratio: 10.0953
+    expansion_ratio: 7.8169
     cache_file: cea_cache_LOX_RP1_3D.npz
     Pc_range:
     - 1000000.0
@@ -226,24 +229,24 @@ combustion:
     we_reference: 100.0
     we_penalty_exponent: 0.5
     smd_penalty_exponent: 1.0
-    use_advanced_model: True
+    use_advanced_model: true
     use_finite_rate_chemistry: true
     use_shifting_equilibrium: true
 chamber:
-  volume: 0.0035  # ~3.5L chamber volume (realistic for ~7kN engine)
-  A_throat: 0.000857892  # ~33mm throat diameter (realistic)
-  length: 0.25  # 25cm chamber length (realistic)
-  Lstar: 1.2  # 1.2m L* (typical for pintle, good combustion)
-  chamber_inner_diameter: 0.085  # 85mm chamber diameter (realistic)
-  design_pressure: 3000000.0  # 3 MPa design pressure (realistic)
-  design_thrust: 7000.0  # 7 kN thrust (realistic)
-  design_force_coefficient: 1.4
+  volume: 0.001244586
+  A_throat: 0.001037155
+  length: 0.1423623
+  Lstar: 1.2
+  chamber_inner_diameter: 0.12065
+  design_pressure: 4481594.0
+  design_thrust: 7000.0
+  design_force_coefficient: 1.505989588378393
 nozzle:
-  A_throat: 0.000857892  # Match chamber throat
-  A_exit: 0.00857892  # 10:1 expansion ratio
-  expansion_ratio: 10.0  # 10:1 expansion (realistic for sea level)
-  exit_diameter: 0.1044  # ~104mm exit diameter
-  efficiency: 0.95  # 95% nozzle efficiency (realistic)
+  A_throat: 0.001037155
+  A_exit: 0.00810732
+  expansion_ratio: 7.8169
+  exit_diameter: 0.1016
+  efficiency: 0.95
 solver:
   method: brentq
   Pc_bounds:
@@ -299,7 +302,7 @@ environment:
   date:
   - 2025
   - 11
-  - 22
+  - 28
   - 18
   latitude: 35.34722
   longitude: -117.8099547

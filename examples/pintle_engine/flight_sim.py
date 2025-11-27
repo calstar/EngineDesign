@@ -14,7 +14,7 @@ from pathlib import Path
 
 g0 = 9.80665
 
-def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=1000):
+def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=5000):
     """
     Detect when a tank would get underfilled by integrating mdot over time.
     
@@ -27,14 +27,14 @@ def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=1000):
     burn_time : float
         Total burn time [s]
     n_samples : int
-        Number of time samples for integration (default: 1000)
+        Number of time samples for integration (default: 5000)
     
     Returns:
     --------
     cutoff_time : float or None
         Time at which tank would be depleted (None if it never depletes)
     """
-    # Create time array for sampling
+    # Create time array for sampling with higher resolution
     times = np.linspace(0, burn_time, n_samples)
     dt = burn_time / (n_samples - 1) if n_samples > 1 else burn_time
     
@@ -58,14 +58,32 @@ def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=1000):
     depletion_idx = np.where(cumulative_mass >= m_initial)[0]
     
     if len(depletion_idx) > 0:
-        # Tank would be depleted at this time
-        cutoff_time = times[depletion_idx[0]]
+        idx = depletion_idx[0]
+        
+        # Interpolate to find the exact cutoff time between samples
+        if idx > 0:
+            # Linear interpolation: find t where cumulative_mass(t) = m_initial
+            mass_prev = cumulative_mass[idx - 1]
+            mass_curr = cumulative_mass[idx]
+            t_prev = times[idx - 1]
+            t_curr = times[idx]
+            
+            # Linear interpolation: t = t_prev + (m_initial - mass_prev) * (t_curr - t_prev) / (mass_curr - mass_prev)
+            if mass_curr > mass_prev:
+                fraction = (m_initial - mass_prev) / (mass_curr - mass_prev)
+                cutoff_time = t_prev + fraction * (t_curr - t_prev)
+            else:
+                cutoff_time = t_curr
+        else:
+            # Depletion happens at the very first sample
+            cutoff_time = times[idx]
+        
         return float(cutoff_time)
     else:
         # Tank never depletes during the burn
         return None
 
-def detect_lox_underfill_time(mdot_lox, m_lox0, burn_time, n_samples=1000):
+def detect_lox_underfill_time(mdot_lox, m_lox0, burn_time, n_samples=5000):
     """
     Detect when LOX tank would get underfilled by integrating mdot_lox over time.
     
@@ -78,7 +96,7 @@ def detect_lox_underfill_time(mdot_lox, m_lox0, burn_time, n_samples=1000):
     burn_time : float
         Total burn time [s]
     n_samples : int
-        Number of time samples for integration (default: 1000)
+        Number of time samples for integration (default: 5000)
     
     Returns:
     --------
@@ -87,7 +105,7 @@ def detect_lox_underfill_time(mdot_lox, m_lox0, burn_time, n_samples=1000):
     """
     return detect_tank_underfill_time(mdot_lox, m_lox0, burn_time, n_samples)
 
-def detect_fuel_underfill_time(mdot_fuel, m_fuel0, burn_time, n_samples=1000):
+def detect_fuel_underfill_time(mdot_fuel, m_fuel0, burn_time, n_samples=5000):
     """
     Detect when fuel tank would get underfilled by integrating mdot_fuel over time.
     
@@ -100,7 +118,7 @@ def detect_fuel_underfill_time(mdot_fuel, m_fuel0, burn_time, n_samples=1000):
     burn_time : float
         Total burn time [s]
     n_samples : int
-        Number of time samples for integration (default: 1000)
+        Number of time samples for integration (default: 5000)
     
     Returns:
     --------
@@ -126,12 +144,16 @@ def truncate_thrust_curve(thrust_curve, cutoff_time):
         Thrust curve with thrust=0 after cutoff_time
     """
     if isinstance(thrust_curve, Function):
-        # Convert Function to list of tuples by sampling
-        # Sample up to cutoff_time, then add a point at cutoff_time with 0 thrust
-        times = np.linspace(0, cutoff_time, 100)
+        # Convert Function to list of tuples by sampling with high resolution
+        # Use at least 500 samples per second for accurate representation
+        n_samples = max(int(cutoff_time * 500) + 1, 500)
+        times = np.linspace(0, cutoff_time, n_samples)
         curve = [(float(t), float(thrust_curve(t))) for t in times]
-        # Add cutoff point with 0 thrust
-        curve.append((cutoff_time, 0.0))
+        # Ensure the last point is exactly at cutoff_time with thrust value
+        if curve[-1][0] != cutoff_time:
+            curve.append((cutoff_time, float(thrust_curve(cutoff_time))))
+        # Add cutoff point with 0 thrust (small epsilon after for sharp transition)
+        curve.append((cutoff_time + 1e-6, 0.0))
         return curve
     elif isinstance(thrust_curve, list):
         # It's already a list of (t, F) tuples
@@ -191,33 +213,46 @@ def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
     truncated_func : Function
         Function that returns mdot_func(t) for t <= cutoff_time, 0 otherwise
     """
+    # Use higher resolution sampling (500 points per second minimum)
+    n_samples = max(int(burn_time * 500) + 1, 1000)
+    
     if isinstance(mdot_func, Function):
-        # Create a piecewise function
-        def truncated_mdot(t):
-            if t <= cutoff_time:
-                return mdot_func(t)
-            else:
-                return 0.0
-        # Convert to RocketPy Function by sampling
-        times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
-        values = np.array([truncated_mdot(t) for t in times])
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times)
-        times_sorted = times[order]
-        values_sorted = values[order]
+        # Create base time samples with higher resolution
+        times_base = np.linspace(0, burn_time, n_samples)
+        
+        # Ensure cutoff_time and a point just after are explicitly included for sharp transition
+        # This prevents RocketPy from interpolating a gradual falloff
+        eps = 1e-6  # Small epsilon for sharp transition
+        critical_times = [cutoff_time, cutoff_time + eps]
+        
+        # Combine and sort all time points, removing duplicates
+        times_all = np.unique(np.concatenate([times_base, critical_times]))
+        times_all = times_all[times_all <= burn_time]
+        
+        # Evaluate original function and apply cutoff
+        values = np.array([float(mdot_func(t)) if t <= cutoff_time else 0.0 for t in times_all])
+        
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, values_sorted))
+        source = np.column_stack((times_all, values))
         return Function(source)
     else:
         # It's a constant - create a function that's constant until cutoff, then 0
-        times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
-        values = np.array([float(mdot_func) if t <= cutoff_time else 0.0 for t in times])
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times)
-        times_sorted = times[order]
-        values_sorted = values[order]
+        times_base = np.linspace(0, burn_time, n_samples)
+        
+        # Ensure cutoff_time and a point just after are explicitly included for sharp transition
+        eps = 1e-6
+        critical_times = [cutoff_time, cutoff_time + eps]
+        
+        # Combine and sort all time points, removing duplicates
+        times_all = np.unique(np.concatenate([times_base, critical_times]))
+        times_all = times_all[times_all <= burn_time]
+        
+        # Apply constant value before cutoff, 0 after
+        mdot_val = float(mdot_func)
+        values = np.array([mdot_val if t <= cutoff_time else 0.0 for t in times_all])
+        
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, values_sorted))
+        source = np.column_stack((times_all, values))
         return Function(source)
 
 def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
@@ -329,6 +364,8 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         elevation=config.environment.elevation,
     )
     env.set_atmospheric_model(type='Forecast', file='GFS')
+    # GFS may override elevation with its terrain model - restore configured elevation
+    env.set_elevation(config.environment.elevation)
 
     print(m_lox0)
     print(m_rp10)
@@ -346,26 +383,31 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
 
     # Convert mdot_lox and mdot_fuel to Functions if they're constants
     # (MassFlowRateBasedTank expects Functions)
+    # Use high resolution (500 points/sec) with explicit cutoff points
     if not isinstance(mdot_lox, Function):
-        times_mdot = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+        n_samples = max(int(burn_time * 500) + 1, 1000)
+        times_base = np.linspace(0, burn_time, n_samples)
+        # Add explicit cutoff points for sharp transition
+        eps = 1e-6
+        critical_times = [effective_burn_time, effective_burn_time + eps]
+        times_mdot = np.unique(np.concatenate([times_base, critical_times]))
+        times_mdot = times_mdot[times_mdot <= burn_time]
         mdot_lox_vals = np.array([float(mdot_lox) if t <= effective_burn_time else 0.0 for t in times_mdot])
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times_mdot)
-        times_sorted = times_mdot[order]
-        vals_sorted = mdot_lox_vals[order]
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, vals_sorted))
+        source = np.column_stack((times_mdot, mdot_lox_vals))
         mdot_lox = Function(source)
     
     if not isinstance(mdot_fuel, Function):
-        times_mdot = np.linspace(0, burn_time, int(burn_time * 100) + 1)
+        n_samples = max(int(burn_time * 500) + 1, 1000)
+        times_base = np.linspace(0, burn_time, n_samples)
+        # Add explicit cutoff points for sharp transition
+        eps = 1e-6
+        critical_times = [effective_burn_time, effective_burn_time + eps]
+        times_mdot = np.unique(np.concatenate([times_base, critical_times]))
+        times_mdot = times_mdot[times_mdot <= burn_time]
         mdot_fuel_vals = np.array([float(mdot_fuel) if t <= effective_burn_time else 0.0 for t in times_mdot])
-        # Ensure sorted (times should already be sorted, but just to be safe)
-        order = np.argsort(times_mdot)
-        times_sorted = times_mdot[order]
-        vals_sorted = mdot_fuel_vals[order]
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
-        source = np.column_stack((times_sorted, vals_sorted))
+        source = np.column_stack((times_mdot, mdot_fuel_vals))
         mdot_fuel = Function(source)
 
     oxidizer_tank = MassFlowRateBasedTank(
@@ -399,7 +441,6 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     )
 
 
-    times = np.linspace(0, burn_time, int(burn_time * 100) + 1)
     # thrust_curve is already set above (may have been truncated)
 
     # Liquid motor - use effective_burn_time for burn_time
@@ -475,18 +516,26 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         terminate_on_apogee=True,
     )
 
-    apogee = float(flight.apogee)
+    # RocketPy reports apogee as ASL (Above Sea Level) - convert to AGL for display
+    elevation = float(config.environment.elevation)
+    apogee_asl = float(flight.apogee)
+    apogee_agl = apogee_asl - elevation
+    
     try:
-        max_v = float(np.max(flight.vz.get_source()))
+        # flight.vz.get_source() returns (N, 2): column 0 = time, column 1 = velocity
+        vz_source = flight.vz.get_source()
+        max_v = float(np.max(vz_source[:, 1]))  # Extract only the velocity column
     except Exception:
         max_v = None
 
-    print(f"Apogee [m]: {apogee:.2f}")
+    print(f"Apogee AGL [m]: {apogee_agl:.2f} (ASL: {apogee_asl:.2f}, elevation: {elevation:.2f})")
     if max_v is not None:
         print(f"Max velocity [m/s]: {max_v:.2f}")
 
     return {
-        "apogee": apogee,
+        "apogee": apogee_agl,  # Return AGL for display
+        "apogee_asl": apogee_asl,  # Also provide ASL if needed
+        "elevation": elevation,
         "max_velocity": max_v,
         "thrust_curve": thrust_curve,
         "flight": flight,
