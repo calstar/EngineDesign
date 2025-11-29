@@ -430,7 +430,7 @@ class LOXTankConfig(BaseModel):
     lox_h: float = Field(gt=0, description="LOX tank height [m]")
     lox_radius: float = Field(gt=0, description="LOX tank radius [m]")
     ox_tank_pos: float = Field(description="Oxidizer tank position [m]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial LOX PROPELLANT mass [kg] (not tank structure). This contributes to total wet mass.")
 
 
 class FuelTankConfig(BaseModel):
@@ -438,7 +438,7 @@ class FuelTankConfig(BaseModel):
     rp1_h: float = Field(gt=0, description="RP-1 tank height [m]")
     rp1_radius: float = Field(gt=0, description="RP-1 tank radius [m]")
     fuel_tank_pos: float = Field(description="Fuel tank position [m]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial RP-1 PROPELLANT mass [kg] (not tank structure). This contributes to total wet mass.")
 
 
 class PressTankConfig(BaseModel):
@@ -459,21 +459,51 @@ class FinsConfig(BaseModel):
 
 
 class MotorConfig(BaseModel):
-    """Motor configuration for flight simulation"""
+    """Motor configuration for flight simulation (LEGACY - use propulsion_dry_mass instead)"""
     dry_mass: float = Field(gt=0, description="Motor dry mass [kg]")
     inertia: list[float] = Field(description="Motor inertia [kg·m²]")
 
 
 class RocketConfig(BaseModel):
-    """Rocket configuration for flight simulation"""
-    mass: float = Field(gt=0, description="Rocket mass [kg]")
-    inertia: list[float] = Field(description="Rocket inertia [kg·m²]")
+    """Rocket configuration for flight simulation.
+    
+    NEW Mass Model (recommended):
+    - airframe_mass: Rocket body without propulsion (fuselage, fins, nosecone, avionics, payload)
+    - engine_mass: Engine + ALL plumbing (chamber, nozzle, injector, valves, fittings, lines)
+    - lox_tank_structure_mass: Empty LOX tank only (walls, no fittings)
+    - fuel_tank_structure_mass: Empty fuel tank only (walls, no fittings)
+    - engine_cm_offset: Height of engine CM above nozzle exit
+    
+    propulsion_dry_mass and propulsion_cm_offset are COMPUTED from the above.
+    
+    Total dry mass = airframe_mass + engine_mass + lox_tank_structure_mass + fuel_tank_structure_mass
+    Total wet mass = dry mass + lox_tank.mass + fuel_tank.mass (propellants)
+    
+    LEGACY fields (mass, motor.dry_mass) still supported for backward compatibility.
+    """
+    # NEW detailed mass model
+    airframe_mass: Optional[float] = Field(default=None, gt=0, description="Airframe mass (fuselage, fins, nosecone, avionics, payload) - NO propulsion [kg]")
+    engine_mass: Optional[float] = Field(default=None, gt=0, description="Engine + plumbing mass (chamber, nozzle, injector, valves, ALL fittings & lines) [kg]")
+    lox_tank_structure_mass: Optional[float] = Field(default=None, gt=0, description="Empty LOX tank only (walls, no fittings) [kg]")
+    fuel_tank_structure_mass: Optional[float] = Field(default=None, gt=0, description="Empty fuel tank only (walls, no fittings) [kg]")
+    engine_cm_offset: float = Field(default=0.15, ge=0, description="Height of engine+plumbing CM above nozzle exit [m]. Typical: 0.1-0.3m.")
+    
+    # COMPUTED fields (calculated from detailed breakdown)
+    propulsion_dry_mass: Optional[float] = Field(default=None, gt=0, description="COMPUTED: Total propulsion dry mass (engine + tanks) [kg]")
+    propulsion_cm_offset: float = Field(default=0.3, description="COMPUTED: Propulsion system CM above nozzle exit [m]")
+    
+    # Common parameters
+    inertia: list[float] = Field(description="Total rocket inertia (dry, without propellants) [kg·m²]")
     radius: float = Field(gt=0, description="Rocket radius [m]")
-    cm_wo_motor: float = Field(description="Center of mass without motor [m]")
-    dry_mass: float = Field(gt=0, description="Dry mass [kg]")
-    motor_inertia: list[float] = Field(description="Motor inertia [kg·m²]")
+    motor_position: float = Field(default=0.5, description="Nozzle exit position from rocket tail [m]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
-    motor: Optional[MotorConfig] = Field(default=None, description="Motor configuration")
+    
+    # LEGACY fields - kept for backward compatibility
+    mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Airframe mass. Use airframe_mass instead.")
+    cm_wo_motor: Optional[float] = Field(default=None, description="LEGACY: CM without motor. Now auto-calculated from airframe_mass and propulsion positions.")
+    dry_mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Unused field.")
+    motor_inertia: Optional[list[float]] = Field(default=None, description="LEGACY: Motor inertia. Now estimated from propulsion_dry_mass.")
+    motor: Optional[MotorConfig] = Field(default=None, description="LEGACY: Motor config. Use propulsion_dry_mass instead.")
 
 
 class EnvironmentConfig(BaseModel):

@@ -258,46 +258,59 @@ solver:
     max_iterations: 6
     Cd_reduction_factor: 0.95
     tolerance: 0.0001
+# Tank configurations - 'mass' is the PROPELLANT mass (initial liquid fill)
 lox_tank:
   lox_h: 1.14
   lox_radius: 0.0762
   ox_tank_pos: 0.6
-  mass: 22.0
+  mass: 22.0  # LOX propellant mass [kg] (not tank structure mass)
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
   fuel_tank_pos: -0.2
-  mass: 4.0
+  mass: 4.0  # RP-1 propellant mass [kg] (not tank structure mass)
 press_tank:
   press_h: 0.457
   press_radius: 0.0762
   pres_tank_pos: 1.2
   mass: null
+# Rocket configuration - NEW MASS MODEL
+# =====================================
+# Coordinate system: z=0 at rocket tail, positive toward nose
+#                    For motor: z=0 at nozzle exit, positive toward chamber
+#
+# MASS BREAKDOWN:
+#   airframe_mass:       Fuselage, fins, nosecone, avionics, payload (NO propulsion)
+#   propulsion_dry_mass: Engine + tank structures + plumbing (your CAD propulsion assembly)
+#   lox_tank.mass:       LOX propellant only (not tank structure)
+#   fuel_tank.mass:      RP-1 propellant only (not tank structure)
+#
+# EXAMPLE:
+#   Total dry mass = 78.72 + 24.0 = 102.72 kg
+#   Total wet mass = 102.72 + 22.0 + 4.0 = 128.72 kg
+#
 rocket:
-  mass: 90.72
+  # NEW mass model - matches CAD assemblies
+  airframe_mass: 78.72      # Airframe only (fuselage, fins, nosecone, avionics) [kg]
+  propulsion_dry_mass: 24.0 # Engine + tank structures + plumbing [kg]
+  propulsion_cm_offset: 0.4 # CM of propulsion system above nozzle exit [m]
+  motor_position: 0.5       # Nozzle exit position from rocket tail [m]
+  
+  # Inertia of AIRFRAME ONLY (no propulsion, no propellants) [kg·m²]
+  # Propulsion inertia is auto-calculated from propulsion_dry_mass
   inertia:
-  - 8.0
-  - 8.0
-  - 0.5
-  radius: 0.1015
-  cm_wo_motor: 1.3
-  dry_mass: 12.0
-  motor_inertia:
-  - 0.1
-  - 0.1
-  - 0.1
+  - 8.0   # Ixx (roll)
+  - 8.0   # Iyy (pitch)
+  - 0.5   # Izz (yaw)
+  
+  radius: 0.1015  # Rocket body radius [m]
+  
   fins:
     no_fins: 3
     root_chord: 0.2
     tip_chord: 0.1
     fin_span: 0.3
     fin_position: 0.0
-  motor:
-    dry_mass: 12.0
-    inertia:
-    - 0.1
-    - 0.1
-    - 0.1
 environment:
   date:
   - 2025

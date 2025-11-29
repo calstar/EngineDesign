@@ -328,10 +328,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         effective_burn_time = burn_time
         truncation_info = {"truncated": False}
 
-    # Nozzle parameters from config
-    eta_nozzle = config.nozzle.efficiency
-    eps = config.nozzle.expansion_ratio
-    A_t = config.nozzle.A_throat
+    # Nozzle exit area (only used for visualization, not trajectory)
+    # Note: When providing a thrust curve, RocketPy doesn't use nozzle params for simulation.
+    # A_exit is only used to calculate nozzle_radius for the rocket drawing.
     A_e = config.nozzle.A_exit
     
     # Check for required flight simulation config fields
@@ -346,15 +345,69 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     
     p_amb = config.environment.p_amb
 
-    # Rocket parameters from config
-    rocket_mass = config.rocket.mass
+    # Rocket parameters from config - support both NEW and LEGACY formats
     rocket_inertia = config.rocket.inertia
     rocket_radius = config.rocket.radius
-    cm_wo_motor = config.rocket.cm_wo_motor
-    if config.rocket.motor is None:
-        raise ValueError("Rocket configuration must include motor configuration")
-    motor_dry_mass = config.rocket.motor.dry_mass
-    motor_inertia = config.rocket.motor_inertia
+    
+    # Check for NEW mass model (airframe_mass + propulsion_dry_mass)
+    has_new_model = (
+        hasattr(config.rocket, 'airframe_mass') and config.rocket.airframe_mass is not None and
+        hasattr(config.rocket, 'propulsion_dry_mass') and config.rocket.propulsion_dry_mass is not None
+    )
+    
+    if has_new_model:
+        # NEW MODEL: airframe_mass + propulsion_dry_mass
+        airframe_mass = config.rocket.airframe_mass
+        propulsion_dry_mass = config.rocket.propulsion_dry_mass
+        propulsion_cm_offset = getattr(config.rocket, 'propulsion_cm_offset', 0.3)
+        motor_position = getattr(config.rocket, 'motor_position', 0.5)
+        
+        # For RocketPy: airframe goes to Rocket(mass=...), propulsion goes to LiquidMotor(dry_mass=...)
+        rocket_mass = airframe_mass
+        motor_dry_mass = propulsion_dry_mass
+        
+        # Estimate motor inertia as a cylinder (propulsion system)
+        # Using rocket radius as approximation for propulsion system radius
+        prop_r = rocket_radius * 0.8  # Slightly smaller than rocket radius
+        motor_inertia = [
+            motor_dry_mass * prop_r**2,        # Ixx (transverse)
+            motor_dry_mass * prop_r**2,        # Iyy (transverse)
+            0.5 * motor_dry_mass * prop_r**2   # Izz (axial)
+        ]
+        
+        # Calculate CM of airframe (without propulsion)
+        # Assume airframe CM is roughly in the middle-upper portion of the rocket
+        # This is a simplification - could be made configurable
+        cm_wo_motor = getattr(config.rocket, 'cm_wo_motor', None)
+        if cm_wo_motor is None:
+            # Estimate: airframe CM is above the motor, roughly 60% up the body
+            cm_wo_motor = motor_position + 1.5  # ~1.5m above motor
+        
+        total_dry_mass = airframe_mass + propulsion_dry_mass
+        print(f"Using NEW mass model:")
+        print(f"  Airframe mass: {airframe_mass:.2f} kg (fuselage, fins, avionics)")
+        print(f"  Propulsion dry mass: {propulsion_dry_mass:.2f} kg (engine + tanks)")
+        print(f"  Propulsion CM offset: {propulsion_cm_offset:.2f} m above nozzle")
+        print(f"  Total dry mass: {total_dry_mass:.2f} kg")
+    else:
+        # LEGACY MODEL: mass + motor.dry_mass
+        if config.rocket.mass is None:
+            raise ValueError("Rocket configuration must include 'airframe_mass' + 'propulsion_dry_mass' (new) or 'mass' + 'motor' (legacy)")
+        rocket_mass = config.rocket.mass
+        
+        if config.rocket.motor is None:
+            raise ValueError("Legacy config requires 'motor' section with 'dry_mass'")
+        motor_dry_mass = config.rocket.motor.dry_mass
+        motor_inertia = config.rocket.motor_inertia if config.rocket.motor_inertia else [0.1, 0.1, 0.1]
+        
+        cm_wo_motor = config.rocket.cm_wo_motor if config.rocket.cm_wo_motor else 1.0
+        motor_position = getattr(config.rocket, 'motor_position', 0.5)
+        propulsion_cm_offset = 0.0  # Legacy: CM at nozzle
+        
+        print(f"Using LEGACY mass model:")
+        print(f"  Rocket mass (airframe): {rocket_mass:.2f} kg")
+        print(f"  Motor dry mass: {motor_dry_mass:.2f} kg")
+        print(f"  Total dry mass: {rocket_mass + motor_dry_mass:.2f} kg")
 
     # Environment
     env = Environment(
@@ -444,24 +497,23 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     # thrust_curve is already set above (may have been truncated)
 
     # Liquid motor - use effective_burn_time for burn_time
+    # propulsion_cm_offset: how far above nozzle the propulsion system CM is
     liquid_motor = LiquidMotor(
         thrust_source=thrust_curve,
-        center_of_dry_mass_position=0.0,
+        center_of_dry_mass_position=propulsion_cm_offset,  # CM of engine+tanks above nozzle
         dry_inertia=motor_inertia,
         dry_mass=motor_dry_mass,
         burn_time=(0.0, effective_burn_time),
         nozzle_radius=math.sqrt(A_e / math.pi),
-        nozzle_position=-0.6,
+        nozzle_position=0.0,  # Nozzle at origin of motor coordinate system
         coordinate_system_orientation="nozzle_to_combustion_chamber",
     )
 
     # Rocket assembly - stack from bottom (tail) to top (nose)
     # In "tail_to_nose" system: lower position = tail, higher position = nose
+    # motor_position: where the nozzle exit is, measured from rocket tail
     
-    # Position motor at bottom, above fins
-    motor_position = 0.5  # Motor center position
-    
-    # Add tanks relative to motor center
+    # Add tanks relative to motor (nozzle) position
     # Fuel tank below LOX (negative relative to motor center)
     liquid_motor.add_tank(fuel_tank, position=config.fuel_tank.fuel_tank_pos)
     # LOX tank above fuel (positive relative to motor center)
@@ -505,7 +557,38 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     nose_position = max_height + 4  # Small gap, then nose
     rocket.add_nose(length=0.6, kind="vonKarman", position=nose_position)
 
-    # Flight simulation
+    # Compute initial thrust-to-weight ratio for validation
+    # Sample thrust at t=0 from thrust curve
+    if isinstance(thrust_curve, list):
+        initial_thrust = thrust_curve[0][1] if thrust_curve else 0.0
+    elif hasattr(thrust_curve, '__call__'):
+        initial_thrust = float(thrust_curve(0.0))
+    else:
+        initial_thrust = float(thrust_curve)
+    
+    # Total initial mass = airframe + motor dry + propellants + pressurant gas
+    total_initial_mass = rocket_mass + motor_dry_mass + m_lox0 + m_rp10 + 0.1  # 0.1 for pressurant gas
+    initial_twr = initial_thrust / (total_initial_mass * g0)
+    
+    print(f"Initial thrust: {initial_thrust:.1f} N")
+    print(f"Total initial mass: {total_initial_mass:.2f} kg")
+    print(f"Initial T/W ratio: {initial_twr:.3f}")
+    
+    if initial_twr < 1.0:
+        raise ValueError(
+            f"Thrust-to-weight ratio ({initial_twr:.3f}) is less than 1.0! "
+            f"The rocket cannot take off. Either increase thrust or reduce mass. "
+            f"Current: thrust={initial_thrust:.1f} N, mass={total_initial_mass:.2f} kg, "
+            f"requires thrust > {total_initial_mass * g0:.1f} N"
+        )
+    
+    if initial_twr < 1.3:
+        print(f"WARNING: Low T/W ratio ({initial_twr:.3f}). Recommended > 1.3 for reliable liftoff.")
+    
+    # Flight simulation with timeout to prevent infinite loops
+    # max_time limits simulation to prevent hangs if something goes wrong
+    max_flight_time = max(300.0, effective_burn_time * 30)  # At least 5 min, or 30x burn time
+    
     flight = Flight(
         rocket=rocket,
         environment=env,
@@ -513,6 +596,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         inclination=90,
         heading=0,
         max_time_step=0.02,
+        max_time=max_flight_time,
         terminate_on_apogee=True,
     )
 
