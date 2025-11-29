@@ -2121,9 +2121,28 @@ def copv_view(config_obj: PintleEngineConfig) -> None:
     augmented_df["COPV_pressure_Pa"] = np.asarray(solver_results["PH_trace_Pa"], dtype=float)
     augmented_df["COPV_pressure_psi"] = copv_pressure
     augmented_df["COPV_mass_delivered_kg"] = np.asarray(solver_results["combined_M_delivered_kg"], dtype=float)
+    
+    # Calculate mdot_pressurant as derivative of delivered mass (for RocketPy flight sim)
+    delivered_mass = np.asarray(solver_results["combined_M_delivered_kg"], dtype=float)
+    dt = np.diff(time_vals, prepend=time_vals[0])
+    dt[0] = dt[1] if len(dt) > 1 else 1.0  # Avoid division by zero
+    dm = np.diff(delivered_mass, prepend=0)
+    mdot_pressurant = dm / dt
+    mdot_pressurant[0] = mdot_pressurant[1] if len(mdot_pressurant) > 1 else 0.0  # Smooth first point
+    augmented_df["mdot_pressurant (kg/s)"] = mdot_pressurant
+    
+    # Store COPV sizing results in session state for flight sim
+    st.session_state["copv_results"] = {
+        "initial_gas_mass_kg": solver_results["m0_kg"],
+        "copv_volume_m3": solver_results["copv_volume_m3"],
+        "initial_pressure_Pa": solver_results["P0_Pa"],
+    }
+    
     dataset_store: Dict[str, pd.DataFrame] = st.session_state.setdefault("custom_plot_datasets", {})
     dataset_store[dataset_name] = augmented_df
     st.session_state["last_custom_dataset"] = dataset_name
+    
+    st.success("✅ Added `mdot_pressurant (kg/s)` column - use this dataset in Flight Simulation")
 
     export_df = pd.DataFrame(
         {
@@ -5151,6 +5170,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 value=1305.0,
                 step=5.0,
                 key="flight_lox_tank_psi",
+                help="Oxidizer tank pressure. Higher pressure → higher mass flow → higher thrust. Must overcome injector & chamber pressure."
             )
         with col2:
             P_tank_F_psi = st.number_input(
@@ -5160,6 +5180,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 value=974.0,
                 step=5.0,
                 key="flight_fuel_tank_psi",
+                help="Fuel tank pressure. Typically lower than LOX pressure due to different injector geometry."
             )
     else:
         # Dataset selection and column mapping
@@ -5202,13 +5223,16 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             col3, col4, col5 = st.columns(3)
             with col3:
                 default_burn = float(config_obj.thrust.burn_time) if getattr(config_obj, "thrust", None) and config_obj.thrust else 5.0
-                burn_time = st.number_input("Burn time [s]", min_value=0.5, value=default_burn, step=0.5, key="flight_burn_time")
+                burn_time = st.number_input("Burn time [s]", min_value=0.5, value=default_burn, step=0.5, key="flight_burn_time",
+                    help="Total burn duration. Simulation may truncate earlier if propellant runs out.")
             with col4:
                 default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
-                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox")
+                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox",
+                    help="Initial liquid oxidizer mass. This is PROPELLANT only (not tank structure). Depletes during burn.")
             with col5:
                 default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
-                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel")
+                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel",
+                    help="Initial liquid fuel mass. This is PROPELLANT only (not tank structure). Depletes during burn.")
 
             st.markdown("### Environment")
             env_date = None
@@ -5227,19 +5251,23 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
 
             cold1, cold2 = st.columns(2)
             with cold1:
-                sel_date = st.date_input("Launch date", value=env_date, key="flight_env_date")
+                sel_date = st.date_input("Launch date", value=env_date, key="flight_env_date",
+                    help="Launch date for GFS atmospheric forecast. Use a recent date for accurate weather data.")
             with cold2:
-                sel_hour = st.number_input("Launch hour [0-23]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour")
+                sel_hour = st.number_input("Launch hour [0-23]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour",
+                    help="Launch hour in UTC (Coordinated Universal Time). GFS uses 6-hour intervals.")
         else:
             # Dataset mode: user defines propellant fill; burn time comes from dataset
             burn_time = None
             colpf1, colpf2 = st.columns(2)
             with colpf1:
                 default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
-                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox_ds")
+                m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox_ds",
+                    help="Initial liquid oxidizer mass. Burn truncates when LOX runs out.")
             with colpf2:
                 default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
-                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel_ds")
+                m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel_ds",
+                    help="Initial liquid fuel mass. Burn truncates when fuel runs out.")
             sel_date = None
             sel_hour = None
 
@@ -5291,11 +5319,11 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
     # Collapsible configuration editor
     st.subheader("Flight configuration")
     with st.expander("Environment", expanded=False):
+        st.caption("Atmospheric conditions are fetched from NOAA GFS forecast based on date and location.")
         env = working.get("environment") if working.get("environment") is not None else {}
         env.setdefault("latitude", 35.0)
         env.setdefault("longitude", -117.0)
         env.setdefault("elevation", 0.0)
-        env.setdefault("p_amb", 101325.0)
         
         # Handle date - get from existing or use default
         env_date = None
@@ -5314,17 +5342,20 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         
         colE1, colE2 = st.columns(2)
         with colE1:
-            env_lat = st.number_input("Latitude [deg]", value=float(env.get("latitude", 35.0)), key="flight_env_lat")
-            env_elev = st.number_input("Elevation [m]", value=float(env.get("elevation", 0.0)), key="flight_env_elev")
-            env_date_input = st.date_input("Launch date", value=env_date, key="flight_env_date_expander")
+            env_lat = st.number_input("Latitude [deg]", value=float(env.get("latitude", 35.0)), key="flight_env_lat",
+                help="Launch site latitude. Positive = North, Negative = South. Example: 35.35° for Mojave Desert.")
+            env_elev = st.number_input("Elevation [m]", value=float(env.get("elevation", 0.0)), key="flight_env_elev",
+                help="Ground elevation above sea level. Apogee is reported as AGL (Above Ground Level) relative to this.")
+            env_date_input = st.date_input("Launch date", value=env_date, key="flight_env_date_expander",
+                help="Date for GFS atmospheric forecast. Use a recent/future date (within 16 days) for accurate weather data.")
         with colE2:
-            env_lon = st.number_input("Longitude [deg]", value=float(env.get("longitude", -117.0)), key="flight_env_lon")
-            env_pamb = st.number_input("Ambient pressure [Pa]", value=float(env.get("p_amb", 101325.0)), key="flight_env_pamb")
-            env_hour_input = st.number_input("Launch hour [0-23]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour_expander")
+            env_lon = st.number_input("Longitude [deg]", value=float(env.get("longitude", -117.0)), key="flight_env_lon",
+                help="Launch site longitude. Positive = East, Negative = West. Example: -117.8° for Mojave Desert.")
+            env_hour_input = st.number_input("Launch hour [0-23 UTC]", min_value=0, max_value=23, value=env_hour, step=1, key="flight_env_hour_expander",
+                help="Launch hour in UTC. GFS uses 6-hour intervals. PST = UTC-8, PDT = UTC-7.")
         env["latitude"] = float(env_lat)
         env["longitude"] = float(env_lon)
         env["elevation"] = float(env_elev)
-        env["p_amb"] = float(env_pamb)
         env["date"] = [int(env_date_input.year), int(env_date_input.month), int(env_date_input.day), int(env_hour_input)]
         working["environment"] = env
 
@@ -5349,6 +5380,10 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             key="flight_airframe_mass",
             help="Fuselage, fins, nosecone, avionics, payload (NO propulsion)"
         )
+        
+        # Check if COPV sizing has been run
+        copv_results = st.session_state.get("copv_results", {})
+        copv_enabled = bool(copv_results)
         
         st.caption("**Propulsion breakdown** (for accurate CM calculation):")
         colE1, colE2, colE3 = st.columns(3)
@@ -5377,43 +5412,66 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 help="Empty fuel tank only (walls, no fittings)"
             )
         
-        # Calculate total propulsion dry mass
-        propulsion = engine_mass + lox_tank_mass + fuel_tank_mass
+        # COPV only shown if COPV sizing has been run
+        if copv_enabled:
+            _copv_mass = rocket.get("copv_dry_mass")
+            copv_dry_mass = st.number_input(
+                "COPV tank [kg]", 
+                value=float(_copv_mass) if _copv_mass is not None else 5.0, 
+                key="flight_copv_mass",
+                help="Empty COPV tank (walls, no gas)"
+            )
+            propulsion = engine_mass + lox_tank_mass + fuel_tank_mass + copv_dry_mass
+            st.caption(f"Propulsion dry: **{propulsion:.2f} kg** (engine + tanks + COPV) | Total dry: **{airframe + propulsion:.2f} kg**")
+        else:
+            copv_dry_mass = 0.0
+            propulsion = engine_mass + lox_tank_mass + fuel_tank_mass
+            st.caption(f"Propulsion dry: **{propulsion:.2f} kg** (engine + tanks) | Total dry: **{airframe + propulsion:.2f} kg**")
+            st.info("ℹ️ Run **COPV Sizing** to enable pressurant tank in simulation")
+        
         total_dry = airframe + propulsion
-        st.caption(f"Propulsion dry: **{propulsion:.2f} kg** | Total dry: **{total_dry:.2f} kg**")
         
         st.markdown("##### Geometry & Positions")
-        colG1, colG2 = st.columns(2)
+        st.caption("Coordinate system: z=0 at rocket tail (bottom), positive toward nose (top).")
+        colG1, colG2, colG3 = st.columns(3)
         with colG1:
             _radius = rocket.get("radius")
-            r_radius = st.number_input("Rocket radius [m]", value=float(_radius) if _radius is not None else 0.1015, key="flight_rocket_radius")
+            r_radius = st.number_input("Rocket radius [m]", value=float(_radius) if _radius is not None else 0.1015, key="flight_rocket_radius",
+                help="Outer body radius (diameter ÷ 2). Used for aerodynamics, drag, and MoI estimation.")
         with colG2:
+            _rocket_length = rocket.get("rocket_length")
+            rocket_length = st.number_input(
+                "Rocket length [m]", 
+                value=float(_rocket_length) if _rocket_length is not None else 3.5, 
+                key="flight_rocket_length",
+                help="Total rocket length (tail to nose tip). Used for MoI estimation. Typical sounding rockets: 2-5m."
+            )
+        with colG3:
             _motor_pos = rocket.get("motor_position")
             motor_pos = st.number_input(
                 "Motor position [m]", 
                 value=float(_motor_pos) if _motor_pos is not None else 0.5, 
                 key="flight_motor_position",
-                help="Nozzle exit position from rocket tail (z=0)"
+                help="Distance from rocket tail to nozzle exit. This is the origin (0) for tank positions. Typical: 0.3-0.8m."
             )
         
         _engine_cm = rocket.get("engine_cm_offset")
         engine_cm_offset = st.number_input(
-            "Engine+plumbing CM [m]", 
+            "Engine+plumbing CM offset [m]", 
             value=float(_engine_cm) if _engine_cm is not None else 0.15, 
             key="flight_engine_cm",
-            help="Height of engine+plumbing CM above nozzle exit (typically 0.1-0.3m)"
+            help="Height of engine+plumbing center of mass above nozzle exit. Typical: 0.1-0.3m for small engines."
         )
         
-        st.markdown("##### Inertia (total dry rocket)")
+        st.markdown("##### Inertia (airframe only)")
+        st.caption("💡 **Airframe only** — RocketPy adds propulsion inertia (engine + tanks) automatically using parallel axis theorem.")
         
         # Option to auto-estimate inertia from mass and geometry
-        auto_inertia = st.checkbox("Auto-estimate inertia from mass & geometry", value=False, key="flight_auto_inertia")
+        auto_inertia = st.checkbox("Auto-estimate inertia from mass & geometry", value=False, key="flight_auto_inertia",
+            help="Estimate using solid cylinder approximation: Ixx = Iyy = (1/12)m(3r² + L²), Izz = (1/2)mr². For production rockets, use CAD values.")
         
         if auto_inertia:
             # Estimate rocket as a cylinder: Ixx = Iyy = (1/12)m(3r² + L²), Izz = (1/2)mr²
-            # Estimate rocket length from typical proportions
-            rocket_length = 3.5  # Typical small rocket length ~3.5m
-            
             m_dry = airframe + propulsion
             r = r_radius
             L = rocket_length
@@ -5423,8 +5481,8 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             i_yy_est = i_xx_est  # Symmetric
             i_zz_est = 0.5 * m_dry * r**2
             
-            st.caption(f"Estimated for dry mass={m_dry:.1f}kg, r={r*1000:.0f}mm, L≈{L:.1f}m")
-            st.info(f"Auto-estimated: Ixx={i_xx_est:.2f}, Iyy={i_yy_est:.2f}, Izz={i_zz_est:.2f} kg·m²")
+            st.success(f"**Auto-estimated** (solid cylinder, m={m_dry:.1f}kg, r={r*1000:.0f}mm, L={L:.2f}m):\n\n"
+                      f"Ixx = {i_xx_est:.3f} kg·m² | Iyy = {i_yy_est:.3f} kg·m² | Izz = {i_zz_est:.4f} kg·m²")
             
             i_xx, i_yy, i_zz = i_xx_est, i_yy_est, i_zz_est
         else:
@@ -5433,11 +5491,14 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 _inertia = [8.0, 8.0, 0.5]
             colI1, colI2, colI3 = st.columns(3)
             with colI1:
-                i_xx = st.number_input("Ixx [kg·m²]", value=float(_inertia[0]), key="flight_inertia_x")
+                i_xx = st.number_input("Ixx [kg·m²]", value=float(_inertia[0]), key="flight_inertia_x",
+                    help="Transverse MoI (pitch). For a cylinder: Ixx = (1/12)m(3r² + L²). Get from CAD or bifilar pendulum test.")
             with colI2:
-                i_yy = st.number_input("Iyy [kg·m²]", value=float(_inertia[1]), key="flight_inertia_y")
+                i_yy = st.number_input("Iyy [kg·m²]", value=float(_inertia[1]), key="flight_inertia_y",
+                    help="Transverse MoI (yaw). For axisymmetric rockets: Iyy ≈ Ixx.")
             with colI3:
-                i_zz = st.number_input("Izz [kg·m²]", value=float(_inertia[2]), key="flight_inertia_z")
+                i_zz = st.number_input("Izz [kg·m²]", value=float(_inertia[2]), key="flight_inertia_z",
+                    help="Axial MoI (roll). For a cylinder: Izz = (1/2)mr². Much smaller than Ixx, Iyy for slender rockets.")
         
         # Calculate propulsion CM from component masses and positions
         # Get tank positions (from working dict - may be from previous session or defaults)
@@ -5449,28 +5510,40 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         # Weighted CM calculation: sum(mass_i * position_i) / sum(mass_i)
         # Engine at engine_cm_offset, tanks at their positions
         if propulsion > 0:
-            prop_cm = (engine_mass * engine_cm_offset + 
-                       lox_tank_mass * ox_pos + 
-                       fuel_tank_mass * fuel_pos) / propulsion
+            if copv_enabled:
+                press_tank_temp = working.get("press_tank", {})
+                copv_pos = float(press_tank_temp.get("pres_tank_pos", 1.2))
+                prop_cm = (engine_mass * engine_cm_offset + 
+                           lox_tank_mass * ox_pos + 
+                           fuel_tank_mass * fuel_pos +
+                           copv_dry_mass * copv_pos) / propulsion
+            else:
+                prop_cm = (engine_mass * engine_cm_offset + 
+                           lox_tank_mass * ox_pos + 
+                           fuel_tank_mass * fuel_pos) / propulsion
         else:
             prop_cm = 0.0
         
-        st.caption(f"**Calculated propulsion CM:** {prop_cm:.3f} m above nozzle "
-                   f"(from engine @{engine_cm_offset:.2f}m, LOX tank @{ox_pos:.2f}m, fuel tank @{fuel_pos:.2f}m)")
+        st.caption(f"**Calculated propulsion CM:** {prop_cm:.3f} m above nozzle")
         
         # Store new model values
         rocket["airframe_mass"] = float(airframe)
         rocket["engine_mass"] = float(engine_mass)
         rocket["lox_tank_structure_mass"] = float(lox_tank_mass)
         rocket["fuel_tank_structure_mass"] = float(fuel_tank_mass)
+        rocket["copv_dry_mass"] = float(copv_dry_mass) if copv_enabled else None
+        rocket["copv_enabled"] = copv_enabled
         rocket["engine_cm_offset"] = float(engine_cm_offset)
         rocket["propulsion_dry_mass"] = float(propulsion)  # Computed total
         rocket["propulsion_cm_offset"] = float(prop_cm)    # Computed CM
         rocket["motor_position"] = float(motor_pos)
         rocket["radius"] = float(r_radius)
+        rocket["rocket_length"] = float(rocket_length)  # For MoI estimation
         rocket["inertia"] = [float(i_xx), float(i_yy), float(i_zz)]
 
         # Fins
+        st.markdown("##### Fins")
+        st.caption("Trapezoidal fins. Position is measured from rocket tail (z=0).")
         fins = rocket.get("fins") if rocket.get("fins") is not None else {}
         fins.setdefault("no_fins", 3)
         fins.setdefault("root_chord", 0.2)
@@ -5479,20 +5552,25 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         fins.setdefault("fin_position", 0.0)
         colF1, colF2, colF3 = st.columns(3)
         with colF1:
-            fins["no_fins"] = int(st.number_input("Fin count", value=int(fins["no_fins"]), min_value=1, step=1, key="flight_fins_count"))
-            fins["root_chord"] = float(st.number_input("Root chord [m]", value=float(fins["root_chord"]), key="flight_fins_root"))
+            fins["no_fins"] = int(st.number_input("Fin count", value=int(fins["no_fins"]), min_value=1, step=1, key="flight_fins_count",
+                help="Number of fins (3 or 4 typical). More fins = more drag but better stability."))
+            fins["root_chord"] = float(st.number_input("Root chord [m]", value=float(fins["root_chord"]), key="flight_fins_root",
+                help="Fin edge length at the body (root). Larger = more stable but more drag."))
         with colF2:
-            fins["tip_chord"] = float(st.number_input("Tip chord [m]", value=float(fins["tip_chord"]), key="flight_fins_tip"))
-            fins["fin_span"] = float(st.number_input("Fin span [m]", value=float(fins["fin_span"]), key="flight_fins_span"))
+            fins["tip_chord"] = float(st.number_input("Tip chord [m]", value=float(fins["tip_chord"]), key="flight_fins_tip",
+                help="Fin edge length at the tip. Usually ≤ root chord for trapezoidal shape."))
+            fins["fin_span"] = float(st.number_input("Fin span [m]", value=float(fins["fin_span"]), key="flight_fins_span",
+                help="Fin height from body to tip (radial). Larger = more stability margin."))
         with colF3:
-            fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fins["fin_position"]), key="flight_fins_pos"))
+            fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fins["fin_position"]), key="flight_fins_pos",
+                help="Leading edge distance from tail (z=0). Place near tail (0 - 0.3m) for stability."))
         rocket["fins"] = fins
         working["rocket"] = rocket
 
     with st.expander("Tanks", expanded=False):
-        st.caption("**Tank positions** are relative to the nozzle exit (0). Positive = above nozzle, Negative = below.\n\n"
-                   "• **Structure mass** (from Rocket section) uses these positions for dry CM calculation\n"
-                   "• **Propellant mass** (LOX/Fuel inputs above) uses these positions for wet CM calculation")
+        st.caption("**Tank positions** are relative to the **nozzle exit** (motor_position). "
+                   "Positive = above nozzle, Negative = below.\n\n"
+                   "Example: motor_position=0.5m, ox_tank_pos=0.6m → LOX tank center is at 1.1m from tail.")
         
         lox_tank = working.get("lox_tank") if working.get("lox_tank") is not None else {}
         fuel_tank = working.get("fuel_tank") if working.get("fuel_tank") is not None else {}
@@ -5511,11 +5589,14 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         lox_tank.setdefault("ox_tank_pos", 0.6)
         colL1, colL2, colL3 = st.columns(3)
         with colL1:
-            lox_tank["lox_h"] = float(st.number_input("Height [m]", value=float(lox_tank["lox_h"]), key="flight_lox_h"))
+            lox_tank["lox_h"] = float(st.number_input("Height [m]", value=float(lox_tank["lox_h"]), key="flight_lox_h",
+                help="Internal cylindrical height (excluding domes/caps). Volume = π×r²×h. RocketPy tracks liquid level and CM as propellant depletes."))
         with colL2:
-            lox_tank["lox_radius"] = float(st.number_input("Radius [m]", value=float(lox_tank["lox_radius"]), key="flight_lox_radius"))
+            lox_tank["lox_radius"] = float(st.number_input("Radius [m]", value=float(lox_tank["lox_radius"]), key="flight_lox_radius",
+                help="Internal radius. Used for volume calculation and MoI of propellant."))
         with colL3:
-            lox_tank["ox_tank_pos"] = float(st.number_input("Position [m]", value=float(lox_tank["ox_tank_pos"]), key="flight_lox_pos"))
+            lox_tank["ox_tank_pos"] = float(st.number_input("Position [m]", value=float(lox_tank["ox_tank_pos"]), key="flight_lox_pos",
+                help="Tank center relative to nozzle exit. Example: 0.6m = tank center is 60cm above nozzle."))
         
         # Calculate LOX tank capacity and validate
         lox_volume = np.pi * lox_tank["lox_radius"]**2 * lox_tank["lox_h"]  # m³
@@ -5532,11 +5613,14 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         fuel_tank.setdefault("fuel_tank_pos", -0.2)
         colFu1, colFu2, colFu3 = st.columns(3)
         with colFu1:
-            fuel_tank["rp1_h"] = float(st.number_input("Height [m]", value=float(fuel_tank["rp1_h"]), key="flight_rp1_h"))
+            fuel_tank["rp1_h"] = float(st.number_input("Height [m]", value=float(fuel_tank["rp1_h"]), key="flight_rp1_h",
+                help="Internal cylindrical height (excluding domes/caps). Volume = π×r²×h."))
         with colFu2:
-            fuel_tank["rp1_radius"] = float(st.number_input("Radius [m]", value=float(fuel_tank["rp1_radius"]), key="flight_rp1_radius"))
+            fuel_tank["rp1_radius"] = float(st.number_input("Radius [m]", value=float(fuel_tank["rp1_radius"]), key="flight_rp1_radius",
+                help="Internal radius. Used for volume calculation and MoI of propellant."))
         with colFu3:
-            fuel_tank["fuel_tank_pos"] = float(st.number_input("Position [m]", value=float(fuel_tank["fuel_tank_pos"]), key="flight_rp1_pos"))
+            fuel_tank["fuel_tank_pos"] = float(st.number_input("Position [m]", value=float(fuel_tank["fuel_tank_pos"]), key="flight_rp1_pos",
+                help="Tank center relative to nozzle exit. Negative = below nozzle. Example: -0.2m = tank center is 20cm below nozzle."))
         
         # Calculate Fuel tank capacity and validate
         fuel_volume = np.pi * fuel_tank["rp1_radius"]**2 * fuel_tank["rp1_h"]  # m³
@@ -5547,23 +5631,46 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         if fuel_mass_input > fuel_capacity * 0.98:
             st.warning(f"⚠️ Fuel mass ({fuel_mass_input:.1f} kg) exceeds 98% tank capacity ({fuel_capacity:.1f} kg)!")
         
-        st.markdown("##### Pressurant Tank (optional)")
-        if press_tank is None:
-            press_tank = {}
-        press_tank.setdefault("press_h", 0.457)
-        press_tank.setdefault("press_radius", 0.0762)
-        press_tank.setdefault("pres_tank_pos", 1.2)
-        colP1, colP2, colP3 = st.columns(3)
-        with colP1:
-            press_tank["press_h"] = float(st.number_input("Height [m]", value=float(press_tank["press_h"]), key="flight_press_h"))
-        with colP2:
-            press_tank["press_radius"] = float(st.number_input("Radius [m]", value=float(press_tank["press_radius"]), key="flight_press_radius"))
-        with colP3:
-            press_tank["pres_tank_pos"] = float(st.number_input("Position [m]", value=float(press_tank["pres_tank_pos"]), key="flight_press_pos"))
+        # Pressurant tank only shown if COPV sizing has been run
+        copv_results = st.session_state.get("copv_results", {})
+        copv_enabled = bool(copv_results)
+        
+        if copv_enabled:
+            st.markdown("##### Pressurant Tank (COPV - GN₂)")
+            st.success(f"✅ COPV sizing complete: Initial N₂ = **{copv_results.get('initial_gas_mass_kg', 0):.3f} kg**")
+            
+            if press_tank is None:
+                press_tank = {}
+            press_tank.setdefault("press_h", 0.457)
+            press_tank.setdefault("press_radius", 0.0762)
+            press_tank.setdefault("pres_tank_pos", 1.2)
+            
+            colP1, colP2, colP3 = st.columns(3)
+            with colP1:
+                press_tank["press_h"] = float(st.number_input("Height [m]", value=float(press_tank["press_h"]), key="flight_press_h",
+                    help="COPV cylindrical height (approximate). Used for volume and MoI estimation."))
+            with colP2:
+                press_tank["press_radius"] = float(st.number_input("Radius [m]", value=float(press_tank["press_radius"]), key="flight_press_radius",
+                    help="COPV radius. Used for MoI calculation and visualization."))
+            with colP3:
+                press_tank["pres_tank_pos"] = float(st.number_input("Position [m]", value=float(press_tank["pres_tank_pos"]), key="flight_press_pos",
+                    help="COPV center position relative to nozzle exit. Typically above propellant tanks (positive value)."))
+            
+            # Auto-fill initial gas mass from COPV results
+            press_tank["initial_gas_mass"] = copv_results.get("initial_gas_mass_kg", 0.5)
+            
+            # Show COPV volume for reference
+            press_volume = np.pi * press_tank["press_radius"]**2 * press_tank["press_h"]  # m³
+            st.caption(f"COPV Volume: {press_volume*1000:.1f} L | Initial N₂: {press_tank['initial_gas_mass']:.3f} kg")
+            
+            working["press_tank"] = press_tank
+        else:
+            st.markdown("##### Pressurant Tank (COPV)")
+            st.info("ℹ️ Run **COPV Sizing** first to enable pressurant tank simulation")
+            working["press_tank"] = None  # Explicitly disable
         
         working["lox_tank"] = lox_tank
         working["fuel_tank"] = fuel_tank
-        working["press_tank"] = press_tank
 
     with st.expander("Nozzle (visualization only)", expanded=False):
         st.info("ℹ️ **Visualization only** — These values are used to draw the nozzle in the rocket diagram. "
@@ -5596,6 +5703,8 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         working["nozzle"] = nozzle
 
     with st.expander("Fluids (properties)", expanded=False):
+        st.caption("**Density** is used for tank capacity calculation and propellant MoI. "
+                   "**Temperature** is for reference only (not used in flight sim).")
         fluids = working.get("fluids") if working.get("fluids") is not None else {}
         ox = fluids.get("oxidizer") if fluids.get("oxidizer") is not None else {}
         fu = fluids.get("fuel") if fluids.get("fuel") is not None else {}
@@ -5605,20 +5714,28 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         fu.setdefault("name", "RP-1")
         fu.setdefault("density", 780.0)
         fu.setdefault("temperature", 293.0)
+        st.markdown("##### Oxidizer")
         colOx1, colOx2, colOx3 = st.columns(3)
         with colOx1:
-            ox["name"] = st.text_input("Oxidizer name", value=str(ox["name"]), key="flight_ox_name")
+            ox["name"] = st.text_input("Oxidizer name", value=str(ox["name"]), key="flight_ox_name",
+                help="Oxidizer identifier. Display only.")
         with colOx2:
-            ox["density"] = float(st.number_input("Oxidizer density [kg/m³]", value=float(ox["density"]), key="flight_ox_density"))
+            ox["density"] = float(st.number_input("Oxidizer density [kg/m³]", value=float(ox["density"]), key="flight_ox_density",
+                help="Liquid density at tank conditions. Used for tank capacity validation and propellant MoI. LOX ≈ 1140 kg/m³."))
         with colOx3:
-            ox["temperature"] = float(st.number_input("Oxidizer temperature [K]", value=float(ox["temperature"]), key="flight_ox_temp"))
+            ox["temperature"] = float(st.number_input("Oxidizer temp [K] (ref)", value=float(ox["temperature"]), key="flight_ox_temp",
+                help="Reference only — not used in simulation. LOX boils at 90K at 1 atm."))
+        st.markdown("##### Fuel")
         colFu1, colFu2, colFu3 = st.columns(3)
         with colFu1:
-            fu["name"] = st.text_input("Fuel name", value=str(fu["name"]), key="flight_fu_name")
+            fu["name"] = st.text_input("Fuel name", value=str(fu["name"]), key="flight_fu_name",
+                help="Fuel identifier. Display only.")
         with colFu2:
-            fu["density"] = float(st.number_input("Fuel density [kg/m³]", value=float(fu["density"]), key="flight_fu_density"))
+            fu["density"] = float(st.number_input("Fuel density [kg/m³]", value=float(fu["density"]), key="flight_fu_density",
+                help="Liquid density at tank conditions. Used for tank capacity validation and propellant MoI. RP-1 ≈ 780-820 kg/m³."))
         with colFu3:
-            fu["temperature"] = float(st.number_input("Fuel temperature [K]", value=float(fu["temperature"]), key="flight_fu_temp"))
+            fu["temperature"] = float(st.number_input("Fuel temp [K] (ref)", value=float(fu["temperature"]), key="flight_fu_temp",
+                help="Reference only — not used in simulation. Room temperature ≈ 293K (20°C)."))
         fluids["oxidizer"] = ox
         fluids["fuel"] = fu
         working["fluids"] = fluids

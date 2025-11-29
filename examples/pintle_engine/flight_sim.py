@@ -342,10 +342,10 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         raise ValueError("Flight simulation requires 'lox_tank' configuration")
     if not config.fuel_tank:
         raise ValueError("Flight simulation requires 'fuel_tank' configuration")
-    
-    p_amb = config.environment.p_amb
 
     # Rocket parameters from config - support both NEW and LEGACY formats
+    # NOTE: rocket_inertia is for AIRFRAME ONLY (without motor/propulsion)
+    # RocketPy adds motor inertia separately via LiquidMotor(dry_inertia=...)
     rocket_inertia = config.rocket.inertia
     rocket_radius = config.rocket.radius
     
@@ -356,38 +356,152 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     )
     
     if has_new_model:
-        # NEW MODEL: airframe_mass + propulsion_dry_mass
+        # NEW MODEL: Use detailed mass breakdown for proper RocketPy native handling
         airframe_mass = config.rocket.airframe_mass
-        propulsion_dry_mass = config.rocket.propulsion_dry_mass
-        propulsion_cm_offset = getattr(config.rocket, 'propulsion_cm_offset', 0.3)
         motor_position = getattr(config.rocket, 'motor_position', 0.5)
         
-        # For RocketPy: airframe goes to Rocket(mass=...), propulsion goes to LiquidMotor(dry_mass=...)
+        # Check if we have detailed component breakdown (preferred)
+        has_detailed_breakdown = (
+            hasattr(config.rocket, 'engine_mass') and config.rocket.engine_mass is not None
+        )
+        
+        if has_detailed_breakdown:
+            # DETAILED MODEL: All propulsion dry mass goes to LiquidMotor
+            # This includes engine + tank structures, with proper CM and inertia calculations
+            engine_mass = config.rocket.engine_mass
+            engine_cm_offset = getattr(config.rocket, 'engine_cm_offset', 0.15)
+            lox_tank_structure_mass = getattr(config.rocket, 'lox_tank_structure_mass', None) or 0.0
+            fuel_tank_structure_mass = getattr(config.rocket, 'fuel_tank_structure_mass', None) or 0.0
+            copv_dry_mass = getattr(config.rocket, 'copv_dry_mass', None) or 0.0
+            
+            # Get tank positions (relative to nozzle exit)
+            lox_tank_pos = config.lox_tank.ox_tank_pos
+            fuel_tank_pos = config.fuel_tank.fuel_tank_pos
+            copv_pos = config.press_tank.pres_tank_pos if config.press_tank else 0.0
+            
+            # TOTAL motor dry mass includes engine + all tank structures
+            motor_dry_mass = engine_mass + lox_tank_structure_mass + fuel_tank_structure_mass + copv_dry_mass
+            propulsion_dry_mass = motor_dry_mass
+            
+            # Compute weighted average CM of all dry components (relative to nozzle)
+            # CM = sum(m_i * x_i) / sum(m_i)
+            if motor_dry_mass > 0:
+                weighted_cm = (
+                    engine_mass * engine_cm_offset +
+                    lox_tank_structure_mass * lox_tank_pos +
+                    fuel_tank_structure_mass * fuel_tank_pos +
+                    copv_dry_mass * copv_pos
+                ) / motor_dry_mass
+            else:
+                weighted_cm = engine_cm_offset
+            
+            # Compute composite inertia using parallel axis theorem
+            # I_total = sum(I_local_i + m_i * d_i^2) where d_i = distance from component CM to system CM
+            # 
+            # For each component, approximate as solid cylinder:
+            #   I_axial = (1/2) * m * r^2
+            #   I_transverse = (1/12) * m * (3*r^2 + h^2) ≈ (1/4) * m * r^2 for short cylinders
+            #
+            # Parallel axis theorem adds m * d^2 to transverse inertias
+            
+            def compute_component_inertia(mass, cm_pos, system_cm, radius, height=None):
+                """Compute inertia contribution of a cylindrical component."""
+                if mass <= 0:
+                    return [0.0, 0.0, 0.0]
+                
+                # Distance from component CM to system CM (for parallel axis)
+                d = cm_pos - system_cm
+                
+                # Local inertias (solid cylinder approximation)
+                # Axial (Izz): I = (1/2) * m * r^2
+                I_local_axial = 0.5 * mass * radius**2
+                
+                # Transverse (Ixx, Iyy): I = (1/12) * m * (3*r^2 + h^2)
+                # If height not specified, use simplified: I ≈ (1/4) * m * r^2
+                if height is not None and height > 0:
+                    I_local_transverse = (1.0/12.0) * mass * (3 * radius**2 + height**2)
+                else:
+                    I_local_transverse = 0.25 * mass * radius**2
+                
+                # Apply parallel axis theorem to transverse inertias
+                # I_total = I_local + m * d^2
+                I_transverse_total = I_local_transverse + mass * d**2
+                
+                return [I_transverse_total, I_transverse_total, I_local_axial]
+            
+            # Engine inertia (compact cylinder)
+            engine_r = rocket_radius * 0.6  # Engine smaller than rocket body
+            engine_h = 0.3  # Approximate engine height
+            I_engine = compute_component_inertia(engine_mass, engine_cm_offset, weighted_cm, engine_r, engine_h)
+            
+            # LOX tank structure inertia
+            lox_tank_r = config.lox_tank.lox_radius
+            lox_tank_h = config.lox_tank.lox_h
+            I_lox_tank = compute_component_inertia(lox_tank_structure_mass, lox_tank_pos, weighted_cm, lox_tank_r, lox_tank_h)
+            
+            # Fuel tank structure inertia
+            fuel_tank_r = config.fuel_tank.rp1_radius
+            fuel_tank_h = config.fuel_tank.rp1_h
+            I_fuel_tank = compute_component_inertia(fuel_tank_structure_mass, fuel_tank_pos, weighted_cm, fuel_tank_r, fuel_tank_h)
+            
+            # COPV structure inertia
+            if copv_dry_mass > 0 and config.press_tank:
+                copv_r = config.press_tank.press_radius
+                copv_h = config.press_tank.press_h
+                I_copv = compute_component_inertia(copv_dry_mass, copv_pos, weighted_cm, copv_r, copv_h)
+            else:
+                I_copv = [0.0, 0.0, 0.0]
+            
+            # Total motor inertia (sum of all components)
+            motor_inertia = [
+                I_engine[0] + I_lox_tank[0] + I_fuel_tank[0] + I_copv[0],  # Ixx (transverse)
+                I_engine[1] + I_lox_tank[1] + I_fuel_tank[1] + I_copv[1],  # Iyy (transverse)
+                I_engine[2] + I_lox_tank[2] + I_fuel_tank[2] + I_copv[2],  # Izz (axial)
+            ]
+            
+            # Use the weighted CM as the motor's center of dry mass position
+            engine_cm_offset = weighted_cm
+            
+            print(f"Using DETAILED mass model (RocketPy native):")
+            print(f"  Engine + plumbing: {engine_mass:.2f} kg at {getattr(config.rocket, 'engine_cm_offset', 0.15):.2f}m above nozzle")
+            print(f"  LOX tank structure: {lox_tank_structure_mass:.2f} kg at {lox_tank_pos:.2f}m (motor coords)")
+            print(f"  Fuel tank structure: {fuel_tank_structure_mass:.2f} kg at {fuel_tank_pos:.2f}m (motor coords)")
+            if copv_dry_mass > 0:
+                print(f"  COPV structure: {copv_dry_mass:.2f} kg at {copv_pos:.2f}m (motor coords)")
+            print(f"  Combined dry mass CM: {weighted_cm:.3f}m above nozzle")
+            print(f"  Motor dry inertia: [{motor_inertia[0]:.4f}, {motor_inertia[1]:.4f}, {motor_inertia[2]:.4f}] kg·m²")
+            print(f"  Total propulsion dry: {propulsion_dry_mass:.2f} kg")
+        else:
+            # SIMPLE MODEL: All propulsion lumped together (backward compatible)
+            propulsion_dry_mass = config.rocket.propulsion_dry_mass
+            propulsion_cm_offset = getattr(config.rocket, 'propulsion_cm_offset', 0.3)
+            motor_dry_mass = propulsion_dry_mass
+            engine_cm_offset = propulsion_cm_offset
+            
+            # Estimate motor inertia as solid cylinder (propulsion system)
+            prop_r = rocket_radius * 0.8
+            prop_h = 0.5  # Approximate propulsion system height
+            # Solid cylinder: I_axial = (1/2)*m*r^2, I_transverse = (1/12)*m*(3*r^2 + h^2)
+            I_transverse = (1.0/12.0) * motor_dry_mass * (3 * prop_r**2 + prop_h**2)
+            I_axial = 0.5 * motor_dry_mass * prop_r**2
+            motor_inertia = [I_transverse, I_transverse, I_axial]
+            
+            print(f"Using SIMPLE propulsion model:")
+            print(f"  Propulsion dry mass: {propulsion_dry_mass:.2f} kg (lumped)")
+            print(f"  Propulsion CM offset: {propulsion_cm_offset:.2f} m above nozzle")
+            print(f"  Propulsion inertia (estimated): [{motor_inertia[0]:.4f}, {motor_inertia[1]:.4f}, {motor_inertia[2]:.4f}] kg·m²")
+        
         rocket_mass = airframe_mass
-        motor_dry_mass = propulsion_dry_mass
         
-        # Estimate motor inertia as a cylinder (propulsion system)
-        # Using rocket radius as approximation for propulsion system radius
-        prop_r = rocket_radius * 0.8  # Slightly smaller than rocket radius
-        motor_inertia = [
-            motor_dry_mass * prop_r**2,        # Ixx (transverse)
-            motor_dry_mass * prop_r**2,        # Iyy (transverse)
-            0.5 * motor_dry_mass * prop_r**2   # Izz (axial)
-        ]
-        
-        # Calculate CM of airframe (without propulsion)
-        # Assume airframe CM is roughly in the middle-upper portion of the rocket
-        # This is a simplification - could be made configurable
+        # Calculate CM of airframe (without motor/propulsion)
         cm_wo_motor = getattr(config.rocket, 'cm_wo_motor', None)
         if cm_wo_motor is None:
             # Estimate: airframe CM is above the motor, roughly 60% up the body
-            cm_wo_motor = motor_position + 1.5  # ~1.5m above motor
+            cm_wo_motor = motor_position + 1.5
         
         total_dry_mass = airframe_mass + propulsion_dry_mass
-        print(f"Using NEW mass model:")
-        print(f"  Airframe mass: {airframe_mass:.2f} kg (fuselage, fins, avionics)")
-        print(f"  Propulsion dry mass: {propulsion_dry_mass:.2f} kg (engine + tanks)")
-        print(f"  Propulsion CM offset: {propulsion_cm_offset:.2f} m above nozzle")
+        print(f"  Airframe mass: {airframe_mass:.2f} kg")
+        print(f"  Airframe inertia: [{rocket_inertia[0]:.2f}, {rocket_inertia[1]:.2f}, {rocket_inertia[2]:.2f}] kg·m²")
         print(f"  Total dry mass: {total_dry_mass:.2f} kg")
     else:
         # LEGACY MODEL: mass + motor.dry_mass
@@ -402,7 +516,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         
         cm_wo_motor = config.rocket.cm_wo_motor if config.rocket.cm_wo_motor else 1.0
         motor_position = getattr(config.rocket, 'motor_position', 0.5)
-        propulsion_cm_offset = 0.0  # Legacy: CM at nozzle
+        engine_cm_offset = 0.0  # Legacy: CM at nozzle
         
         print(f"Using LEGACY mass model:")
         print(f"  Rocket mass (airframe): {rocket_mass:.2f} kg")
@@ -432,7 +546,34 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     # Fluids and tanks
     lox = Fluid(name="LOX", density=rho_lox)
     rp1 = Fluid(name="RP-1", density=rho_rp1)
-    pressurant = Fluid(name="LN2", density=807)  # kg/m³ at 1 atm, 300 K
+    # GN2 (gaseous nitrogen) for ullage and pressurant - density varies with pressure
+    # Use average density during blowdown (higher at start, lower at end)
+    gn2_ullage = Fluid(name="GN2", density=50)  # kg/m³ approximate for ullage
+    gn2_pressurant = Fluid(name="GN2_COPV", density=200)  # kg/m³ higher density in COPV
+    
+    # Pressurant (COPV) tank setup
+    m_pressurant = 0.0
+    press_tank_obj = None
+    if config.press_tank:
+        m_pressurant = getattr(config.press_tank, 'initial_gas_mass', None) or 0.0
+        if m_pressurant > 0:
+            # Create pressurant tank geometry
+            press_geom = CylindricalTank(
+                radius=config.press_tank.press_radius, 
+                height=config.press_tank.press_h, 
+                spherical_caps=False
+            )
+            
+            # Estimate pressurant mass flow rate
+            # Pressurant flows out to replace consumed propellant volume
+            # Simplified: assume linear depletion over burn time
+            # More accurate would be based on actual ullage volume increase rate
+            if effective_burn_time > 0:
+                mdot_pressurant_avg = m_pressurant / effective_burn_time
+            else:
+                mdot_pressurant_avg = 0.0
+            
+            print(f"  Pressurant (N₂): {m_pressurant:.3f} kg initial, ~{mdot_pressurant_avg:.4f} kg/s avg flow")
 
     # Convert mdot_lox and mdot_fuel to Functions if they're constants
     # (MassFlowRateBasedTank expects Functions)
@@ -468,9 +609,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         geometry=lox_geom,
         flux_time=burn_time,
         liquid=lox,
-        gas=pressurant,
+        gas=gn2_ullage,
         initial_liquid_mass=m_lox0,
-        initial_gas_mass=0.05,
+        initial_gas_mass=0.05,  # Small ullage
         liquid_mass_flow_rate_in=0.0,
         liquid_mass_flow_rate_out=mdot_lox,
         gas_mass_flow_rate_in=0.0,
@@ -483,9 +624,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         geometry=rp1_geom,
         flux_time=burn_time,
         liquid=rp1,
-        gas=pressurant,
+        gas=gn2_ullage,
         initial_liquid_mass=m_rp10,
-        initial_gas_mass=0.05,
+        initial_gas_mass=0.05,  # Small ullage
         liquid_mass_flow_rate_in=0.0,
         liquid_mass_flow_rate_out=mdot_fuel,
         gas_mass_flow_rate_in=0.0,
@@ -493,14 +634,46 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         discretize=100,
     )
 
+    # Create pressurant tank if configured
+    pressurant_tank = None
+    if config.press_tank and m_pressurant > 0:
+        # Create pressurant mass flow function (linear depletion approximation)
+        n_samples = max(int(burn_time * 500) + 1, 1000)
+        times_base = np.linspace(0, burn_time, n_samples)
+        eps = 1e-6
+        critical_times = [effective_burn_time, effective_burn_time + eps]
+        times_mdot = np.unique(np.concatenate([times_base, critical_times]))
+        times_mdot = times_mdot[times_mdot <= burn_time]
+        
+        # Pressurant flow rate proportional to propellant consumption
+        # This is a simplification - actual flow depends on blowdown ratio
+        mdot_press_vals = np.array([mdot_pressurant_avg if t <= effective_burn_time else 0.0 for t in times_mdot])
+        source = np.column_stack((times_mdot, mdot_press_vals))
+        mdot_pressurant = Function(source)
+        
+        pressurant_tank = MassFlowRateBasedTank(
+            name="Pressurant (N₂) Tank",
+            geometry=press_geom,
+            flux_time=burn_time,
+            liquid=gn2_pressurant,  # Using "liquid" field for gas (RocketPy limitation)
+            gas=gn2_pressurant,
+            initial_liquid_mass=m_pressurant,  # All mass starts as "liquid" (actually high-pressure gas)
+            initial_gas_mass=0.01,  # Small amount
+            liquid_mass_flow_rate_in=0.0,
+            liquid_mass_flow_rate_out=mdot_pressurant,  # Gas flows out to propellant tanks
+            gas_mass_flow_rate_in=0.0,
+            gas_mass_flow_rate_out=0.0,
+            discretize=100,
+        )
 
     # thrust_curve is already set above (may have been truncated)
 
     # Liquid motor - use effective_burn_time for burn_time
-    # propulsion_cm_offset: how far above nozzle the propulsion system CM is
+    # engine_cm_offset: how far above nozzle the engine dry mass CM is
+    # (tank structures are added separately if using detailed model)
     liquid_motor = LiquidMotor(
         thrust_source=thrust_curve,
-        center_of_dry_mass_position=propulsion_cm_offset,  # CM of engine+tanks above nozzle
+        center_of_dry_mass_position=engine_cm_offset,  # CM of engine (not tanks) above nozzle
         dry_inertia=motor_inertia,
         dry_mass=motor_dry_mass,
         burn_time=(0.0, effective_burn_time),
@@ -514,10 +687,14 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     # motor_position: where the nozzle exit is, measured from rocket tail
     
     # Add tanks relative to motor (nozzle) position
-    # Fuel tank below LOX (negative relative to motor center)
+    # Each tank tracks its own mass, CM, and inertia as propellant/gas depletes
     liquid_motor.add_tank(fuel_tank, position=config.fuel_tank.fuel_tank_pos)
-    # LOX tank above fuel (positive relative to motor center)
     liquid_motor.add_tank(oxidizer_tank, position=config.lox_tank.ox_tank_pos)
+    
+    # Add pressurant tank if configured
+    if pressurant_tank is not None:
+        liquid_motor.add_tank(pressurant_tank, position=config.press_tank.pres_tank_pos)
+        print(f"  Added pressurant tank at position {config.press_tank.pres_tank_pos:.2f}m")
 
     rocket = Rocket(
         radius=rocket_radius,
@@ -535,11 +712,15 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         root_chord=config.rocket.fins.root_chord,
         tip_chord=config.rocket.fins.tip_chord,
         span=config.rocket.fins.fin_span,
-        position=0.3  # Bottom of rocket
+        position=config.rocket.fins.fin_position,  # User-specified position from rocket tail
     )
     
     # Motor above fins
     rocket.add_motor(liquid_motor, position=motor_position)
+    
+    # NOTE: Tank structure masses are now included in LiquidMotor.dry_mass
+    # with proper CM and inertia calculations using parallel axis theorem.
+    # This is the correct RocketPy approach - no need for separate point masses.
     
     # Calculate top of highest tank to place nose above it
     # Motor center is at motor_position
@@ -566,12 +747,19 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     else:
         initial_thrust = float(thrust_curve)
     
-    # Total initial mass = airframe + motor dry + propellants + pressurant gas
-    total_initial_mass = rocket_mass + motor_dry_mass + m_lox0 + m_rp10 + 0.1  # 0.1 for pressurant gas
+    # Total initial mass = airframe + motor dry (includes engine + tank structures) + propellants + pressurant gas
+    total_initial_mass = rocket_mass + motor_dry_mass + m_lox0 + m_rp10 + m_pressurant
     initial_twr = initial_thrust / (total_initial_mass * g0)
     
-    print(f"Initial thrust: {initial_thrust:.1f} N")
-    print(f"Total initial mass: {total_initial_mass:.2f} kg")
+    print(f"\nMass Summary:")
+    print(f"  Airframe: {rocket_mass:.2f} kg")
+    print(f"  Motor dry (engine + tank structures): {motor_dry_mass:.2f} kg")
+    print(f"  LOX propellant: {m_lox0:.2f} kg")
+    print(f"  Fuel propellant: {m_rp10:.2f} kg")
+    if m_pressurant > 0:
+        print(f"  Pressurant gas: {m_pressurant:.3f} kg")
+    print(f"  TOTAL: {total_initial_mass:.2f} kg")
+    print(f"\nInitial thrust: {initial_thrust:.1f} N")
     print(f"Initial T/W ratio: {initial_twr:.3f}")
     
     if initial_twr < 1.0:

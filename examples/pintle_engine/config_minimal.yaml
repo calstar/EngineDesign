@@ -320,6 +320,6 @@ environment:
   latitude: 35.34722
   longitude: -117.8099547
   elevation: 626.67
-  p_amb: 101325.0
+  # p_amb removed - RocketPy uses GFS atmospheric forecast
 thrust:
   burn_time: 10.0

@@ -427,35 +427,42 @@ InjectorConfig = Union[PintleInjectorConfig, CoaxialInjectorConfig, ImpingingInj
 # Flight simulation configuration classes
 class LOXTankConfig(BaseModel):
     """LOX tank geometry configuration for flight simulation"""
-    lox_h: float = Field(gt=0, description="LOX tank height [m]")
-    lox_radius: float = Field(gt=0, description="LOX tank radius [m]")
-    ox_tank_pos: float = Field(description="Oxidizer tank position [m]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Initial LOX PROPELLANT mass [kg] (not tank structure). This contributes to total wet mass.")
+    lox_h: float = Field(gt=0, description="LOX tank height (internal cylindrical length, not including end caps) [m]")
+    lox_radius: float = Field(gt=0, description="LOX tank internal radius [m]")
+    ox_tank_pos: float = Field(description="LOX tank center position relative to nozzle exit (positive = above nozzle) [m]")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial LOX PROPELLANT mass [kg] (liquid only, not tank structure). Depletes during burn.")
 
 
 class FuelTankConfig(BaseModel):
     """Fuel tank geometry configuration for flight simulation"""
-    rp1_h: float = Field(gt=0, description="RP-1 tank height [m]")
-    rp1_radius: float = Field(gt=0, description="RP-1 tank radius [m]")
-    fuel_tank_pos: float = Field(description="Fuel tank position [m]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Initial RP-1 PROPELLANT mass [kg] (not tank structure). This contributes to total wet mass.")
+    rp1_h: float = Field(gt=0, description="RP-1 tank height (internal cylindrical length, not including end caps) [m]")
+    rp1_radius: float = Field(gt=0, description="RP-1 tank internal radius [m]")
+    fuel_tank_pos: float = Field(description="Fuel tank center position relative to nozzle exit (positive = above, negative = below nozzle) [m]")
+    mass: Optional[float] = Field(default=None, gt=0, description="Initial RP-1 PROPELLANT mass [kg] (liquid only, not tank structure). Depletes during burn.")
 
 
 class PressTankConfig(BaseModel):
-    """Pressurant tank geometry configuration for flight simulation"""
-    press_h: float = Field(gt=0, description="Pressurant tank height [m]")
-    press_radius: float = Field(gt=0, description="Pressurant tank radius [m]")
-    pres_tank_pos: float = Field(description="Pressurant tank position [m]")
-    mass: Optional[float] = Field(default=None, gt=0, description="Initial fluid mass [kg] (for flight simulation)")
+    """Pressurant (COPV) tank configuration for flight simulation.
+    
+    For gaseous nitrogen (GN2) pressurization system.
+    - dry_mass: COPV tank structure mass (walls, fittings)
+    - initial_gas_mass: Initial N2 gas mass from COPV sizing
+    """
+    press_h: float = Field(gt=0, description="Pressurant tank height (internal cylindrical length) [m]")
+    press_radius: float = Field(gt=0, description="Pressurant tank internal radius [m]")
+    pres_tank_pos: float = Field(description="Pressurant tank center position relative to nozzle exit (positive = above nozzle) [m]")
+    dry_mass: Optional[float] = Field(default=None, gt=0, description="COPV tank structure mass (tank walls only, no gas) [kg]")
+    initial_gas_mass: Optional[float] = Field(default=None, gt=0, description="Initial N2 pressurant gas mass [kg] (from COPV sizing)")
+    mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Use initial_gas_mass instead")
 
 
 class FinsConfig(BaseModel):
     """Fins configuration for flight simulation"""
-    no_fins: int = Field(gt=0, description="Number of fins")
-    root_chord: float = Field(gt=0, description="Root chord [m]")
-    tip_chord: float = Field(gt=0, description="Tip chord [m]")
-    fin_span: float = Field(gt=0, description="Fin span [m]")
-    fin_position: float = Field(description="Fin position [m]")
+    no_fins: int = Field(gt=0, description="Number of fins (typically 3 or 4)")
+    root_chord: float = Field(gt=0, description="Root chord length (fin edge attached to body) [m]")
+    tip_chord: float = Field(gt=0, description="Tip chord length (outer fin edge) [m]")
+    fin_span: float = Field(gt=0, description="Fin span (height from body to fin tip) [m]")
+    fin_position: float = Field(description="Fin leading edge position from rocket tail (z=0) [m]")
 
 
 class MotorConfig(BaseModel):
@@ -493,9 +500,9 @@ class RocketConfig(BaseModel):
     propulsion_cm_offset: float = Field(default=0.3, description="COMPUTED: Propulsion system CM above nozzle exit [m]")
     
     # Common parameters
-    inertia: list[float] = Field(description="Total rocket inertia (dry, without propellants) [kg·m²]")
-    radius: float = Field(gt=0, description="Rocket radius [m]")
-    motor_position: float = Field(default=0.5, description="Nozzle exit position from rocket tail [m]")
+    inertia: list[float] = Field(description="AIRFRAME inertia only (without motor/propulsion), relative to airframe CM [Ixx, Iyy, Izz] [kg·m²]. Motor inertia is added separately by RocketPy from propulsion_dry_mass.")
+    radius: float = Field(gt=0, description="Rocket body radius (outer diameter / 2) [m]")
+    motor_position: float = Field(default=0.5, description="Nozzle exit position from rocket tail (z=0 at tail, positive toward nose) [m]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
     
     # LEGACY fields - kept for backward compatibility
@@ -508,11 +515,11 @@ class RocketConfig(BaseModel):
 
 class EnvironmentConfig(BaseModel):
     """Environment configuration for flight simulation"""
-    date: list[int] = Field(description="Date [year, month, day, hour]")
-    latitude: float = Field(ge=-90, le=90, description="Latitude [deg]")
-    longitude: float = Field(ge=-180, le=180, description="Longitude [deg]")
-    elevation: float = Field(description="Elevation [m]")
-    p_amb: float = Field(gt=0, description="Ambient pressure [Pa]")
+    date: list[int] = Field(description="Launch date and time [year, month, day, hour (0-23 UTC)]")
+    latitude: float = Field(ge=-90, le=90, description="Launch site latitude (positive = North, negative = South) [deg]")
+    longitude: float = Field(ge=-180, le=180, description="Launch site longitude (positive = East, negative = West) [deg]")
+    elevation: float = Field(description="Launch site elevation above sea level (ground level) [m]")
+    # NOTE: p_amb removed - RocketPy fetches atmospheric pressure from GFS forecast based on date/location
 
 
 class ThrustConfig(BaseModel):
