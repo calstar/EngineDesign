@@ -479,12 +479,14 @@ class RocketConfig(BaseModel):
     - engine_mass: Engine + ALL plumbing (chamber, nozzle, injector, valves, fittings, lines)
     - lox_tank_structure_mass: Empty LOX tank only (walls, no fittings)
     - fuel_tank_structure_mass: Empty fuel tank only (walls, no fittings)
+    - copv_dry_mass: Empty COPV tank only (walls, no pressurant gas)
     - engine_cm_offset: Height of engine CM above nozzle exit
+    - rocket_length: Total rocket length (tail to nose tip) for MoI estimation
     
     propulsion_dry_mass and propulsion_cm_offset are COMPUTED from the above.
     
-    Total dry mass = airframe_mass + engine_mass + lox_tank_structure_mass + fuel_tank_structure_mass
-    Total wet mass = dry mass + lox_tank.mass + fuel_tank.mass (propellants)
+    Total dry mass = airframe_mass + engine_mass + lox_tank_structure_mass + fuel_tank_structure_mass + copv_dry_mass
+    Total wet mass = dry mass + lox_tank.mass + fuel_tank.mass (propellants) + press_tank.initial_gas_mass
     
     LEGACY fields (mass, motor.dry_mass) still supported for backward compatibility.
     """
@@ -499,9 +501,13 @@ class RocketConfig(BaseModel):
     propulsion_dry_mass: Optional[float] = Field(default=None, gt=0, description="COMPUTED: Total propulsion dry mass (engine + tanks) [kg]")
     propulsion_cm_offset: float = Field(default=0.3, description="COMPUTED: Propulsion system CM above nozzle exit [m]")
     
+    # COPV tank structure mass (for blowdown systems)
+    copv_dry_mass: Optional[float] = Field(default=None, gt=0, description="COPV tank structure mass (tank walls only, no pressurant gas) [kg]")
+    
     # Common parameters
     inertia: list[float] = Field(description="AIRFRAME inertia only (without motor/propulsion), relative to airframe CM [Ixx, Iyy, Izz] [kg·m²]. Motor inertia is added separately by RocketPy from propulsion_dry_mass.")
     radius: float = Field(gt=0, description="Rocket body radius (outer diameter / 2) [m]")
+    rocket_length: Optional[float] = Field(default=None, gt=0, description="Total rocket length from tail to nose tip [m]. Used for MoI estimation.")
     motor_position: float = Field(default=0.5, description="Nozzle exit position from rocket tail (z=0 at tail, positive toward nose) [m]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
     
