@@ -5367,7 +5367,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         rocket.setdefault("airframe_mass", 78.72)
         rocket.setdefault("propulsion_dry_mass", 24.0)
         rocket.setdefault("propulsion_cm_offset", 0.4)
-        rocket.setdefault("motor_position", 0.5)
+        rocket.setdefault("motor_position", 0.0)
         rocket.setdefault("inertia", [8.0, 8.0, 0.5])
         rocket.setdefault("radius", 0.1015)
         
@@ -5450,7 +5450,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             _motor_pos = rocket.get("motor_position")
             motor_pos = st.number_input(
                 "Motor position [m]", 
-                value=float(_motor_pos) if _motor_pos is not None else 0.5, 
+                value=float(_motor_pos) if _motor_pos is not None else 0.0, 
                 key="flight_motor_position",
                 help="Distance from rocket tail to nozzle exit. This is the origin (0) for tank positions. Typical: 0.3-0.8m."
             )

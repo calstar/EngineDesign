@@ -17,7 +17,7 @@ import numpy as np
 from pintle_pipeline.stability_analysis import (
     calculate_chugging_frequency,
     calculate_acoustic_modes,
-    calculate_feed_system_stability,
+    analyze_feed_system_stability,
 )
 
 

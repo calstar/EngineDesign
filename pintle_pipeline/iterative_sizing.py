@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, Callable
 import numpy as np
 from pintle_pipeline.config_schemas import PintleEngineConfig, AblativeCoolingConfig, GraphiteInsertConfig
-from pintle_pipeline.time_varying_solver import TimeVaryingSolver, TimeVaryingState
+from pintle_pipeline.time_varying_solver import TimeVaryingCoupledSolver, TimeVaryingState
 
 
 def check_sizing_requirements(
@@ -201,13 +201,17 @@ def iterative_size_ablative_graphite(
     iteration_history : List[Dict]
         History of each iteration (config, results, check_results)
     """
+    from pintle_models.runner import PintleEngineRunner
+    
     current_config = base_config
     iteration_history = []
     
     for iteration in range(max_iterations):
-        # Run time series
-        solver = TimeVaryingSolver(current_config)
-        results = solver.solve_time_series(time_series, P_tank_O, P_tank_F)
+        # Run time series using the coupled solver
+        runner = PintleEngineRunner(current_config)
+        solver = TimeVaryingCoupledSolver(current_config, runner.cea_cache)
+        states = solver.solve_time_series(time_series, P_tank_O, P_tank_F)
+        results = {"state_history": states, **solver.get_results_dict()}
         
         # Check requirements
         check_results = check_sizing_requirements(results["state_history"], current_config)

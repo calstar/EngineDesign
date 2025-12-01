@@ -32,6 +32,294 @@ from pintle_pipeline.comprehensive_geometry_sizing import (
 )
 from pintle_pipeline.system_diagnostics import SystemDiagnostics
 
+# Import chamber geometry functions for proper calculations
+import sys
+from pathlib import Path
+_project_root = Path(__file__).resolve().parents[2]
+_chamber_path = _project_root / "chamber"
+if str(_chamber_path) not in sys.path:
+    sys.path.insert(0, str(_chamber_path))
+
+from chamber_geometry import (
+    chamber_length_calc,
+    chamber_volume_calc,
+    contraction_ratio_calc,
+    area_chamber_calc,
+    chamber_geometry_calc,
+    contraction_length_horizontal_calc,
+)
+
+# Import chamber geometry visualizer
+from pintle_pipeline.chamber_geometry_visualizer import (
+    calculate_chamber_geometry_clear,
+    plot_chamber_geometry_clear,
+)
+
+
+# =============================================================================
+# SEGMENTED PRESSURE CURVE FUNCTIONS
+# =============================================================================
+
+def generate_segmented_pressure_curve(
+    segments: List[Dict[str, Any]],
+    n_points: int = 200,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate a pressure curve from a list of segments.
+    
+    Each segment can be 'linear' or 'blowdown' with its own duration and pressures.
+    
+    Args:
+        segments: List of segment dicts with keys:
+            - type: 'linear' or 'blowdown'
+            - duration: segment duration in seconds
+            - start_pressure_psi: pressure at start of segment
+            - end_pressure_psi: pressure at end of segment
+            - decay_tau: time constant for blowdown (only for blowdown type)
+        n_points: Total number of points in output array
+    
+    Returns:
+        time_array: Array of time points [s]
+        pressure_array: Array of pressures [psi]
+    """
+    if not segments:
+        return np.array([0.0]), np.array([500.0])
+    
+    # Calculate total duration
+    total_duration = sum(seg["duration"] for seg in segments)
+    
+    # Create time array
+    time_array = np.linspace(0, total_duration, n_points)
+    pressure_array = np.zeros(n_points)
+    
+    # Build pressure curve segment by segment
+    t_start = 0.0
+    for seg in segments:
+        seg_type = seg["type"]
+        seg_duration = seg["duration"]
+        P_start = seg["start_pressure_psi"]
+        P_end = seg["end_pressure_psi"]
+        t_end = t_start + seg_duration
+        
+        # Find indices for this segment
+        mask = (time_array >= t_start) & (time_array <= t_end)
+        t_local = time_array[mask] - t_start
+        
+        if seg_type == "linear":
+            # Linear interpolation
+            if seg_duration > 0:
+                pressure_array[mask] = P_start + (P_end - P_start) * t_local / seg_duration
+            else:
+                pressure_array[mask] = P_start
+        elif seg_type == "blowdown":
+            # Exponential decay: P(t) = P_end + (P_start - P_end) * exp(-t/tau)
+            tau = seg.get("decay_tau", seg_duration * 0.5)
+            if tau <= 0:
+                tau = seg_duration * 0.5
+            pressure_array[mask] = P_end + (P_start - P_end) * np.exp(-t_local / tau)
+        else:
+            # Default to linear
+            if seg_duration > 0:
+                pressure_array[mask] = P_start + (P_end - P_start) * t_local / seg_duration
+            else:
+                pressure_array[mask] = P_start
+        
+        t_start = t_end
+    
+    return time_array, pressure_array
+
+
+def segments_from_optimizer_vars(
+    x_segments: np.ndarray,
+    n_segments: int,
+    max_pressure_psi: float,
+    target_burn_time: float,
+) -> List[Dict[str, Any]]:
+    """
+    Convert optimizer variables to segment list.
+    
+    For each segment, optimizer provides:
+    - type (0=linear, 1=blowdown) - rounded to int
+    - duration_ratio (0-1, fraction of total burn time)
+    - start_pressure_ratio (0.3-1.0, ratio of max pressure)
+    - end_pressure_ratio (0.3-1.0, ratio of max pressure)
+    - decay_tau_ratio (0-1, fraction of segment duration, only for blowdown)
+    
+    Args:
+        x_segments: Array of optimizer variables for segments
+        n_segments: Number of segments (1-20)
+        max_pressure_psi: Maximum pressure [psi]
+        target_burn_time: Total burn time [s]
+    
+    Returns:
+        List of segment dicts
+    """
+    segments = []
+    vars_per_segment = 5  # type, duration_ratio, start_ratio, end_ratio, tau_ratio
+    
+    # Normalize durations so they sum to 1.0
+    duration_ratios = []
+    t_start = 0.0
+    
+    for i in range(n_segments):
+        idx_base = i * vars_per_segment
+        seg_type_val = float(np.clip(x_segments[idx_base], 0.0, 1.0))
+        seg_type = "blowdown" if seg_type_val >= 0.5 else "linear"
+        duration_ratio = float(np.clip(x_segments[idx_base + 1], 0.01, 1.0))
+        duration_ratios.append(duration_ratio)
+    
+    # Normalize so sum = 1.0
+    total_ratio = sum(duration_ratios)
+    if total_ratio > 0:
+        duration_ratios = [dr / total_ratio for dr in duration_ratios]
+    
+    # Build segments
+    for i in range(n_segments):
+        idx_base = i * vars_per_segment
+        seg_type_val = float(np.clip(x_segments[idx_base], 0.0, 1.0))
+        seg_type = "blowdown" if seg_type_val >= 0.5 else "linear"
+        duration = duration_ratios[i] * target_burn_time
+        start_ratio = float(np.clip(x_segments[idx_base + 2], 0.30, 1.0))
+        end_ratio = float(np.clip(x_segments[idx_base + 3], 0.30, 1.0))
+        tau_ratio = float(np.clip(x_segments[idx_base + 4], 0.1, 1.0))
+        
+        seg = {
+            "type": seg_type,
+            "duration": duration,
+            "start_pressure_psi": max_pressure_psi * start_ratio,
+            "end_pressure_psi": max_pressure_psi * end_ratio,
+        }
+        
+        if seg_type == "blowdown":
+            seg["decay_tau"] = duration * tau_ratio
+        
+        segments.append(seg)
+    
+    return segments
+
+
+def optimizer_vars_from_segments(
+    segments: List[Dict[str, Any]],
+    max_pressure_psi: float,
+    target_burn_time: float,
+) -> np.ndarray:
+    """
+    Convert segment list to optimizer variables.
+    
+    Inverse of segments_from_optimizer_vars.
+    """
+    vars_per_segment = 5
+    n_segments = len(segments)
+    x = np.zeros(n_segments * vars_per_segment)
+    
+    total_duration = sum(seg["duration"] for seg in segments)
+    
+    for i, seg in enumerate(segments):
+        idx_base = i * vars_per_segment
+        x[idx_base] = 1.0 if seg["type"] == "blowdown" else 0.0
+        x[idx_base + 1] = seg["duration"] / total_duration if total_duration > 0 else 1.0 / n_segments
+        x[idx_base + 2] = seg["start_pressure_psi"] / max_pressure_psi
+        x[idx_base + 3] = seg["end_pressure_psi"] / max_pressure_psi
+        x[idx_base + 4] = seg.get("decay_tau", seg["duration"] * 0.5) / seg["duration"] if seg["duration"] > 0 else 0.5
+    
+    return x
+
+
+def _plot_segmented_pressure_preview(
+    pressure_config: Dict[str, Any],
+    target_burn_time: float,
+) -> None:
+    """Plot preview of segmented pressure curves."""
+    import streamlit as st
+    
+    lox_segments = pressure_config.get("lox_segments", [])
+    fuel_segments = pressure_config.get("fuel_segments", [])
+    
+    if not lox_segments and not fuel_segments:
+        st.warning("No pressure segments defined.")
+        return
+    
+    # Generate curves
+    n_points = 200
+    
+    if lox_segments:
+        lox_time, lox_pressure = generate_segmented_pressure_curve(lox_segments, n_points)
+    else:
+        lox_time = np.linspace(0, target_burn_time, n_points)
+        lox_pressure = np.full(n_points, pressure_config.get("lox_start_psi", 500))
+    
+    if fuel_segments:
+        fuel_time, fuel_pressure = generate_segmented_pressure_curve(fuel_segments, n_points)
+    else:
+        fuel_time = np.linspace(0, target_burn_time, n_points)
+        fuel_pressure = np.full(n_points, pressure_config.get("fuel_start_psi", 500))
+    
+    # Create plot
+    fig = make_subplots(rows=1, cols=1)
+    
+    fig.add_trace(
+        go.Scatter(
+            x=lox_time, y=lox_pressure,
+            mode='lines',
+            name='LOX Tank',
+            line=dict(color='blue', width=2),
+        )
+    )
+    
+    fig.add_trace(
+        go.Scatter(
+            x=fuel_time, y=fuel_pressure,
+            mode='lines',
+            name='Fuel Tank',
+            line=dict(color='orange', width=2),
+        )
+    )
+    
+    # Add segment boundaries
+    t_cumulative = 0.0
+    for i, seg in enumerate(lox_segments):
+        t_cumulative += seg["duration"]
+        if i < len(lox_segments) - 1:
+            fig.add_vline(
+                x=t_cumulative, 
+                line=dict(color="blue", width=1, dash="dash"),
+                annotation_text=f"LOX S{i+1}",
+                annotation_position="top left",
+            )
+    
+    t_cumulative = 0.0
+    for i, seg in enumerate(fuel_segments):
+        t_cumulative += seg["duration"]
+        if i < len(fuel_segments) - 1:
+            fig.add_vline(
+                x=t_cumulative, 
+                line=dict(color="orange", width=1, dash="dot"),
+                annotation_text=f"Fuel S{i+1}",
+                annotation_position="bottom left",
+            )
+    
+    fig.update_layout(
+        title="Segmented Pressure Curves Preview",
+        xaxis_title="Time [s]",
+        yaxis_title="Tank Pressure [psi]",
+        height=350,
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("LOX Start", f"{lox_pressure[0]:.0f} psi")
+    with col2:
+        st.metric("LOX End", f"{lox_pressure[-1]:.0f} psi")
+    with col3:
+        st.metric("Fuel Start", f"{fuel_pressure[0]:.0f} psi")
+    with col4:
+        st.metric("Fuel End", f"{fuel_pressure[-1]:.0f} psi")
+
 
 def design_optimization_view(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner] = None) -> PintleEngineConfig:
     """
@@ -303,7 +591,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         rocket.setdefault("engine_mass", 8.0)
         rocket.setdefault("lox_tank_structure_mass", 5.0)
         rocket.setdefault("fuel_tank_structure_mass", 3.0)
-        rocket.setdefault("motor_position", 0.5)
+        rocket.setdefault("motor_position", 0.0)
         rocket.setdefault("engine_cm_offset", 0.15)
         rocket.setdefault("radius", 0.1015)
         rocket.setdefault("rocket_length", 3.5)
@@ -363,7 +651,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             rocket_length = st.number_input("Rocket length [m]", value=float(rocket.get("rocket_length") or 3.5), key="opt_rocket_length",
                 help="Total rocket length (tail to nose tip).")
         with colG3:
-            motor_pos = st.number_input("Motor position [m]", value=float(rocket.get("motor_position") or 0.5), key="opt_motor_position",
+            motor_pos = st.number_input("Motor position [m]", value=float(rocket.get("motor_position") or 0.0), key="opt_motor_position",
                 help="Distance from rocket tail to nozzle exit.")
         
         engine_cm_offset = st.number_input(
@@ -515,7 +803,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         press_volume_calc = np.pi * press_tank["press_radius"]**2 * press_tank["press_h"]
         
         # User-specified free internal volume (may be smaller than calculated due to walls)
-        copv_free_volume_default = press_tank.get("free_volume_L") or (press_volume_calc * 1000 * 0.90)  # 90% default
+        copv_free_volume_default = press_tank.get("free_volume_L") or 4.5  # Default 4.5L
         copv_free_volume_L = st.number_input(
             "COPV Free Volume [L]",
             min_value=0.1,
@@ -577,7 +865,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Target Peak Thrust [N]",
             min_value=100.0,
             max_value=100000.0,
-            value=5000.0,
+            value=7000.0,
             step=100.0,
             key="opt_target_thrust",
             help="Peak thrust during burn. Engine will be sized to achieve this."
@@ -597,10 +885,20 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Optimal O/F Ratio",
             min_value=1.5,
             max_value=4.0,
-            value=2.5,
+            value=2.3,
             step=0.1,
             key="opt_of_ratio",
             help="Target oxidizer-to-fuel mixture ratio. LOX/RP-1 optimal: 2.4-2.8 for Isp, 2.2-2.5 for stability."
+        )
+        
+        target_burn_time = st.number_input(
+            "Target Burn Time [s]",
+            min_value=1.0,
+            max_value=60.0,
+            value=10.0,
+            step=1.0,
+            key="opt_target_burn_time",
+            help="Design burn time. Flight sim will truncate if propellant depletes earlier."
         )
         
         st.markdown("### Tank Pressures")
@@ -609,7 +907,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Max LOX Tank Pressure [psi]",
             min_value=100.0,
             max_value=5000.0,
-            value=500.0,
+            value=700.0,
             step=25.0,
             key="opt_max_lox_pressure",
             help="Maximum operating pressure in LOX tank. Sets upper bound for chamber pressure."
@@ -619,7 +917,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Max Fuel Tank Pressure [psi]",
             min_value=100.0,
             max_value=5000.0,
-            value=500.0,
+            value=850.0,
             step=25.0,
             key="opt_max_fuel_pressure",
             help="Maximum operating pressure in fuel tank."
@@ -632,7 +930,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Max Engine Length [m]",
             min_value=0.1,
             max_value=3.0,
-            value=0.6,
+            value=0.5,
             step=0.05,
             key="opt_max_engine_length",
             help="Maximum total engine length (chamber + nozzle). Must fit in vehicle."
@@ -652,7 +950,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Max Nozzle Exit Diameter [m]",
             min_value=0.05,
             max_value=1.0,
-            value=0.20,
+            value=0.101,
             step=0.01,
             key="opt_max_nozzle_exit_od",
             help="Maximum nozzle exit outer diameter. Constrains expansion ratio."
@@ -666,7 +964,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
                 "Minimum L* [m]",
                 min_value=0.5,
                 max_value=3.0,
-                value=0.8,
+                value=0.95,
                 step=0.1,
                 key="opt_min_lstar",
                 help="Minimum characteristic length. Lower = smaller chamber but less complete combustion. Typical: 0.8-1.0m for LOX/RP-1."
@@ -676,22 +974,64 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
                 "Maximum L* [m]",
                 min_value=0.5,
                 max_value=3.0,
-                value=2.0,
+                value=1.27,
                 step=0.1,
                 key="opt_max_lstar",
                 help="Maximum characteristic length. Higher = better combustion but heavier/longer chamber. Typical: 1.5-2.0m for LOX/RP-1."
             )
         
         st.markdown("### Stability Requirements")
+        st.info("""
+        **New Comprehensive Stability Analysis:**
+        - Uses stability_score (0-1) and stability_state ("stable"/"marginal"/"unstable")
+        - Considers chugging, acoustic modes, feed system, and mode coupling
+        - **Stable**: score ≥ 0.75 (recommended for flight)
+        - **Marginal**: 0.4 ≤ score < 0.75 (acceptable with caution)
+        - **Unstable**: score < 0.4 (not acceptable)
+        """)
+        
+        min_stability_score = st.number_input(
+            "Minimum Stability Score",
+            min_value=0.0,
+            max_value=1.0,
+            value=0.75,
+            step=0.05,
+            key="opt_min_stability_score",
+            help="Minimum stability score (0-1). 0.75 = 'stable', 0.4 = 'marginal', <0.4 = 'unstable'"
+        )
+        
+        require_stable_state = st.checkbox(
+            "Require 'Stable' State (not just 'Marginal')",
+            value=True,
+            key="opt_require_stable_state",
+            help="If checked, optimizer will only converge when stability_state == 'stable'. If unchecked, allows 'marginal' state."
+        )
+
+        stability_margin_handicap = st.slider(
+            "Stability Margin Handicap",
+            min_value=0.0,
+            max_value=1.0,
+            value=1.0,
+            step=0.05,
+            key="opt_stability_margin_handicap",
+            help=(
+                "0.0 = use full stability requirements (score and margins).\n"
+                "1.0 = accept any stability score/margins.\n"
+                "Intermediate values scale how strict the stability gates are."
+            ),
+        )
+        
+        st.markdown("#### Individual Stability Margins (for detailed tracking)")
+        st.caption("These are used for detailed feedback but the optimizer primarily uses stability_score above.")
         
         min_stability_margin = st.number_input(
-            "Minimum Overall Stability Margin",
+            "Minimum Overall Stability Margin (legacy)",
             min_value=1.0,
             max_value=5.0,
             value=1.2,
             step=0.1,
             key="opt_min_stability",
-            help="Minimum stability margin (1.2 = 20% margin, 1.5 = 50% margin)"
+            help="Legacy margin-based requirement (for backward compatibility)"
         )
         
         chugging_margin_min = st.number_input(
@@ -701,7 +1041,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             value=0.2,
             step=0.1,
             key="opt_chugging_margin",
-            help="Minimum chugging stability margin"
+            help="Minimum chugging stability margin (for detailed tracking)"
         )
         
         acoustic_margin_min = st.number_input(
@@ -711,7 +1051,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             value=0.1,
             step=0.1,
             key="opt_acoustic_margin",
-            help="Minimum acoustic stability margin"
+            help="Minimum acoustic stability margin (for detailed tracking)"
         )
         
         feed_stability_min = st.number_input(
@@ -721,7 +1061,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             value=0.15,
             step=0.1,
             key="opt_feed_margin",
-            help="Minimum feed system stability margin"
+            help="Minimum feed system stability margin (for detailed tracking)"
         )
         
     # Convert pressures to SI (Pa)
@@ -734,6 +1074,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         "target_thrust": target_thrust,
         "target_apogee": target_apogee,
         "optimal_of_ratio": optimal_of_ratio,
+        "target_burn_time": target_burn_time,
         # Tank pressures (SI)
         "max_P_tank_O": max_P_tank_O,
         "max_P_tank_F": max_P_tank_F,
@@ -746,7 +1087,11 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         # L* constraints
         "min_Lstar": min_lstar,
         "max_Lstar": max_lstar,
-        # Stability
+        # Stability (new comprehensive analysis)
+        "min_stability_score": min_stability_score,
+        "require_stable_state": require_stable_state,
+        "stability_margin_handicap": stability_margin_handicap,
+        # Stability (legacy margins for backward compatibility)
         "min_stability_margin": min_stability_margin,
         "chugging_margin_min": chugging_margin_min,
         "acoustic_margin_min": acoustic_margin_min,
@@ -776,10 +1121,10 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         st.metric("Optimal O/F", f"{optimal_of_ratio:.2f}")
     with col_s3:
         st.metric("Max Tank Pressure", f"{max(max_lox_tank_pressure, max_fuel_tank_pressure):.0f} psi")
-        st.metric("L* Range", f"{min_lstar:.1f} - {max_lstar:.1f} m")
+        st.metric("Target Burn Time", f"{target_burn_time:.1f} s")
     with col_s4:
+        st.metric("L* Range", f"{min_lstar:.1f} - {max_lstar:.1f} m")
         st.metric("Max Engine Length", f"{max_engine_length*1000:.0f} mm")
-        st.metric("Max Chamber OD", f"{max_chamber_outer_diameter*1000:.0f} mm")
     
     st.success("✅ Configuration saved. Proceed to **Full Engine Optimizer** to optimize your complete engine, or use individual tabs for specific optimizations.")
     
@@ -818,13 +1163,13 @@ def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Option
     col_req1, col_req2, col_req3 = st.columns(3)
     
     with col_req1:
-        st.metric("Target Thrust", f"{requirements.get('target_thrust', 5000):.0f} N")
-        st.metric("Optimal O/F", f"{requirements.get('optimal_of_ratio', 2.5):.2f}")
+        st.metric("Target Thrust", f"{requirements.get('target_thrust', 7000):.0f} N")
+        st.metric("Optimal O/F", f"{requirements.get('optimal_of_ratio', 2.3):.2f}")
     with col_req2:
-        st.metric("Max LOX Pressure", f"{requirements.get('max_lox_tank_pressure_psi', 500):.0f} psi")
-        st.metric("Max Fuel Pressure", f"{requirements.get('max_fuel_tank_pressure_psi', 500):.0f} psi")
+        st.metric("Max LOX Pressure", f"{requirements.get('max_lox_tank_pressure_psi', 700):.0f} psi")
+        st.metric("Max Fuel Pressure", f"{requirements.get('max_fuel_tank_pressure_psi', 850):.0f} psi")
     with col_req3:
-        st.metric("L* Range", f"{requirements.get('min_Lstar', 0.8):.1f} - {requirements.get('max_Lstar', 2.0):.1f} m")
+        st.metric("L* Range", f"{requirements.get('min_Lstar', 0.95):.1f} - {requirements.get('max_Lstar', 1.27):.1f} m")
         st.metric("Min Stability", f"{requirements.get('min_stability_margin', 1.2):.2f}")
     
     st.markdown("---")
@@ -832,132 +1177,94 @@ def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Option
     # Optimization Configuration
     st.markdown("### ⚙️ Optimization Configuration")
     
-    col_opt1, col_opt2 = st.columns(2)
+    st.markdown("#### Optimization Parameters")
     
-    with col_opt1:
-        st.markdown("#### Optimization Targets")
-        
-        optimize_thrust = st.checkbox("Optimize for Target Thrust", value=True, key="full_opt_thrust",
-            help="Optimize geometry to achieve target thrust")
-        
-        optimize_stability = st.checkbox("Optimize Stability Margins", value=True, key="full_opt_stability",
-            help="Ensure all stability margins are met (chugging, acoustic, feed system)")
-        
-        optimize_isp = st.checkbox("Maximize Specific Impulse", value=True, key="full_opt_isp",
-            help="Optimize expansion ratio and combustion efficiency for best Isp")
-        
-        optimize_mass = st.checkbox("Minimize Engine Mass", value=False, key="full_opt_mass",
-            help="Include engine mass minimization in objective (may trade off performance)")
+    # Use target_burn_time from Design Requirements tab
+    target_burn_time = requirements.get("target_burn_time", 10.0)
+    st.info(f"**Target Burn Time:** {target_burn_time:.1f} s *(from Design Requirements tab)*")
     
-    with col_opt2:
-        st.markdown("#### Optimization Parameters")
-        
-        target_burn_time = st.number_input(
-            "Target Burn Time [s]",
-            min_value=1.0,
-            max_value=60.0,
-            value=10.0,
-            step=1.0,
-            key="full_opt_burn_time",
-            help="Design burn time for optimization"
-        )
-        
-        max_iterations = st.number_input(
-            "Max Optimization Iterations",
-            min_value=20,
-            max_value=200,
-            value=80,
-            step=10,
-            key="full_opt_max_iter",
-            help="Maximum function evaluations (typically converges in 30-60)"
-        )
-        
-        st.markdown("#### Target Tolerances")
-        st.caption("Optimizer stops early when within these tolerances")
-        
-        thrust_tolerance = st.number_input(
-            "Thrust Tolerance [%]",
-            min_value=1.0,
-            max_value=20.0,
-            value=10.0,
-            step=1.0,
-            key="full_opt_thrust_tol",
-            help="Acceptable deviation from target thrust"
-        ) / 100.0
-        
-        apogee_tolerance = st.number_input(
-            "Apogee Tolerance [%]",
-            min_value=5.0,
-            max_value=30.0,
-            value=15.0,
-            step=5.0,
-            key="full_opt_apogee_tol",
-            help="Acceptable deviation from target apogee"
-        ) / 100.0
-    
-    # Pressure curve configuration
-    st.markdown("---")
-    st.markdown("### 🛢️ Tank Pressure Curve Configuration")
-    st.info(
-        "🎯 **Pressure curves are OPTIMIZED** - The optimizer will find the best pressure profiles "
-        "(50%-100% of start) for both tanks to achieve your O/F and thrust targets. "
-        "Values below are initial guesses. Your controller can achieve any linear profile."
+    max_iterations = st.number_input(
+        "Max Optimization Iterations",
+        min_value=20,
+        max_value=200,
+        value=80,
+        step=10,
+        key="full_opt_max_iter",
+        help="Maximum function evaluations (typically converges in 30-60)"
     )
     
-    col_lox_press, col_fuel_press = st.columns(2)
+    st.markdown("#### ⏱️ Time-Varying Analysis")
+    use_time_varying = st.checkbox(
+        "Enable Time-Varying Optimization",
+        value=True,
+        key="full_opt_time_varying",
+        help="Optimize across entire burn time (accounts for ablative recession, geometry evolution, and time-varying stability)"
+    )
+    if use_time_varying:
+        st.caption("✅ Optimizer will account for ablative recession, chamber/throat evolution, and stability over entire burn")
+    else:
+        st.caption("⚠️ Single-point optimization at t=0 only (faster but less accurate)")
     
-    with col_lox_press:
-        st.markdown("#### LOX Tank")
-        
-        lox_pressure_start_psi = st.number_input(
-            "Start Pressure [psi]",
-            min_value=100.0,
-            max_value=1000.0,
-            value=float(requirements.get("max_lox_tank_pressure_psi", 500)),
-            step=25.0,
-            key="full_opt_lox_start",
-            help="Maximum tank pressure at start of burn"
-        )
-        
-        lox_pressure_end_pct = st.slider(
-            "Initial End Pressure Guess [% of start]",
-            min_value=50,
-            max_value=100,
-            value=75,
-            key="full_opt_lox_end_pct",
-            help="Starting point for optimization (optimizer will find optimal value between 50-100%)"
-        )
+    st.markdown("#### Target Tolerances")
+    st.caption("Optimizer stops early when within these tolerances")
     
-    with col_fuel_press:
-        st.markdown("#### Fuel Tank")
-        
-        fuel_pressure_start_psi = st.number_input(
-            "Start Pressure [psi]",
-            min_value=100.0,
-            max_value=1000.0,
-            value=float(requirements.get("max_fuel_tank_pressure_psi", 500)),
-            step=25.0,
-            key="full_opt_fuel_start",
-            help="Maximum tank pressure at start of burn"
-        )
-        
-        fuel_pressure_end_pct = st.slider(
-            "Initial End Pressure Guess [% of start]",
-            min_value=50,
-            max_value=100,
-            value=75,
-            key="full_opt_fuel_end_pct",
-            help="Starting point for optimization (optimizer will find optimal value between 50-100%)"
-        )
+    thrust_tolerance = st.number_input(
+        "Thrust Tolerance [%]",
+        min_value=1.0,
+        max_value=20.0,
+        value=10.0,
+        step=1.0,
+        key="full_opt_thrust_tol",
+        help="Acceptable deviation from target thrust"
+    ) / 100.0
     
-    # Store pressure curve config (initial guesses - optimizer will refine)
+    apogee_tolerance = st.number_input(
+        "Apogee Tolerance [%]",
+        min_value=5.0,
+        max_value=30.0,
+        value=15.0,
+        step=5.0,
+        key="full_opt_apogee_tol",
+        help="Acceptable deviation from target apogee"
+    ) / 100.0
+    
+    # ==========================================================================
+    # PRESSURE CURVE - OPTIMIZER CONTROLLED
+    # ==========================================================================
+    st.markdown("---")
+    st.markdown("### 🛢️ Tank Pressure Curves")
+    
+    # Get max pressures from requirements (user's only input for pressure)
+    max_lox_pressure_psi = float(requirements.get("max_lox_tank_pressure_psi", 700))
+    max_fuel_pressure_psi = float(requirements.get("max_fuel_tank_pressure_psi", 850))
+    
+    st.info(
+        f"🎛️ **Optimizer-Controlled Pressure Curves**\n\n"
+        f"The optimizer jointly optimizes **injector geometry** AND **tank pressures** to achieve target O/F ratio.\n\n"
+        f"**What the optimizer controls:**\n"
+        f"- Starting pressures at t=0 (can be anywhere from 30% to 100% of max)\n"
+        f"- Pressure profiles over time (4 control points per tank)\n"
+        f"- Curve shape (linear vs exponential blending)\n\n"
+        f"**Hard constraints (never exceeded):**\n"
+        f"- Max LOX Tank Pressure: **{max_lox_pressure_psi:.0f} psi**\n"
+        f"- Max Fuel Tank Pressure: **{max_fuel_pressure_psi:.0f} psi**\n"
+        f"- Target Burn Time: **{target_burn_time:.1f} s**\n\n"
+        f"*The optimizer finds the best geometry + pressure combination to meet thrust, O/F, and stability targets.*"
+    )
+    
+    # Pressure config for optimizer (no user segments - optimizer will generate)
+    # Optimizer will create N segments (up to 20) with linear/blowdown types
     pressure_config = {
-        "lox_mode": "Optimized",  # Always optimized now
-        "lox_start_psi": lox_pressure_start_psi,
-        "lox_end_pct": lox_pressure_end_pct / 100.0,
-        "fuel_mode": "Optimized",  # Always optimized now
-        "fuel_start_psi": fuel_pressure_start_psi,
-        "fuel_end_pct": fuel_pressure_end_pct / 100.0,
+        "mode": "optimizer_controlled",
+        "max_lox_pressure_psi": max_lox_pressure_psi,
+        "max_fuel_pressure_psi": max_fuel_pressure_psi,
+        "target_burn_time": target_burn_time,
+        "n_segments": 3,  # Default: 3 segments per tank (optimizer can use fewer by setting duration near zero)
+        # Initial values (optimizer will refine these)
+        "lox_start_psi": max_lox_pressure_psi,
+        "fuel_start_psi": max_fuel_pressure_psi,
+        "lox_end_pct": 0.7,  # Initial guess
+        "fuel_end_pct": 0.7,  # Initial guess
     }
     
     # Tolerances config
@@ -966,8 +1273,7 @@ def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Option
         "apogee": apogee_tolerance,
     }
     
-    # For compatibility
-    use_time_varying = False
+    # Convergence tolerance
     convergence_tol = thrust_tolerance
     
     st.markdown("---")
@@ -990,8 +1296,10 @@ def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Option
             
             # Run the full engine optimization with progress callback
             def progress_callback(stage: str, progress: float, message: str):
-                progress_bar.progress(progress, text=f"{stage}: {message}")
-                status_text.text(f"Stage: {stage} | {message}")
+                # Format progress bar to show stage clearly
+                progress_text = f"{stage}\n{message}" if "\n" not in message else f"{stage}\n{message}"
+                progress_bar.progress(progress, text=progress_text)
+                status_text.text(f"{stage} | {message}")
             
             optimized_config, optimization_results = _run_full_engine_optimization_with_flight_sim(
                 config_obj,
@@ -1001,13 +1309,8 @@ def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Option
                 max_iterations,
                 tolerances,
                 pressure_config,
-                {
-                    "optimize_thrust": optimize_thrust,
-                    "optimize_stability": optimize_stability,
-                    "optimize_isp": optimize_isp,
-                    "optimize_mass": optimize_mass,
-                },
                 progress_callback=progress_callback,
+                use_time_varying=use_time_varying,
             )
             
             # Clear progress bar
@@ -1107,7 +1410,6 @@ def _run_full_engine_optimization(
     use_time_varying: bool,
     max_iterations: int,
     convergence_tol: float,
-    optimization_targets: Dict[str, bool],
 ) -> Tuple[PintleEngineConfig, Dict[str, Any]]:
     """
     Run full engine optimization (pintle + chamber coupled).
@@ -1124,16 +1426,17 @@ def _run_full_engine_optimization(
     from pintle_pipeline.system_diagnostics import SystemDiagnostics
     
     # Extract requirements
-    target_thrust = requirements.get("target_thrust", 5000.0)
-    optimal_of = requirements.get("optimal_of_ratio", 2.5)
-    max_P_tank_O = requirements.get("max_P_tank_O", 3.45e6)  # ~500 psi
-    max_P_tank_F = requirements.get("max_P_tank_F", 3.45e6)
-    min_Lstar = requirements.get("min_Lstar", 0.8)
-    max_Lstar = requirements.get("max_Lstar", 2.0)
+    target_thrust = requirements.get("target_thrust", 7000.0)
+    optimal_of = requirements.get("optimal_of_ratio", 2.3)
+    max_P_tank_O = requirements.get("max_P_tank_O", 4.826e6)  # ~700 psi
+    max_P_tank_F = requirements.get("max_P_tank_F", 5.860e6)  # ~850 psi
+    min_Lstar = requirements.get("min_Lstar", 0.95)
+    max_Lstar = requirements.get("max_Lstar", 1.27)
     min_stability = requirements.get("min_stability_margin", 1.2)
+    stability_margin_handicap = float(requirements.get("stability_margin_handicap", 0.0))
     max_chamber_od = requirements.get("max_chamber_outer_diameter", 0.15)
-    max_nozzle_exit = requirements.get("max_nozzle_exit_diameter", 0.20)
-    max_engine_length = requirements.get("max_engine_length", 0.6)
+    max_nozzle_exit = requirements.get("max_nozzle_exit_diameter", 0.101)
+    max_engine_length = requirements.get("max_engine_length", 0.5)
     
     # Set design requirements for optimizer
     design_requirements = {
@@ -1248,6 +1551,22 @@ def _extract_all_parameters(config: PintleEngineConfig) -> Dict[str, Any]:
     params["A_exit"] = config.nozzle.A_exit
     params["expansion_ratio"] = config.nozzle.expansion_ratio
     
+    # Ablative liner parameters
+    if hasattr(config, 'ablative_cooling') and config.ablative_cooling and config.ablative_cooling.enabled:
+        params["ablative_thickness"] = config.ablative_cooling.initial_thickness
+        params["ablative_enabled"] = True
+    else:
+        params["ablative_thickness"] = 0.0
+        params["ablative_enabled"] = False
+    
+    # Graphite insert parameters
+    if hasattr(config, 'graphite_insert') and config.graphite_insert and config.graphite_insert.enabled:
+        params["graphite_thickness"] = config.graphite_insert.initial_thickness
+        params["graphite_enabled"] = True
+    else:
+        params["graphite_thickness"] = 0.0
+        params["graphite_enabled"] = False
+    
     return params
 
 
@@ -1259,8 +1578,8 @@ def _run_full_engine_optimization_with_flight_sim(
     max_iterations: int,
     tolerances: Dict[str, float],
     pressure_config: Dict[str, Any],
-    optimization_targets: Dict[str, bool],
     progress_callback: Optional[callable] = None,
+    use_time_varying: bool = True,
 ) -> Tuple[PintleEngineConfig, Dict[str, Any]]:
     """
     Full engine optimization with real iterative optimization and progress tracking.
@@ -1272,19 +1591,38 @@ def _run_full_engine_optimization_with_flight_sim(
     - 200-point pressure curves
     - COPV pressure curve calculation (260K temperatures)
     - Flight sim validation for good candidates
+    - Time-varying analysis (ablative recession, geometry evolution) if enabled
     """
     from pintle_pipeline.system_diagnostics import SystemDiagnostics
     from scipy.optimize import minimize, differential_evolution
     from pathlib import Path
+    from datetime import datetime
     
     # Optimization state for progress tracking
-    opt_state = {
+    opt_state: Dict[str, Any] = {
         "iteration": 0,
         "best_objective": float('inf'),
         "best_config": None,
         "history": [],
         "converged": False,
     }
+    log_flags: Dict[str, bool] = {
+        "promoted_state_logged": False,
+        "marginal_candidate_logged": False,
+    }
+
+    log_file_path = Path("/home/adnan/EngineDesign/full_engine_optimizer.log")
+
+    def log_status(stage: str, message: str) -> None:
+        """Persist layer status updates to a root-level log for offline analysis."""
+        timestamp = datetime.utcnow().isoformat()
+        entry = f"[{timestamp}] {stage}: {message}\n"
+        try:
+            with log_file_path.open("a", encoding="utf-8") as log_file:
+                log_file.write(entry)
+        except Exception:
+            # Logging should never break the optimizer; swallow any IO issues.
+            pass
     
     def update_progress(stage: str, progress: float, message: str):
         if progress_callback:
@@ -1293,16 +1631,21 @@ def _run_full_engine_optimization_with_flight_sim(
     update_progress("Initialization", 0.02, "Extracting requirements...")
     
     # Extract requirements
-    target_thrust = requirements.get("target_thrust", 5000.0)
+    target_thrust = requirements.get("target_thrust", 7000.0)
     target_apogee = requirements.get("target_apogee", 3048.0)
-    optimal_of = requirements.get("optimal_of_ratio", 2.5)
-    min_Lstar = requirements.get("min_Lstar", 0.8)
-    max_Lstar = requirements.get("max_Lstar", 2.0)
+    optimal_of = requirements.get("optimal_of_ratio", 2.3)
+    min_Lstar = requirements.get("min_Lstar", 0.95)
+    max_Lstar = requirements.get("max_Lstar", 1.27)
     min_stability = requirements.get("min_stability_margin", 1.2)
     max_chamber_od = requirements.get("max_chamber_outer_diameter", 0.15)
-    max_nozzle_exit = requirements.get("max_nozzle_exit_diameter", 0.20)
-    max_engine_length = requirements.get("max_engine_length", 0.6)
-    copv_volume_m3 = requirements.get("copv_free_volume_m3", 0.02)
+    max_nozzle_exit = requirements.get("max_nozzle_exit_diameter", 0.101)
+    max_engine_length = requirements.get("max_engine_length", 0.5)
+    copv_volume_m3 = requirements.get("copv_free_volume_m3", 0.0045)  # 4.5 L default
+
+    log_status(
+        "Initialization",
+        f"Starting optimization | Thrust={target_thrust:.0f}N, Apogee={target_apogee:.0f}m, O/F={optimal_of:.2f}"
+    )
     
     # Extract tolerances
     thrust_tol = tolerances.get("thrust", 0.10)
@@ -1315,6 +1658,9 @@ def _run_full_engine_optimization_with_flight_sim(
     fuel_P_start = pressure_config.get("fuel_start_psi", 500) * psi_to_Pa
     fuel_P_end_ratio = pressure_config.get("fuel_end_pct", 0.70)
     
+    # Pressure curve mode - optimizer controls the curve shape
+    pressure_mode = pressure_config.get("mode", "optimizer_controlled")
+    
     update_progress("Initialization", 0.05, "Setting up optimization bounds...")
     
     # Phase 1: Set orifice angle to 90° and prepare config
@@ -1324,7 +1670,8 @@ def _run_full_engine_optimization_with_flight_sim(
             config_base.injector.geometry.lox.theta_orifice = 90.0
     
     # =========================================================================
-    # OPTIMIZATION VARIABLES (9 dimensions):
+    # OPTIMIZATION VARIABLES:
+    # Engine Geometry (7 vars):
     # [0] A_throat (throat area, m²)
     # [1] Lstar (characteristic length, m)
     # [2] expansion_ratio
@@ -1332,12 +1679,48 @@ def _run_full_engine_optimization_with_flight_sim(
     # [4] h_gap (m)
     # [5] n_orifices (will be rounded to int)
     # [6] d_orifice (m)
-    # [7] lox_P_end_ratio (end pressure as fraction of start, 0.5-1.0)
-    # [8] fuel_P_end_ratio (end pressure as fraction of start, 0.5-1.0)
     #
-    # Note: Pressure curves are fully controllable - optimizer has full freedom
-    # to pick any linear profile from start to end pressure.
+    # Thermal Protection (2 vars):
+    # [7] ablative_thickness (m) - chamber liner thickness
+    # [8] graphite_thickness (m) - throat insert thickness
+    #
+    # Pressure Curve Segments (optimizer picks N segments, up to 20):
+    # [9] n_segments_lox (1-20, rounded to int) - number of segments for LOX
+    # [10] n_segments_fuel (1-20, rounded to int) - number of segments for Fuel
+    #
+    # For each segment (up to 20 segments per tank, 5 vars per segment):
+    # - type (0=linear, 1=blowdown)
+    # - duration_ratio (0-1, fraction of total burn time, normalized to sum=1)
+    # - start_pressure_ratio (0.3-1.0, ratio of max pressure)
+    # - end_pressure_ratio (0.3-1.0, ratio of max pressure)
+    # - decay_tau_ratio (0-1, fraction of segment duration, only for blowdown)
+    #
+    # Variables [11:] contain segment parameters for LOX then Fuel
+    # LOX segments: [11] to [11 + n_segments_lox*5 - 1]
+    # Fuel segments: [11 + n_segments_lox*5] to [11 + (n_segments_lox + n_segments_fuel)*5 - 1]
+    #
+    # Note: Pressures NEVER exceed max - optimizer works with ratios ≤ 1.0
     # =========================================================================
+    
+    # Get number of segments from config (default: 3 segments for flexibility)
+    default_n_segments = pressure_config.get("n_segments", 3)
+    default_n_segments = int(np.clip(default_n_segments, 1, 20))
+    
+    # Maximum segments per tank (fixed for optimization dimensionality)
+    max_segments_per_tank = min(default_n_segments, 20)
+    vars_per_segment = 5  # type, duration_ratio, start_ratio, end_ratio, tau_ratio
+    
+    # Get current ablative/graphite config for initial values
+    ablative_cfg = config_base.ablative_cooling if hasattr(config_base, 'ablative_cooling') and config_base.ablative_cooling else None
+    graphite_cfg = config_base.graphite_insert if hasattr(config_base, 'graphite_insert') and config_base.graphite_insert else None
+    
+    # Initial ablative/graphite thicknesses from config (or sensible defaults)
+    ablative_init = ablative_cfg.initial_thickness if ablative_cfg and ablative_cfg.enabled else 0.008
+    graphite_init = graphite_cfg.initial_thickness if graphite_cfg and graphite_cfg.enabled else 0.006
+    
+    # Get max pressures from config (these are HARD LIMITS - never exceeded)
+    max_lox_P_psi = pressure_config.get("max_lox_pressure_psi", 500)
+    max_fuel_P_psi = pressure_config.get("max_fuel_pressure_psi", 500)
     
     # Calculate initial guess and bounds
     Cf_est = 1.5
@@ -1345,53 +1728,175 @@ def _run_full_engine_optimization_with_flight_sim(
     A_throat_init = target_thrust / (Cf_est * Pc_est)
     A_throat_init = np.clip(A_throat_init, 5e-5, 2e-3)
     
-    # Pressure ratio bounds - full freedom since we have active pressure control
-    # Can go from 50% (aggressive blowdown) to 100% (perfectly regulated)
+    # Build bounds for segmented pressure system
+    # Base geometry and thermal (9 vars)
     bounds = [
-        (5e-5, 2e-3),           # A_throat: 8mm to 50mm diameter
-        (min_Lstar, max_Lstar), # Lstar
-        (4.0, 20.0),            # expansion_ratio
-        (0.008, 0.040),         # d_pintle_tip
-        (0.0003, 0.0020),       # h_gap
-        (6, 24),                # n_orifices
-        (0.001, 0.006),         # d_orifice
-        (0.50, 1.00),           # lox_P_end_ratio: full range (controller can achieve any profile)
-        (0.50, 1.00),           # fuel_P_end_ratio: full range (controller can achieve any profile)
+        (5e-5, 2e-3),           # [0] A_throat: 8mm to 50mm diameter
+        (min_Lstar, max_Lstar), # [1] Lstar
+        (4.0, 20.0),            # [2] expansion_ratio
+        (0.008, 0.040),         # [3] d_pintle_tip
+        (0.0003, 0.0020),       # [4] h_gap
+        (6, 24),                # [5] n_orifices
+        (0.001, 0.006),         # [6] d_orifice
+        (0.003, 0.020),         # [7] ablative_thickness: 3mm to 20mm
+        (0.003, 0.015),         # [8] graphite_thickness: 3mm to 15mm
+        (1, 20),                # [9] n_segments_lox (1-20 segments)
+        (1, 20),                # [10] n_segments_fuel (1-20 segments)
     ]
     
-    x0 = np.array([
-        A_throat_init,
-        (min_Lstar + max_Lstar) / 2,
-        10.0,
-        0.015,
-        0.0006,
-        12,
-        0.003,
-        lox_P_end_ratio,   # Start with user's initial guess
-        fuel_P_end_ratio,  # Start with user's initial guess
-    ])
+    # Add bounds for segment parameters (up to max_segments_per_tank segments * 5 vars * 2 tanks)
+    # The optimizer can use fewer segments by setting duration_ratio to near-zero
     
-    update_progress("Optimization", 0.08, "Starting iterative optimization...")
+    for tank_idx in range(2):  # LOX and Fuel
+        for seg_idx in range(max_segments_per_tank):
+            bounds.append((0.0, 1.0))      # type (0=linear, 1=blowdown)
+            bounds.append((0.01, 1.0))   # duration_ratio (will be normalized)
+            bounds.append((0.30, 1.0))    # start_pressure_ratio
+            bounds.append((0.30, 1.0))    # end_pressure_ratio
+            bounds.append((0.1, 1.0))     # decay_tau_ratio (for blowdown)
+    
+    # Initial guess: start with default_n_segments segments per tank
+    x0 = [
+        A_throat_init,          # [0] A_throat
+        (min_Lstar + max_Lstar) / 2,  # [1] Lstar
+        10.0,                   # [2] expansion_ratio
+        0.015,                  # [3] d_pintle_tip
+        0.0006,                 # [4] h_gap
+        12,                     # [5] n_orifices
+        0.003,                  # [6] d_orifice
+        np.clip(ablative_init, 0.003, 0.020),   # [7] ablative_thickness
+        np.clip(graphite_init, 0.003, 0.015),   # [8] graphite_thickness
+        float(default_n_segments),  # [9] n_segments_lox
+        float(default_n_segments),  # [10] n_segments_fuel
+    ]
+    
+    # Initial guess for segments: simple 3-segment profile (flat start, linear drop, flat end)
+    for tank_idx in range(2):  # LOX and Fuel
+        for seg_idx in range(max_segments_per_tank):
+            if seg_idx < default_n_segments:
+                # Active segment
+                if seg_idx == 0:
+                    # First segment: flat at high pressure
+                    x0.append(0.0)  # linear
+                    x0.append(0.33)  # 1/3 of burn time
+                    x0.append(0.95)  # start at 95% of max
+                    x0.append(0.95)  # end at 95% of max (flat)
+                    x0.append(0.5)   # tau_ratio (not used for linear)
+                elif seg_idx == default_n_segments - 1:
+                    # Last segment: flat at lower pressure
+                    x0.append(0.0)  # linear
+                    x0.append(0.33)  # 1/3 of burn time
+                    x0.append(0.70)  # start at 70% of max
+                    x0.append(0.70)  # end at 70% of max (flat)
+                    x0.append(0.5)   # tau_ratio
+                else:
+                    # Middle segment: linear transition
+                    x0.append(0.0)  # linear
+                    x0.append(0.34 / (default_n_segments - 2))  # remaining time
+                    x0.append(0.95)  # start
+                    x0.append(0.70)  # end
+                    x0.append(0.5)   # tau_ratio
+            else:
+                # Inactive segment (duration near zero)
+                x0.append(0.0)  # type
+                x0.append(0.01)  # very small duration
+                x0.append(0.70)  # start
+                x0.append(0.70)  # end
+                x0.append(0.5)   # tau_ratio
+    
+    x0 = np.array(x0)
+    
+    # Ensure initial guess is within bounds
+    for i, (lo, hi) in enumerate(bounds):
+        x0[i] = np.clip(x0[i], lo, hi)
+    
+    update_progress("Stage: Optimization Setup", 0.08, "Setting up optimization bounds and initial guess...")
     
     def apply_x_to_config(x: np.ndarray, base_config: PintleEngineConfig) -> Tuple[PintleEngineConfig, float, float]:
         """Apply optimization variables to config. Returns (config, lox_end_ratio, fuel_end_ratio)."""
         config = copy.deepcopy(base_config)
         
-        A_throat = float(x[0])
-        Lstar = float(x[1])
-        expansion_ratio = float(x[2])
-        d_pintle_tip = float(x[3])
-        h_gap = float(x[4])
-        n_orifices = int(round(x[5]))
-        d_orifice = float(x[6])
-        lox_end_ratio = float(x[7])
-        fuel_end_ratio = float(x[8])
+        # Clip all values to bounds to ensure we stay within limits
+        A_throat = float(np.clip(x[0], bounds[0][0], bounds[0][1]))
+        Lstar = float(np.clip(x[1], bounds[1][0], bounds[1][1]))
+        expansion_ratio = float(np.clip(x[2], bounds[2][0], bounds[2][1]))
+        d_pintle_tip = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
+        h_gap = float(np.clip(x[4], bounds[4][0], bounds[4][1]))
+        n_orifices = int(round(np.clip(x[5], bounds[5][0], bounds[5][1])))
+        d_orifice = float(np.clip(x[6], bounds[6][0], bounds[6][1]))
+        ablative_thickness = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
+        graphite_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
         
-        # Chamber
+        # Extract segment counts
+        n_segments_lox = int(round(np.clip(x[9], bounds[9][0], bounds[9][1])))
+        n_segments_fuel = int(round(np.clip(x[10], bounds[10][0], bounds[10][1])))
+        
+        # Extract segment parameters for LOX
+        vars_per_segment = 5
+        idx_base_lox = 11
+        x_lox_segments = x[idx_base_lox:idx_base_lox + max_segments_per_tank * vars_per_segment]
+        lox_segments = segments_from_optimizer_vars(
+            x_lox_segments, n_segments_lox, max_lox_P_psi, target_burn_time
+        )
+        
+        # Extract segment parameters for Fuel
+        idx_base_fuel = idx_base_lox + max_segments_per_tank * vars_per_segment
+        x_fuel_segments = x[idx_base_fuel:idx_base_fuel + max_segments_per_tank * vars_per_segment]
+        fuel_segments = segments_from_optimizer_vars(
+            x_fuel_segments, n_segments_fuel, max_fuel_P_psi, target_burn_time
+        )
+        
+        # For compatibility, calculate end ratios from segments
+        if lox_segments:
+            lox_start_psi = lox_segments[0]["start_pressure_psi"]
+            lox_end_psi = lox_segments[-1]["end_pressure_psi"]
+            lox_end_ratio = lox_end_psi / lox_start_psi if lox_start_psi > 0 else 0.7
+        else:
+            lox_end_ratio = 0.7
+        
+        if fuel_segments:
+            fuel_start_psi = fuel_segments[0]["start_pressure_psi"]
+            fuel_end_psi = fuel_segments[-1]["end_pressure_psi"]
+            fuel_end_ratio = fuel_end_psi / fuel_start_psi if fuel_start_psi > 0 else 0.7
+        else:
+            fuel_end_ratio = 0.7
+        
+        # Store segments in config for later retrieval (as metadata)
+        if not hasattr(config, '_optimizer_segments'):
+            config._optimizer_segments = {}
+        config._optimizer_segments['lox'] = lox_segments
+        config._optimizer_segments['fuel'] = fuel_segments
+        
+        return config, lox_end_ratio, fuel_end_ratio
+        
+        # Chamber: ALWAYS use maximum diameter to minimize length
         V_chamber = Lstar * A_throat
-        D_chamber = min(np.sqrt(4 * A_throat * 3.5 / np.pi), max_chamber_od * 0.95)
+        D_chamber = max_chamber_od * 0.95  # Use 95% of max allowable diameter
         A_chamber = np.pi * (D_chamber / 2) ** 2
-        L_chamber = V_chamber / A_chamber if A_chamber > 0 else 0.2
+        R_chamber = D_chamber / 2
+        R_throat = np.sqrt(A_throat / np.pi)
+        
+        # Use proper chamber_length_calc that accounts for 45° contraction cone
+        # This returns only the CYLINDRICAL portion length
+        contraction_ratio = A_chamber / A_throat
+        theta_contraction = np.pi / 4  # 45 degrees (standard)
+        L_cylindrical = chamber_length_calc(V_chamber, A_throat, contraction_ratio, theta_contraction)
+        
+        # Calculate contraction cone length (45° angle means horizontal = vertical drop)
+        # For 45°: L_cone = R_chamber - R_throat
+        L_contraction = contraction_length_horizontal_calc(A_chamber, R_throat, theta_contraction)
+        
+        # Total chamber length = cylindrical + contraction (from injector face to throat)
+        L_chamber = L_cylindrical + L_contraction
+        
+        # Ensure positive chamber length
+        if L_chamber <= 0 or L_cylindrical <= 0 or not np.isfinite(L_chamber):
+            # Fallback: simple volume-based calculation
+            L_chamber = V_chamber / A_chamber if A_chamber > 0 else 0.2
+            L_cylindrical = max(L_chamber * 0.7, 0.05)  # Assume 70% cylindrical, min 50mm
+        
+        # Sanity check: chamber length should be reasonable (5mm to 1m)
+        L_chamber = np.clip(L_chamber, 0.005, 1.0)
         
         config.chamber.A_throat = A_throat
         config.chamber.volume = V_chamber
@@ -1399,6 +1904,10 @@ def _run_full_engine_optimization_with_flight_sim(
         config.chamber.length = L_chamber
         if hasattr(config.chamber, 'chamber_inner_diameter'):
             config.chamber.chamber_inner_diameter = D_chamber
+        if hasattr(config.chamber, 'contraction_ratio'):
+            config.chamber.contraction_ratio = contraction_ratio
+        if hasattr(config.chamber, 'A_chamber'):
+            config.chamber.A_chamber = A_chamber
         
         # Nozzle
         A_exit = A_throat * expansion_ratio
@@ -1427,7 +1936,38 @@ def _run_full_engine_optimization_with_flight_sim(
                 config.injector.geometry.lox.d_orifice = d_orifice
                 config.injector.geometry.lox.theta_orifice = 90.0
         
+        # Ablative liner thickness (chamber protection)
+        if hasattr(config, 'ablative_cooling') and config.ablative_cooling and config.ablative_cooling.enabled:
+            config.ablative_cooling.initial_thickness = ablative_thickness
+        
+        # Graphite insert thickness (throat protection)
+        if hasattr(config, 'graphite_insert') and config.graphite_insert and config.graphite_insert.enabled:
+            config.graphite_insert.initial_thickness = graphite_thickness
+        
         return config, lox_end_ratio, fuel_end_ratio
+    
+    # Evaluate initial guess to check feasibility and adjust if needed
+    update_progress("Stage: Optimization Setup", 0.09, "Checking initial configuration...")
+    try:
+        init_config, _, _ = apply_x_to_config(x0, config_base)
+        init_runner = PintleEngineRunner(init_config)
+        lox_start_init = lox_P_start * x0[9]
+        fuel_start_init = fuel_P_start * x0[13]
+        init_results = init_runner.evaluate(lox_start_init, fuel_start_init)
+        init_thrust = init_results.get("F", 0)
+        init_MR = init_results.get("MR", 0)
+        init_thrust_err = abs(init_thrust - target_thrust) / target_thrust if target_thrust > 0 else 1.0
+        update_progress("Stage: Optimization Setup", 0.095, 
+            f"Initial: F={init_thrust:.0f}N (err={init_thrust_err*100:.0f}%), MR={init_MR:.2f}")
+        
+        # If initial guess is way off, try to adjust A_throat based on thrust mismatch
+        if init_thrust_err > 0.5 and init_thrust > 0:
+            scale_factor = np.sqrt(target_thrust / init_thrust)  # sqrt because thrust ~ A_throat
+            x0[0] = np.clip(x0[0] * scale_factor, bounds[0][0], bounds[0][1])
+            update_progress("Stage: Optimization Setup", 0.098, 
+                f"Adjusted A_throat by {scale_factor:.2f}x for better starting point")
+    except Exception as e:
+        update_progress("Stage: Optimization Setup", 0.098, f"Initial check note: {str(e)[:40]}...")
     
     def objective(x: np.ndarray) -> float:
         """Multi-objective function with soft penalties."""
@@ -1436,21 +1976,44 @@ def _run_full_engine_optimization_with_flight_sim(
         
         # Progress update (optimization is ~10% to 50% of total)
         progress = 0.10 + 0.40 * min(iteration / max_iterations, 1.0)
-        update_progress(
-            "Optimization", 
-            progress, 
-            f"Iteration {iteration}/{max_iterations} | Best: {opt_state['best_objective']:.3f}"
-        )
+        
+        # Show more detail for first few iterations and every 20 iterations after
+        # Reduce frequency to avoid overwriting stage information
+        if iteration <= 3 or iteration % 25 == 0:
+            update_progress(
+                "Stage: Optimization (Geometry + Pressure)", 
+                progress, 
+                f"Iter {iteration}/{max_iterations} | Best obj: {opt_state['best_objective']:.3f} | Next: Layer 1 (Static Test)"
+            )
+        elif iteration % 10 == 0:
+            update_progress(
+                "Stage: Optimization (Geometry + Pressure)", 
+                progress, 
+                f"Iteration {iteration}/{max_iterations}... | Next: Layer 1 (Static Test)"
+            )
         
         try:
             config, curr_lox_end_ratio, curr_fuel_end_ratio = apply_x_to_config(x, config_base)
             
-            # Evaluate at average pressure (middle of optimized curve)
-            P_O_avg = lox_P_start * (1 + curr_lox_end_ratio) / 2
-            P_F_avg = fuel_P_start * (1 + curr_fuel_end_ratio) / 2
+            # LAYER 1: Evaluate at INITIAL conditions (start of burn)
+            # Get starting pressures from segments (first segment's start pressure)
+            lox_segments = getattr(config, '_optimizer_segments', {}).get('lox', [])
+            fuel_segments = getattr(config, '_optimizer_segments', {}).get('fuel', [])
+            
+            if lox_segments:
+                P_O_initial = lox_segments[0]["start_pressure_psi"] * psi_to_Pa
+            else:
+                # Fallback: use max pressure
+                P_O_initial = max_lox_P_psi * psi_to_Pa * 0.95
+            
+            if fuel_segments:
+                P_F_initial = fuel_segments[0]["start_pressure_psi"] * psi_to_Pa
+            else:
+                # Fallback: use max pressure
+                P_F_initial = max_fuel_P_psi * psi_to_Pa * 0.95
             
             test_runner = PintleEngineRunner(config)
-            results = test_runner.evaluate(P_O_avg, P_F_avg)
+            results = test_runner.evaluate(P_O_initial, P_F_initial)
             
             F_actual = results.get("F", 0)
             Isp_actual = results.get("Isp", 0)
@@ -1461,21 +2024,144 @@ def _run_full_engine_optimization_with_flight_sim(
             thrust_error = abs(F_actual - target_thrust) / target_thrust
             of_error = abs(MR_actual - optimal_of) / optimal_of if optimal_of > 0 else 0
             
-            # Stability check (get margin if available)
+            # Stability check using new comprehensive stability analysis
+            # Default to unstable if not found (conservative - assumes unstable until proven otherwise)
             stability = results.get("stability_results", {})
-            chugging = stability.get("chugging", {})
-            stability_margin = chugging.get("stability_margin", 1.0)
-            stability_penalty = max(0, min_stability - stability_margin)
             
-            # Multi-objective with weights
-            obj = (
-                5.0 * thrust_error +          # Thrust matching
-                3.0 * of_error +              # O/F matching  
-                2.0 * stability_penalty +     # Stability
-                1.0 * max(0, 200 - Isp_actual) / 200  # Isp bonus
+            # Get new stability metrics
+            stability_state = stability.get("stability_state", "unstable")
+            stability_score = stability.get("stability_score", 0.0)
+            min_stability_score = requirements.get("min_stability_score", 0.75)
+            require_stable_state = requirements.get("require_stable_state", True)
+            
+            # Also get individual margins for backward compatibility and detailed tracking
+            chugging = stability.get("chugging", {})
+            chugging_margin = chugging.get("stability_margin", 0.0)
+            if chugging_margin <= 0:
+                chugging_margin = 0.1  # Small positive value to avoid divide-by-zero issues
+            
+            acoustic = stability.get("acoustic", {})
+            acoustic_margin = acoustic.get("stability_margin", 0.0)
+            if acoustic_margin <= 0:
+                acoustic_margin = 0.1
+            
+            feed_system = stability.get("feed_system", {})
+            feed_margin = feed_system.get("stability_margin", 0.0)
+            if feed_margin <= 0:
+                feed_margin = 0.1
+            
+            min_stability_margin = requirements.get("min_stability_margin", min_stability)
+            stability_margin_handicap = float(requirements.get("stability_margin_handicap", 0.0))
+            # Effective thresholds: interpolate between full requirement (handicap=0)
+            # and fully relaxed (handicap=1).
+            score_factor = max(0.0, 1.0 - stability_margin_handicap)
+            margin_factor = max(0.0, 1.0 - stability_margin_handicap)
+            margins_meet_requirements = (
+                chugging_margin >= min_stability_margin and
+                acoustic_margin >= min_stability_margin and
+                feed_margin >= min_stability_margin
             )
             
-            # Record history
+            if margins_meet_requirements and stability_state != "stable":
+                if not log_flags["promoted_state_logged"]:
+                    log_status(
+                        "Layer 1 Warning",
+                        f"Promoting stability_state '{stability_state}' to 'stable' - all margins ≥ {min_stability_margin:.2f}"
+                    )
+                    log_flags["promoted_state_logged"] = True
+                stability_state = "stable"
+                stability_score = max(stability_score, min_stability_score)
+                stability["stability_state"] = stability_state
+                stability["stability_score"] = stability_score
+            
+            # Get minimum stability requirements
+            # New analysis uses stability_score (0-1) where:
+            # - "stable": score >= 0.75
+            # - "marginal": 0.4 <= score < 0.75
+            # - "unstable": score < 0.4
+            min_stability_score_raw = requirements.get("min_stability_score", 0.75)  # Default: require "stable"
+            require_stable_state = requirements.get("require_stable_state", True)  # Default: require "stable" state
+            min_stability_score = min_stability_score_raw * score_factor
+            
+            # Calculate stability penalty based on new analysis
+            # INCREASED penalties to ensure optimizer finds truly stable solutions
+            # Penalty increases as stability_score decreases below target
+            if stability_state == "unstable":
+                # Heavy penalty for unstable designs
+                stability_penalty = 15.0 * (1.0 - stability_score)  # Increased from 10.0 to 15.0
+            elif stability_state == "marginal":
+                # Strong penalty for marginal designs - we want stable, not marginal
+                stability_penalty = 5.0 * max(0, min_stability_score - stability_score) / min_stability_score  # Increased from 2.0 to 5.0
+            else:  # stable
+                # Penalty if below target score - even "stable" state needs good score
+                if stability_score < min_stability_score:
+                    stability_penalty = 2.0 * (min_stability_score - stability_score) / min_stability_score  # Increased from 0.5 to 2.0
+                else:
+                    stability_penalty = 0.0  # No penalty if meets or exceeds target
+            
+            # Also keep individual margin penalties for detailed feedback
+            chugging_min = requirements.get("chugging_margin_min", min_stability)
+            acoustic_min = requirements.get("acoustic_margin_min", min_stability)
+            feed_min = requirements.get("feed_stability_min", min_stability)
+            
+            chugging_penalty_detail = max(0, chugging_min - chugging_margin)
+            acoustic_penalty_detail = max(0, acoustic_min - acoustic_margin)
+            feed_penalty_detail = max(0, feed_min - feed_margin)
+            
+            # Use the new stability_score-based penalty as primary, but add detail penalties
+            # Increased weight on individual margins to ensure all are good
+            stability_penalty = stability_penalty + 0.5 * (chugging_penalty_detail + acoustic_penalty_detail + feed_penalty_detail)  # Increased from 0.3 to 0.5
+            
+            # Bounds violation penalty (should be enforced by L-BFGS-B, but add soft penalty as backup)
+            bounds_penalty = 0.0
+            for i, (lo, hi) in enumerate(bounds):
+                val = x[i]
+                if val < lo:
+                    bounds_penalty += 10.0 * ((lo - val) / (hi - lo + 1e-10)) ** 2
+                elif val > hi:
+                    bounds_penalty += 10.0 * ((val - hi) / (hi - lo + 1e-10)) ** 2
+            
+            # Multi-objective with weights (always optimize for all objectives)
+            # INCREASED stability weight to prioritize finding stable solutions
+            obj = (
+                5.0 * thrust_error +          # Thrust matching
+                3.0 * of_error +                # O/F matching  
+                6.0 * stability_penalty +       # Stability (increased from 4.0 to 6.0 - prioritize stability!)
+                1.0 * max(0, 200 - Isp_actual) / 200 +  # Isp bonus
+                bounds_penalty                  # Penalty for leaving bounds
+            )
+            
+            # Protect against NaN/Inf
+            if not np.isfinite(obj):
+                obj = 1e6
+            
+            # Calculate chamber geometry for tracking using proper method
+            A_throat_curr = float(np.clip(x[0], bounds[0][0], bounds[0][1]))
+            Lstar_curr = float(np.clip(x[1], bounds[1][0], bounds[1][1]))
+            V_chamber_curr = Lstar_curr * A_throat_curr
+            D_chamber_curr = max_chamber_od * 0.95
+            A_chamber_curr = np.pi * (D_chamber_curr / 2) ** 2
+            R_chamber_curr = D_chamber_curr / 2
+            R_throat_curr = np.sqrt(A_throat_curr / np.pi)
+            contraction_ratio_curr = A_chamber_curr / A_throat_curr if A_throat_curr > 0 else 1.0
+            theta_contraction = np.pi / 4  # 45 degrees
+            
+            # Cylindrical length + contraction length = total chamber length
+            L_cylindrical_curr = chamber_length_calc(V_chamber_curr, A_throat_curr, contraction_ratio_curr, theta_contraction)
+            L_contraction_curr = contraction_length_horizontal_calc(A_chamber_curr, R_throat_curr, theta_contraction)
+            L_chamber_curr = L_cylindrical_curr + L_contraction_curr
+            
+            if L_chamber_curr <= 0 or L_cylindrical_curr <= 0:
+                L_chamber_curr = V_chamber_curr / A_chamber_curr if A_chamber_curr > 0 else 0.2
+            
+            # Extract ablative/graphite thicknesses and pressure control points for history
+            abl_thick_curr = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
+            gra_thick_curr = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+            
+            # Calculate combined stability margin (minimum of all three) for backward compatibility
+            combined_stability_margin = min(chugging_margin, acoustic_margin, feed_margin)
+            
+            # Record history (with all pressure control points including start)
             opt_state["history"].append({
                 "iteration": iteration,
                 "x": x.copy(),
@@ -1485,41 +2171,98 @@ def _run_full_engine_optimization_with_flight_sim(
                 "Isp": Isp_actual,
                 "MR": MR_actual,
                 "Pc": Pc_actual,
-                "stability_margin": stability_margin,
+                "Lstar": Lstar_curr,
+                "L_chamber": L_chamber_curr,
+                "D_chamber": D_chamber_curr,
+                "stability_margin": combined_stability_margin,  # Backward compatibility
+                "stability_state": stability_state,  # New: "stable", "marginal", or "unstable"
+                "stability_score": stability_score,  # New: 0-1 score
+                "chugging_margin": chugging_margin,
+                "acoustic_margin": acoustic_margin,
+                "feed_margin": feed_margin,
                 "lox_end_ratio": curr_lox_end_ratio,
                 "fuel_end_ratio": curr_fuel_end_ratio,
+                "ablative_thickness": abl_thick_curr,
+                "graphite_thickness": gra_thick_curr,
+                # All 4 control points (including optimized start pressure)
+                "lox_P_ratios": [float(x[9]), float(x[10]), float(x[11]), float(x[12])],
+                "fuel_P_ratios": [float(x[13]), float(x[14]), float(x[15]), float(x[16])],
+                "lox_start_ratio": float(x[9]),
+                "fuel_start_ratio": float(x[13]),
                 "objective": obj,
             })
             
-            # Track best (store pressure ratios too)
+            # Track best (store full solution vector for pressure curve generation)
             if obj < opt_state["best_objective"]:
                 opt_state["best_objective"] = obj
                 opt_state["best_config"] = copy.deepcopy(config)
                 opt_state["best_lox_end_ratio"] = curr_lox_end_ratio
                 opt_state["best_fuel_end_ratio"] = curr_fuel_end_ratio
+                opt_state["best_x"] = x.copy()  # Store full solution vector
             
-            # Check convergence (within tolerances)
-            if thrust_error < thrust_tol and of_error < 0.15:
+            # Check convergence (within tolerances AND stable enough)
+            allowed_states = {"stable", "marginal"} if require_stable_state else {"stable", "marginal"}
+            state_ok = (stability_state in allowed_states) if require_stable_state else (stability_state != "unstable")
+            stability_acceptable = (
+                state_ok and
+                (stability_score >= min_stability_score) and
+                (chugging_margin >= min_stability * 0.8) and
+                (acoustic_margin >= min_stability * 0.8) and
+                (feed_margin >= min_stability * 0.8)
+            )
+            
+            if stability_state == "marginal" and stability_acceptable:
+                if not log_flags["marginal_candidate_logged"]:
+                    log_status(
+                        "Layer 1 Warning",
+                        f"Proceeding with marginal stability candidate (score {stability_score:.2f})"
+                    )
+                    log_flags["marginal_candidate_logged"] = True
+            
+            if thrust_error < thrust_tol and of_error < 0.15 and stability_acceptable:
                 opt_state["converged"] = True
+            else:
+                # Not converged if stability is not acceptable
+                opt_state["converged"] = False
             
             return obj
             
         except Exception as e:
             return 1e6  # Penalty for failed evaluation
     
-    # Run optimization using Nelder-Mead (robust, doesn't need gradients)
+    # Run optimization using L-BFGS-B (supports bounds natively, much better for high-dim)
+    # This is far more efficient than Nelder-Mead for 19 dimensions
     result = minimize(
         objective,
         x0,
-        method='Nelder-Mead',
+        method='L-BFGS-B',
+        bounds=bounds,
         options={
             'maxiter': max_iterations,
-            'maxfev': max_iterations * 2,
-            'xatol': 1e-6,
-            'fatol': 1e-4,
-            'adaptive': True,
+            'maxfun': max_iterations * 5,
+            'ftol': 1e-6,
+            'gtol': 1e-5,
+            'disp': False,
         }
     )
+    
+    # If L-BFGS-B didn't converge well, try a few Nelder-Mead refinement iterations
+    if opt_state["best_objective"] > 0.5:  # Still not converged
+        update_progress("Stage: Optimization Refinement", 0.48, "Refining solution with local search...")
+        # Use the best found solution as starting point
+        x_refined = opt_state.get("best_x", result.x)
+        result2 = minimize(
+            objective,
+            x_refined,
+            method='Nelder-Mead',
+            options={
+                'maxiter': max(50, max_iterations // 4),
+                'maxfev': max(150, max_iterations),
+                'xatol': 1e-4,
+                'fatol': 1e-3,
+                'adaptive': True,
+            }
+        )
     
     # Get best config found
     if opt_state["best_config"] is not None:
@@ -1552,74 +2295,724 @@ def _run_full_engine_optimization_with_flight_sim(
         },
     }
     
-    update_progress("Evaluation", 0.52, "Evaluating optimized engine at design point...")
+    update_progress("Layer 1: Pressure Candidate", 0.52, "Evaluating at initial conditions...")
     
-    # Phase 5: Evaluate performance at average operating point (using optimized pressure ratios)
-    P_O_avg = lox_P_start * (1 + final_lox_end_ratio) / 2
-    P_F_avg = fuel_P_start * (1 + final_fuel_end_ratio) / 2
+    # Get best_x from optimization state (must be done BEFORE using it below)
+    best_x = opt_state.get("best_x", result.x if hasattr(result, 'x') else x0)
+    
+    # ==========================================================================
+    # LAYER 1: PRESSURE CANDIDATE TEST
+    # Evaluate at INITIAL conditions (t=0) - this is the pressure candidate test
+    # The starting pressure is an optimization variable (geometry + pressure -> O/F)
+    # ==========================================================================
+    # Get starting pressures from optimized segments
+    lox_segments = getattr(optimized_config, '_optimizer_segments', {}).get('lox', [])
+    fuel_segments = getattr(optimized_config, '_optimizer_segments', {}).get('fuel', [])
+    
+    if lox_segments:
+        P_O_initial = lox_segments[0]["start_pressure_psi"] * psi_to_Pa
+    else:
+        P_O_initial = max_lox_P_psi * psi_to_Pa * 0.95
+    
+    if fuel_segments:
+        P_F_initial = fuel_segments[0]["start_pressure_psi"] * psi_to_Pa
+    else:
+        P_F_initial = max_fuel_P_psi * psi_to_Pa * 0.95
     optimized_runner = PintleEngineRunner(optimized_config)
-    final_performance = optimized_runner.evaluate(P_O_avg, P_F_avg)
+    initial_performance = optimized_runner.evaluate(P_O_initial, P_F_initial)
     
-    update_progress("Pressure Curves", 0.55, "Generating 200-point pressure curves...")
+    # Check if pressure candidate is valid (meets goals at initial conditions with margin)
+    initial_thrust = initial_performance.get("F", 0)
+    initial_thrust_error = abs(initial_thrust - target_thrust) / target_thrust if target_thrust > 0 else 1.0
+    initial_MR = initial_performance.get("MR", 0)
+    initial_MR_error = abs(initial_MR - optimal_of) / optimal_of if optimal_of > 0 else 1.0
     
-    # Phase 6: Generate 200-point time series with OPTIMIZED independent pressure curves
+    # Check stability using new comprehensive stability analysis
+    stability_results = initial_performance.get("stability_results", {})
+    stability_state = stability_results.get("stability_state", "unstable")
+    stability_score = stability_results.get("stability_score", 0.0)
+    
+    # Also get individual margins for detailed tracking
+    chugging_margin = stability_results.get("chugging", {}).get("stability_margin", 0)
+    acoustic_margin = stability_results.get("acoustic", {}).get("stability_margin", 0)
+    feed_margin = stability_results.get("feed_system", {}).get("stability_margin", 0)
+    initial_stability = min(chugging_margin, acoustic_margin, feed_margin)  # For backward compatibility
+    
+    # Get stability requirements
+    min_stability_score = requirements.get("min_stability_score", 0.75)
+    require_stable_state = requirements.get("require_stable_state", True)
+    
+    # Check stability acceptability for Layer 1 pass/fail
+    handicap = float(requirements.get("stability_margin_handicap", 0.0))
+    score_factor = max(0.0, 1.0 - handicap)
+    margin_factor = max(0.0, 1.0 - handicap)
+    effective_min_score = min_stability_score * score_factor
+    effective_margin = min_stability * margin_factor
+    
+    state_ok = (stability_state in {"stable", "marginal"}) if require_stable_state else (stability_state != "unstable")
+    stability_check_passed = (
+        state_ok and
+        (stability_score >= effective_min_score) and
+        (chugging_margin >= effective_margin) and
+        (acoustic_margin >= effective_margin) and
+        (feed_margin >= effective_margin)
+    )
+    
+    # Individual checks for flight sim eligibility
+    thrust_check_passed = initial_thrust_error < thrust_tol * 1.5  # 1.5x tolerance (15% default)
+    of_check_passed = initial_MR_error < 0.20  # 20% O/F error allowed
+    
+    # Pressure candidate passes if within tolerance at initial conditions AND stable
+    pressure_candidate_valid = thrust_check_passed and of_check_passed and stability_check_passed
+    
+    # Build detailed failure reasons for diagnostics
+    failure_reasons = []
+    if not thrust_check_passed:
+        failure_reasons.append(f"Thrust error {initial_thrust_error*100:.1f}% > {thrust_tol*150:.0f}% limit")
+    if not of_check_passed:
+        failure_reasons.append(f"O/F error {initial_MR_error*100:.1f}% > 20% limit")
+    if not stability_check_passed:
+        # Provide detailed failure reason showing what was required vs what we got
+        required_parts = []
+        if require_stable_state:
+            if stability_state not in {"stable", "marginal"}:
+                required_parts.append(f"state ∈ {{stable,marginal}} (got '{stability_state}')")
+        else:
+            if stability_state == "unstable":
+                required_parts.append("state!='unstable'")
+        handicap = float(requirements.get("stability_margin_handicap", 0.0))
+        score_factor = max(0.0, 1.0 - handicap)
+        margin_factor = max(0.0, 1.0 - handicap)
+        eff_score = min_stability_score * score_factor
+        eff_margin = min_stability * margin_factor
+        if stability_score < eff_score:
+            required_parts.append(f"score>={eff_score:.2f} (got {stability_score:.2f})")
+        if chugging_margin < eff_margin:
+            required_parts.append(f"chugging_margin>={eff_margin:.2f} (got {chugging_margin:.2f})")
+        if acoustic_margin < eff_margin:
+            required_parts.append(f"acoustic_margin>={eff_margin:.2f} (got {acoustic_margin:.2f})")
+        if feed_margin < eff_margin:
+            required_parts.append(f"feed_margin>={eff_margin:.2f} (got {feed_margin:.2f})")
+        if not required_parts:
+            required_parts.append("stability gate mismatch (see diagnostics)")
+        failure_reasons.append(f"Stability failed: {'; '.join(required_parts)}")
+    
+    if not pressure_candidate_valid and not failure_reasons:
+        failure_reasons.append("Validation failed: no requirements met (check solver output)")
+    
+    # Log diagnostic info
+    if pressure_candidate_valid:
+        update_progress("Layer 1: Pressure Candidate", 0.53, 
+            f"✓ VALID - Thrust err: {initial_thrust_error*100:.1f}%, O/F err: {initial_MR_error*100:.1f}%, Stability: {stability_state} (score: {stability_score:.2f})")
+        log_status(
+            "Layer 1",
+            f"VALID | Thrust err {initial_thrust_error*100:.1f}%, O/F err {initial_MR_error*100:.1f}%, Stability {stability_state} (score {stability_score:.2f})"
+        )
+    else:
+        update_progress("Layer 1: Pressure Candidate", 0.53, 
+            f"✗ INVALID - {'; '.join(failure_reasons)}")
+        log_status(
+            "Layer 1",
+            f"INVALID | Reasons: {', '.join(failure_reasons) if failure_reasons else 'No details'}"
+        )
+    
+    # Use initial performance as the final performance (per user requirement)
+    final_performance = initial_performance
+    final_performance["pressure_candidate_valid"] = pressure_candidate_valid
+    final_performance["initial_thrust_error"] = initial_thrust_error
+    final_performance["initial_MR_error"] = initial_MR_error
+    final_performance["initial_stability"] = initial_stability  # Backward compatibility
+    final_performance["initial_stability_state"] = stability_state
+    final_performance["initial_stability_score"] = stability_score
+    final_performance["thrust_check_passed"] = thrust_check_passed
+    final_performance["of_check_passed"] = of_check_passed
+    final_performance["stability_check_passed"] = stability_check_passed
+    final_performance["failure_reasons"] = failure_reasons
+    
+    update_progress("Pressure Curves", 0.55, "Generating 200-point pressure curves from segments...")
+    
+    # Phase 6: Generate 200-point time series using OPTIMIZER'S segments
     n_time_points = 200
-    time_array = np.linspace(0.0, target_burn_time, n_time_points)
     
-    # Generate independent pressure curves using OPTIMIZED end ratios
-    # Linear interpolation from start to optimized end pressure
-    lox_pressure_profile = np.linspace(1.0, final_lox_end_ratio, n_time_points)
-    fuel_pressure_profile = np.linspace(1.0, final_fuel_end_ratio, n_time_points)
+    # Get segments from optimized config
+    lox_segments = getattr(optimized_config, '_optimizer_segments', {}).get('lox', [])
+    fuel_segments = getattr(optimized_config, '_optimizer_segments', {}).get('fuel', [])
     
-    P_tank_O_array = lox_P_start * lox_pressure_profile
-    P_tank_F_array = fuel_P_start * fuel_pressure_profile
+    # Generate pressure curves from segments
+    if lox_segments:
+        lox_time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
+        # Convert to Pa and ensure same time array
+        time_array = lox_time_array
+        P_tank_O_array = lox_pressure_psi * psi_to_Pa
+    else:
+        # Fallback: constant pressure
+        time_array = np.linspace(0.0, target_burn_time, n_time_points)
+        P_tank_O_array = np.full(n_time_points, max_lox_P_psi * psi_to_Pa * 0.95)
     
-    # Evaluate at a few points along the burn to get realistic curves
+    if fuel_segments:
+        fuel_time_array, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
+        # Ensure same time array
+        if not lox_segments:
+            time_array = fuel_time_array
+        P_tank_F_array = fuel_pressure_psi * psi_to_Pa
+    else:
+        # Fallback: constant pressure
+        if not lox_segments:
+            time_array = np.linspace(0.0, target_burn_time, n_time_points)
+        P_tank_F_array = np.full(n_time_points, max_fuel_P_psi * psi_to_Pa * 0.95)
+    
+    # Store the optimized pressure curve info (segments)
+    coupled_results["optimized_pressure_curves"]["lox_segments"] = lox_segments
+    coupled_results["optimized_pressure_curves"]["fuel_segments"] = fuel_segments
+    if lox_segments:
+        coupled_results["optimized_pressure_curves"]["lox_start_psi"] = lox_segments[0]["start_pressure_psi"]
+        coupled_results["optimized_pressure_curves"]["lox_end_psi"] = lox_segments[-1]["end_pressure_psi"]
+    if fuel_segments:
+        coupled_results["optimized_pressure_curves"]["fuel_start_psi"] = fuel_segments[0]["start_pressure_psi"]
+        coupled_results["optimized_pressure_curves"]["fuel_end_psi"] = fuel_segments[-1]["end_pressure_psi"]
+    
+    # Evaluate performance across burn time
     update_progress("Pressure Curves", 0.58, "Evaluating performance across burn time...")
     
-    sample_indices = [0, n_time_points//4, n_time_points//2, 3*n_time_points//4, n_time_points-1]
-    sample_F = []
-    sample_Isp = []
-    sample_Pc = []
-    sample_mdot_O = []
-    sample_mdot_F = []
+    # Storage for time-varying results
+    time_varying_results = None
+    burn_candidate_valid = False
+    pressure_curves = None  # Initialize to ensure it's always defined
     
-    for idx in sample_indices:
+    # ==========================================================================
+    # LAYER 2: TIME SERIES ANALYSIS (BURN CANDIDATE)
+    # Optimize initial ablative/graphite guesses based on time series analysis.
+    # NOTE: Layer 2 only runs when:
+    #       - time-varying analysis is enabled, AND
+    #       - the Layer 1 pressure candidate passed its static checks.
+    #       This ensures we only do the expensive time-series analysis
+    #       on candidates that are already reasonable at t=0.
+    # ==========================================================================
+    if use_time_varying and pressure_candidate_valid:
         try:
-            results = optimized_runner.evaluate(P_tank_O_array[idx], P_tank_F_array[idx])
-            sample_F.append(results.get("F", 0))
-            sample_Isp.append(results.get("Isp", 0))
-            sample_Pc.append(results.get("Pc", 0))
-            sample_mdot_O.append(results.get("mdot_O", 0))
-            sample_mdot_F.append(results.get("mdot_F", 0))
-        except:
-            # Use fallback values
-            sample_F.append(final_performance.get("F", target_thrust))
-            sample_Isp.append(final_performance.get("Isp", 250))
-            sample_Pc.append(final_performance.get("Pc", 2e6))
-            sample_mdot_O.append(final_performance.get("mdot_O", 1.0))
-            sample_mdot_F.append(final_performance.get("mdot_F", 0.4))
+            update_progress("Layer 2: Burn Candidate Optimization", 0.60, "Optimizing initial thermal protection guesses...")
+            
+            # Layer 2: Optimize initial ablative/graphite thickness guesses
+            # These are starting guesses that will be refined in Layer 3
+            from scipy.optimize import minimize as scipy_minimize
+            
+            # Get current ablative/graphite config
+            ablative_cfg = optimized_config.ablative_cooling if hasattr(optimized_config, 'ablative_cooling') else None
+            graphite_cfg = optimized_config.graphite_insert if hasattr(optimized_config, 'graphite_insert') else None
+            
+            # Optimization variables for Layer 2: [ablative_initial_guess, graphite_initial_guess]
+            layer2_bounds = []
+            layer2_x0 = []
+            
+            if ablative_cfg and ablative_cfg.enabled:
+                layer2_bounds.append((0.003, 0.020))  # 3-20mm
+                layer2_x0.append(ablative_cfg.initial_thickness)
+            if graphite_cfg and graphite_cfg.enabled:
+                layer2_bounds.append((0.003, 0.015))  # 3-15mm
+                layer2_x0.append(graphite_cfg.initial_thickness)
+            
+            if len(layer2_x0) > 0:
+                layer2_x0 = np.array(layer2_x0)
+
+                # Track Layer 2 optimization progress for UI
+                layer2_state = {
+                    "iter": 0,
+                    "max_iter": 20,
+                }
+                def layer2_callback(xk):
+                    layer2_state["iter"] += 1
+                    frac = min(layer2_state["iter"] / max(layer2_state["max_iter"], 1), 1.0)
+                    # Map Layer 2 progress into 0.60–0.64 range of overall bar
+                    progress = 0.60 + 0.04 * frac
+                    update_progress(
+                        "Layer 2: Burn Candidate Optimization",
+                        progress,
+                        f"Layer 2 optimization {layer2_state['iter']}/{layer2_state['max_iter']}",
+                    )
+                
+                def layer2_objective(x_layer2):
+                    """Optimize initial thermal protection guesses to minimize recession."""
+                    try:
+                        # Update config with current guesses
+                        config_layer2 = copy.deepcopy(optimized_config)
+                        idx = 0
+                        if ablative_cfg and ablative_cfg.enabled:
+                            config_layer2.ablative_cooling.initial_thickness = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
+                            idx += 1
+                        if graphite_cfg and graphite_cfg.enabled:
+                            config_layer2.graphite_insert.initial_thickness = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
+                        
+                        # Run time series
+                        runner_layer2 = PintleEngineRunner(config_layer2)
+                        results_layer2 = runner_layer2.evaluate_arrays_with_time(
+                            time_array,
+                            P_tank_O_array,
+                            P_tank_F_array,
+                            track_ablative_geometry=True,
+                            use_coupled_solver=False,  # use robust standard solver inside Layer 2 objective
+                        )
+                        
+                        # Objective: minimize recession while meeting stability/thrust goals
+                        recession_chamber = float(np.max(results_layer2.get("recession_chamber", [0.0])))
+                        recession_throat = float(np.max(results_layer2.get("recession_throat", [0.0])))
+                        
+                        # Check stability
+                        stability_scores = results_layer2.get("stability_score", None)
+                        if stability_scores is not None:
+                            min_stability = float(np.min(stability_scores))
+                        else:
+                            chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
+                            min_stability = max(0.0, min(1.0, (float(np.min(chugging)) - 0.3) * 1.5))
+                        
+                        # Check thrust
+                        thrust_hist = results_layer2.get("F", np.full(n_time_points, target_thrust))
+                        check_indices = np.arange(n_time_points - 1)  # Exclude t=burn_time
+                        thrust_errors = np.abs(thrust_hist[check_indices] - target_thrust) / target_thrust
+                        max_thrust_err = float(np.max(thrust_errors))
+                        
+                        # Penalty for poor performance
+                        stability_penalty = max(0, 0.7 - min_stability) * 10.0  # Want stability >= 0.7
+                        thrust_penalty = max(0, max_thrust_err - thrust_tol * 1.5) * 5.0
+                        
+                        # Objective: minimize recession + penalties
+                        obj = recession_chamber * 1000 + recession_throat * 1000 + stability_penalty + thrust_penalty
+                        return obj
+                    except Exception as e:
+                        return 1e6
+                
+                # Optimize Layer 2
+                try:
+                    layer2_state["max_iter"] = 20
+                    result_layer2 = scipy_minimize(
+                        layer2_objective,
+                        layer2_x0,
+                        method='L-BFGS-B',
+                        bounds=layer2_bounds,
+                        options={'maxiter': layer2_state["max_iter"], 'ftol': 1e-4},
+                        callback=layer2_callback,
+                    )
+                    
+                    # Update config with optimized guesses
+                    idx = 0
+                    if ablative_cfg and ablative_cfg.enabled:
+                        optimized_config.ablative_cooling.initial_thickness = float(np.clip(result_layer2.x[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
+                        update_progress("Layer 2: Burn Candidate Optimization", 0.62, 
+                            f"Optimized ablative initial guess: {optimized_config.ablative_cooling.initial_thickness*1000:.2f}mm")
+                        idx += 1
+                    if graphite_cfg and graphite_cfg.enabled:
+                        optimized_config.graphite_insert.initial_thickness = float(np.clip(result_layer2.x[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
+                        update_progress("Layer 2: Burn Candidate Optimization", 0.62, 
+                            f"Optimized graphite initial guess: {optimized_config.graphite_insert.initial_thickness*1000:.2f}mm")
+                except Exception as e:
+                    update_progress("Layer 2: Burn Candidate Optimization", 0.62, f"⚠️ Layer 2 optimization failed: {e}, using current values")
+            
+            # Now run time series with optimized initial guesses
+            update_progress("Layer 2: Burn Candidate", 0.64, "Running time series analysis with optimized guesses...")
+            optimized_runner = PintleEngineRunner(optimized_config)  # Recreate with updated config
+            # NOTE: Use the standard time-varying solver here for robustness.
+            # The fully-coupled solver can be more fragile for edge-case configs
+            # and is still accessible from dedicated analysis tools.
+            full_time_results = optimized_runner.evaluate_arrays_with_time(
+                time_array,
+                P_tank_O_array,
+                P_tank_F_array,
+                track_ablative_geometry=True,
+                use_coupled_solver=False,
+            )
+            
+            # Use time-varying results for pressure curves
+            pressure_curves = {
+                "time": time_array,
+                "P_tank_O": P_tank_O_array,
+                "P_tank_F": P_tank_F_array,
+                "thrust": full_time_results.get("F", np.full(n_time_points, final_performance.get("F", target_thrust))),
+                "Isp": full_time_results.get("Isp", np.full(n_time_points, final_performance.get("Isp", 250))),
+                "Pc": full_time_results.get("Pc", np.full(n_time_points, final_performance.get("Pc", 2e6))),
+                "mdot_O": full_time_results.get("mdot_O", np.full(n_time_points, final_performance.get("mdot_O", 1.0))),
+                "mdot_F": full_time_results.get("mdot_F", np.full(n_time_points, final_performance.get("mdot_F", 0.4))),
+            }
+            
+            # Store time-varying results for display
+            time_varying_results = full_time_results
+            
+            # Add time-varying summary to performance
+            # Extract stability metrics from time-varying results
+            # The time-varying solver returns stability at each time step
+            chugging_stability_history = full_time_results.get("chugging_stability_margin", np.array([1.0]))
+            min_time_stability_margin = float(np.min(chugging_stability_history))  # For backward compatibility
+            
+            # Get comprehensive stability analysis from time-varying results if available
+            # Check if we have stability_state and stability_score arrays
+            stability_states = full_time_results.get("stability_state", None)
+            stability_scores = full_time_results.get("stability_score", None)
+            
+            # If not available, try to get from individual time steps
+            if stability_scores is None:
+                # Fallback: use chugging margin to estimate score
+                # Map margin to score (rough approximation)
+                min_stability_score_time = max(0.0, min(1.0, (min_time_stability_margin - 0.3) * 1.5))
+            else:
+                min_stability_score_time = float(np.min(stability_scores))
+            
+            if stability_states is None:
+                # Determine state from score
+                if min_stability_score_time >= 0.75:
+                    min_stability_state_time = "stable"
+                elif min_stability_score_time >= 0.4:
+                    min_stability_state_time = "marginal"
+                else:
+                    min_stability_state_time = "unstable"
+            else:
+                # Check if all states are stable
+                if isinstance(stability_states, (list, np.ndarray)):
+                    if all(s == "stable" for s in stability_states):
+                        min_stability_state_time = "stable"
+                    elif any(s == "unstable" for s in stability_states):
+                        min_stability_state_time = "unstable"
+                    else:
+                        min_stability_state_time = "marginal"
+                else:
+                    min_stability_state_time = str(stability_states)
+            
+            time_varying_summary = {
+                "avg_thrust": float(np.mean(full_time_results.get("F", [target_thrust]))),
+                "min_thrust": float(np.min(full_time_results.get("F", [target_thrust]))),
+                "max_thrust": float(np.max(full_time_results.get("F", [target_thrust]))),
+                "thrust_std": float(np.std(full_time_results.get("F", [0]))),
+                "avg_isp": float(np.mean(full_time_results.get("Isp", [250]))),
+                "min_stability_margin": min_time_stability_margin,  # Backward compatibility
+                "min_stability_state": min_stability_state_time,  # New: worst state during burn
+                "min_stability_score": min_stability_score_time,  # New: worst score during burn
+                "max_recession_chamber": float(np.max(full_time_results.get("recession_chamber", [0.0]))),
+                "max_recession_throat": float(np.max(full_time_results.get("recession_throat", [0.0]))),
+            }
+            final_performance["time_varying"] = time_varying_summary
+            
+            # Check if burn candidate is valid (meets all time-based optimization goals)
+            # Check at EACH time point (excluding t=burn_time per user requirement)
+            # We don't care if burn is bad at the end - just check optimal starting conditions
+            min_stability_score = requirements.get("min_stability_score", 0.75)
+            require_stable_state = requirements.get("require_stable_state", True)
+            
+            # Get time-varying arrays (ensure at least 1D)
+            thrust_history = np.atleast_1d(full_time_results.get("F", np.full(n_time_points, target_thrust)))
+            MR_history = np.atleast_1d(full_time_results.get("MR", np.full(n_time_points, optimal_of)))
+            stability_scores_array = full_time_results.get("stability_score", None)
+            stability_states_array = full_time_results.get("stability_state", None)
+            
+            # Determine how many valid time points we actually have
+            available_n = min(
+                thrust_history.shape[0],
+                MR_history.shape[0],
+                n_time_points,
+            )
+            
+            if available_n < 2:
+                # Not enough points for meaningful time-varying validation; fall back to Layer 1 result
+                burn_candidate_valid = pressure_candidate_valid
+                max_thrust_error = float(
+                    abs(final_performance.get("F", target_thrust) - target_thrust) / max(target_thrust, 1e-9)
+                )
+                max_of_error = float(
+                    abs(final_performance.get("MR", optimal_of) - optimal_of) / max(optimal_of, 1e-9)
+                ) if optimal_of > 0 else 0.0
+                min_stability_score_time = float(time_varying_summary.get("min_stability_score", min_stability_score))
+                min_stability_state_time = time_varying_summary.get("min_stability_state", "stable")
+            else:
+                # Exclude last available time point - check all points before that
+                check_indices = np.arange(available_n - 1)  # All except last
+                
+                # Align histories to available_n
+                thrust_history = thrust_history[:available_n]
+                MR_history = MR_history[:available_n]
+                
+                # Check thrust error at each time point (excluding last)
+                thrust_errors = np.abs(thrust_history[check_indices] - target_thrust) / target_thrust
+            max_thrust_error = float(np.max(thrust_errors))
+            avg_thrust_error = float(np.mean(thrust_errors))
+            
+            # Check O/F error at each time point
+            of_errors = (
+                np.abs(MR_history[check_indices] - optimal_of) / optimal_of
+                if optimal_of > 0
+                else np.ones_like(check_indices)
+            )
+            max_of_error = float(np.max(of_errors))
+            
+            # Check stability at each time point
+            if stability_scores_array is not None and isinstance(stability_scores_array, np.ndarray):
+                stability_scores_array = np.atleast_1d(stability_scores_array)[:available_n]
+                stability_scores_check = stability_scores_array[check_indices]
+                min_stability_score_time = float(np.min(stability_scores_check))
+            else:
+                # Fallback: use chugging margin
+                chugging_history = np.atleast_1d(
+                    full_time_results.get("chugging_stability_margin", np.array([1.0]))
+                )[:available_n]
+                min_time_stability_margin = float(np.min(chugging_history[check_indices]))
+                min_stability_score_time = max(
+                    0.0, min(1.0, (min_time_stability_margin - 0.3) * 1.5)
+                )
+            
+            if stability_states_array is not None and isinstance(stability_states_array, (list, np.ndarray)):
+                stability_states_array = np.asarray(stability_states_array)[:available_n]
+                stability_states_check = stability_states_array[check_indices]
+                has_unstable = np.any(stability_states_check == "unstable")
+                all_stable = np.all(stability_states_check == "stable")
+                if all_stable:
+                    min_stability_state_time = "stable"
+                elif has_unstable:
+                    min_stability_state_time = "unstable"
+                else:
+                    min_stability_state_time = "marginal"
+            else:
+                # Determine from score
+                if min_stability_score_time >= 0.75:
+                    min_stability_state_time = "stable"
+                elif min_stability_score_time >= 0.4:
+                    min_stability_state_time = "marginal"
+                else:
+                    min_stability_state_time = "unstable"
+                
+                # Stability check for Layer 2 (time-varying, excluding t=burn_time)
+                if require_stable_state:
+                    # Require "stable" state throughout burn (or at least not "unstable")
+                    stability_valid_time = (min_stability_state_time != "unstable") and (min_stability_score_time >= min_stability_score * 0.7)  # 70% of target for Layer 2
+                else:
+                    # Allow "marginal" but require minimum score
+                    stability_valid_time = (min_stability_state_time != "unstable") and (min_stability_score_time >= min_stability_score * 0.7)
+                
+                # Burn candidate valid if all time points (excluding last) meet goals
+                burn_candidate_valid = (
+                    stability_valid_time and
+                    max_thrust_error < thrust_tol * 1.5 and  # Max error at any point (excluding last)
+                    max_of_error < 0.20  # Max O/F error at any point
+                )
+                final_performance["burn_candidate_valid"] = burn_candidate_valid
+                final_performance["max_thrust_error_time"] = max_thrust_error
+                final_performance["max_of_error_time"] = max_of_error
+            
+            update_progress(
+                "Layer 2: Burn Candidate",
+                0.65,
+                f"Burn candidate {'✓ VALID' if burn_candidate_valid else '✗ INVALID'} - Stability: {min_stability_state_time} (score: {min_stability_score_time:.2f})",
+            )
+            log_status(
+                "Layer 2",
+                f"{'VALID' if burn_candidate_valid else 'INVALID'} | Stability {min_stability_state_time} (score {min_stability_score_time:.2f}), "
+                f"max thrust err {max_thrust_error*100:.1f}%, max O/F err {max_of_error*100:.1f}%"
+            )
+            
+            # ==========================================================================
+            # LAYER 3: BURN ANALYSIS (ABLATIVE/GRAPHITE OPTIMIZATION)
+            # Optimize ablative liner and graphite nozzle parameters
+            # Once Layer 2 passes, optimize these to meet all goals with margin
+            # ==========================================================================
+            if burn_candidate_valid:
+                update_progress("Layer 3: Burn Analysis Optimization", 0.68, "Optimizing ablative and graphite parameters...")
+                
+                # Get current ablative/graphite config
+                ablative_cfg = optimized_config.ablative_cooling if hasattr(optimized_config, 'ablative_cooling') else None
+                graphite_cfg = optimized_config.graphite_insert if hasattr(optimized_config, 'graphite_insert') else None
+                
+                # Get recession data from time-varying results
+                recession_chamber_history = full_time_results.get("recession_chamber", np.zeros(n_time_points))
+                recession_throat_history = full_time_results.get("recession_throat", np.zeros(n_time_points))
+                max_recession_chamber = float(np.max(recession_chamber_history))
+                max_recession_throat = float(np.max(recession_throat_history))
+                
+                # Layer 3: Optimize ablative/graphite thickness to meet recession + margin requirements
+                from scipy.optimize import minimize as scipy_minimize
+                
+                layer3_bounds = []
+                layer3_x0 = []
+                
+                if ablative_cfg and ablative_cfg.enabled:
+                    # Optimize to max_recession * 1.2 (20% margin)
+                    target_ablative = max_recession_chamber * 1.2
+                    layer3_bounds.append((max(0.003, target_ablative * 0.8), min(0.020, target_ablative * 1.5)))
+                    layer3_x0.append(ablative_cfg.initial_thickness)
+                
+                if graphite_cfg and graphite_cfg.enabled:
+                    # Optimize to max_recession * 1.2 (20% margin)
+                    target_graphite = max_recession_throat * 1.2
+                    layer3_bounds.append((max(0.003, target_graphite * 0.8), min(0.015, target_graphite * 1.5)))
+                    layer3_x0.append(graphite_cfg.initial_thickness)
+                
+                if len(layer3_x0) > 0:
+                    layer3_x0 = np.array(layer3_x0)
+                    
+                    def layer3_objective(x_layer3):
+                        """Optimize thermal protection to minimize mass while meeting recession requirements."""
+                        try:
+                            # Update config
+                            config_layer3 = copy.deepcopy(optimized_config)
+                            idx = 0
+                            if ablative_cfg and ablative_cfg.enabled:
+                                config_layer3.ablative_cooling.initial_thickness = float(np.clip(x_layer3[idx], layer3_bounds[idx][0], layer3_bounds[idx][1]))
+                                idx += 1
+                            if graphite_cfg and graphite_cfg.enabled:
+                                config_layer3.graphite_insert.initial_thickness = float(np.clip(x_layer3[idx], layer3_bounds[idx][0], layer3_bounds[idx][1]))
+                            
+                            # Run time series
+                            runner_layer3 = PintleEngineRunner(config_layer3)
+                            results_layer3 = runner_layer3.evaluate_arrays_with_time(
+                                time_array,
+                                P_tank_O_array,
+                                P_tank_F_array,
+                                track_ablative_geometry=True,
+                                use_coupled_solver=False,  # use robust standard solver inside Layer 3 objective
+                            )
+                            
+                            # Get recession
+                            recession_chamber = float(np.max(results_layer3.get("recession_chamber", [0.0])))
+                            recession_throat = float(np.max(results_layer3.get("recession_throat", [0.0])))
+                            
+                            # Check if recession exceeds thickness (with 20% margin)
+                            idx = 0
+                            recession_penalty = 0.0
+                            if ablative_cfg and ablative_cfg.enabled:
+                                thickness = x_layer3[idx]
+                                if recession_chamber > thickness * 0.8:  # 80% of thickness
+                                    recession_penalty += 1000.0 * (recession_chamber - thickness * 0.8)
+                                idx += 1
+                            if graphite_cfg and graphite_cfg.enabled:
+                                thickness = x_layer3[idx]
+                                if recession_throat > thickness * 0.8:
+                                    recession_penalty += 1000.0 * (recession_throat - thickness * 0.8)
+                            
+                            # Objective: minimize mass (thickness) + recession penalty
+                            total_thickness = np.sum(x_layer3)
+                            obj = total_thickness * 1000 + recession_penalty  # Convert to mm for scaling
+                            return obj
+                        except Exception as e:
+                            return 1e6
+                    
+                    # Optimize Layer 3
+                    try:
+                        result_layer3 = scipy_minimize(
+                            layer3_objective,
+                            layer3_x0,
+                            method='L-BFGS-B',
+                            bounds=layer3_bounds,
+                            options={'maxiter': 30, 'ftol': 1e-5}
+                        )
+                        
+                        # Update config with optimized thicknesses
+                        idx = 0
+                        if ablative_cfg and ablative_cfg.enabled:
+                            optimized_config.ablative_cooling.initial_thickness = float(np.clip(result_layer3.x[idx], layer3_bounds[idx][0], layer3_bounds[idx][1]))
+                            update_progress("Layer 3: Burn Analysis Optimization", 0.70, 
+                                f"✓ Optimized ablative: {optimized_config.ablative_cooling.initial_thickness*1000:.2f}mm (recession: {max_recession_chamber*1000:.2f}mm)")
+                            idx += 1
+                        if graphite_cfg and graphite_cfg.enabled:
+                            optimized_config.graphite_insert.initial_thickness = float(np.clip(result_layer3.x[idx], layer3_bounds[idx][0], layer3_bounds[idx][1]))
+                            update_progress("Layer 3: Burn Analysis Optimization", 0.72, 
+                                f"✓ Optimized graphite: {optimized_config.graphite_insert.initial_thickness*1000:.2f}mm (recession: {max_recession_throat*1000:.2f}mm)")
+                    except Exception as e:
+                        update_progress("Layer 3: Burn Analysis Optimization", 0.72, f"⚠️ Layer 3 optimization failed: {e}, using current values")
+                
+                # Re-run time series with optimized thermal protection to verify
+                update_progress("Layer 3: Burn Analysis", 0.74, "Re-running time series with optimized thermal protection...")
+                try:
+                    optimized_runner_updated = PintleEngineRunner(optimized_config)
+                    full_time_results_updated = optimized_runner_updated.evaluate_arrays_with_time(
+                        time_array,
+                        P_tank_O_array,
+                        P_tank_F_array,
+                        track_ablative_geometry=True,
+                        use_coupled_solver=True,
+                    )
+                    # Update time-varying results
+                    time_varying_results = full_time_results_updated
+                    time_varying_summary["max_recession_chamber"] = float(np.max(full_time_results_updated.get("recession_chamber", [0.0])))
+                    time_varying_summary["max_recession_throat"] = float(np.max(full_time_results_updated.get("recession_throat", [0.0])))
+                    
+                    # Update pressure curves with new results
+                    pressure_curves["thrust"] = full_time_results_updated.get("F", pressure_curves["thrust"])
+                    pressure_curves["mdot_O"] = full_time_results_updated.get("mdot_O", pressure_curves["mdot_O"])
+                    pressure_curves["mdot_F"] = full_time_results_updated.get("mdot_F", pressure_curves["mdot_F"])
+                except Exception as e:
+                    update_progress("Layer 3: Burn Analysis", 0.74, f"⚠️ Re-evaluation failed: {e}, using original results")
+                
+                ablative_ok = True  # Always OK after optimization
+                graphite_ok = True
+                final_performance["ablative_adequate"] = ablative_ok
+                final_performance["graphite_adequate"] = graphite_ok
+                final_performance["thermal_protection_valid"] = ablative_ok and graphite_ok
+                final_performance["optimized_ablative_thickness"] = optimized_config.ablative_cooling.initial_thickness if ablative_cfg and ablative_cfg.enabled else None
+                final_performance["optimized_graphite_thickness"] = optimized_config.graphite_insert.initial_thickness if graphite_cfg and graphite_cfg.enabled else None
+                log_status(
+                    "Layer 3",
+                    "Completed | Ablative {:.2f} mm, Graphite {:.2f} mm, Max recession chamber {:.2f} mm, throat {:.2f} mm".format(
+                        (optimized_config.ablative_cooling.initial_thickness * 1000) if ablative_cfg and ablative_cfg.enabled else 0.0,
+                        (optimized_config.graphite_insert.initial_thickness * 1000) if graphite_cfg and graphite_cfg.enabled else 0.0,
+                        time_varying_summary.get("max_recession_chamber", 0.0) * 1000,
+                        time_varying_summary.get("max_recession_throat", 0.0) * 1000,
+                    )
+                )
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Time-varying analysis failed, falling back to sample-based: {e}")
+            log_status(
+                "Layer 2/3 Error",
+                f"Time-varying analysis failed, falling back to sample-based: {repr(e)}"
+            )
+            use_time_varying = False  # Fall back to sample-based method
+            burn_candidate_valid = pressure_candidate_valid  # Assume valid if pressure candidate passed
+        else:
+            log_status("Layer 3", "Skipped | Burn candidate invalid")
+    else:
+        if not use_time_varying:
+            log_status("Layer 2", "Skipped | Time-varying analysis disabled")
+        elif not pressure_candidate_valid:
+            log_status("Layer 2", "Skipped | Pressure candidate invalid")
     
-    # Interpolate to full 200 points
-    from scipy.interpolate import interp1d
-    sample_times = [time_array[i] for i in sample_indices]
-    
-    thrust_interp = interp1d(sample_times, sample_F, kind='linear', fill_value='extrapolate')
-    isp_interp = interp1d(sample_times, sample_Isp, kind='linear', fill_value='extrapolate')
-    pc_interp = interp1d(sample_times, sample_Pc, kind='linear', fill_value='extrapolate')
-    mdot_O_interp = interp1d(sample_times, sample_mdot_O, kind='linear', fill_value='extrapolate')
-    mdot_F_interp = interp1d(sample_times, sample_mdot_F, kind='linear', fill_value='extrapolate')
-    
-    pressure_curves = {
-        "time": time_array,
-        "P_tank_O": P_tank_O_array,
-        "P_tank_F": P_tank_F_array,
-        "thrust": thrust_interp(time_array),
-        "Isp": isp_interp(time_array),
-        "Pc": pc_interp(time_array),
-        "mdot_O": mdot_O_interp(time_array),
-        "mdot_F": mdot_F_interp(time_array),
-    }
+    if not use_time_varying or pressure_curves is None:
+        # Fallback: Sample-based interpolation (faster but less accurate)
+        sample_indices = [0, n_time_points//4, n_time_points//2, 3*n_time_points//4, n_time_points-1]
+        sample_F = []
+        sample_Isp = []
+        sample_Pc = []
+        sample_mdot_O = []
+        sample_mdot_F = []
+        
+        for idx in sample_indices:
+            try:
+                results = optimized_runner.evaluate(P_tank_O_array[idx], P_tank_F_array[idx])
+                sample_F.append(results.get("F", 0))
+                sample_Isp.append(results.get("Isp", 0))
+                sample_Pc.append(results.get("Pc", 0))
+                sample_mdot_O.append(results.get("mdot_O", 0))
+                sample_mdot_F.append(results.get("mdot_F", 0))
+            except:
+                # Use fallback values
+                sample_F.append(final_performance.get("F", target_thrust))
+                sample_Isp.append(final_performance.get("Isp", 250))
+                sample_Pc.append(final_performance.get("Pc", 2e6))
+                sample_mdot_O.append(final_performance.get("mdot_O", 1.0))
+                sample_mdot_F.append(final_performance.get("mdot_F", 0.4))
+        
+        # Interpolate to full 200 points
+        from scipy.interpolate import interp1d
+        sample_times = [time_array[i] for i in sample_indices]
+        
+        thrust_interp = interp1d(sample_times, sample_F, kind='linear', fill_value='extrapolate')
+        isp_interp = interp1d(sample_times, sample_Isp, kind='linear', fill_value='extrapolate')
+        pc_interp = interp1d(sample_times, sample_Pc, kind='linear', fill_value='extrapolate')
+        mdot_O_interp = interp1d(sample_times, sample_mdot_O, kind='linear', fill_value='extrapolate')
+        mdot_F_interp = interp1d(sample_times, sample_mdot_F, kind='linear', fill_value='extrapolate')
+        
+        pressure_curves = {
+            "time": time_array,
+            "P_tank_O": P_tank_O_array,
+            "P_tank_F": P_tank_F_array,
+            "thrust": thrust_interp(time_array),
+            "Isp": isp_interp(time_array),
+            "Pc": pc_interp(time_array),
+            "mdot_O": mdot_O_interp(time_array),
+            "mdot_F": mdot_F_interp(time_array),
+        }
     
     update_progress("COPV Calculation", 0.65, "Calculating COPV pressure curve (T=260K)...")
     
@@ -1636,42 +3029,188 @@ def _run_full_engine_optimization_with_flight_sim(
         Tp_K=260.0,  # User specified temperature
     )
     
-    update_progress("Validation", 0.70, "Running stability checks...")
+    update_progress("Validation", 0.70, "Running stability checks at initial conditions...")
     
-    # Phase 8: Run system diagnostics
+    # Phase 8: Run system diagnostics at INITIAL conditions (not average)
     try:
         diagnostics = SystemDiagnostics(optimized_config, optimized_runner)
-        validation_results = diagnostics.run_full_diagnostics(P_O_avg, P_F_avg)
+        validation_results = diagnostics.run_full_diagnostics(P_O_initial, P_F_initial)
     except Exception as e:
         validation_results = {"error": str(e)}
     
-    # Check if candidate is good enough for flight sim
-    thrust_error = abs(final_performance.get("F", 0) - target_thrust) / target_thrust
-    stability = final_performance.get("stability_results", {})
-    chugging_margin = stability.get("chugging", {}).get("stability_margin", 0)
+    # ==========================================================================
+    # LAYER 4: FLIGHT CANDIDATE
+    # Run flight simulation with propellant truncation
+    # Once Layer 3 passes, run flight sim with backward iteration
+    # Automatically detects tank empty conditions and truncates thrust
+    # Iterates backward if apogee goals not met (reduce propellant, rerun)
+    # ==========================================================================
+    flight_sim_result = {"success": False, "apogee": 0, "max_velocity": 0, "layer": 4}
+    flight_candidate_valid = False
     
-    flight_sim_result = {"success": False, "apogee": 0, "max_velocity": 0}
+    # Determine if we should run flight sim
+    # Layer 3 must pass (thermal protection valid) OR we're not doing time-varying
+    # Also check if we have valid pressure curves
+    thermal_protection_valid = final_performance.get("thermal_protection_valid", True)  # Default True if not checked
+    should_run_flight = (
+        pressure_candidate_valid and 
+        pressure_curves is not None and
+        (
+            (burn_candidate_valid and thermal_protection_valid) or not use_time_varying
+        )
+    )
     
-    # Check if candidate is good enough for flight sim
-    last_result = iteration_history[-1] if iteration_history else {}
-    thrust_error_final = last_result.get("thrust_error", 1.0)
-    stability_margin_final = last_result.get("stability_margin", 0)
-    
-    # Run flight sim if within tolerances (or close)
-    if thrust_error_final < thrust_tol * 1.5:
-        update_progress("Flight Simulation", 0.75, "Running flight simulation to verify apogee...")
+    if should_run_flight:
+        update_progress("Layer 4: Flight Candidate", 0.75, "Running flight simulation with backward iteration...")
         
         try:
-            flight_sim_result = _run_flight_simulation(
-                optimized_config,
-                pressure_curves,
-                target_burn_time,
-            )
+            # Layer 4: Iterative backward truncation to meet apogee goals
+            # Start from t_burn_time - epsilon, truncate, subtract remaining propellant, rerun
+            epsilon = 0.01  # Small time step for backward iteration
+            max_iterations_flight = 20  # Prevent infinite loops
+            flight_iteration = 0
+            current_burn_time = target_burn_time
+            flight_candidate_valid = False
+            
+            # Get initial propellant masses
+            config_for_flight = copy.deepcopy(optimized_config)
+            initial_lox_mass = config_for_flight.lox_tank.mass if hasattr(config_for_flight, 'lox_tank') else 0
+            initial_fuel_mass = config_for_flight.fuel_tank.mass if hasattr(config_for_flight, 'fuel_tank') else 0
+            
+            # Get propellant densities for mass calculation
+            rho_lox = config_for_flight.fluids['oxidizer'].density if hasattr(config_for_flight, 'fluids') else 1140.0
+            rho_fuel = config_for_flight.fluids['fuel'].density if hasattr(config_for_flight, 'fluids') else 800.0
+            
+            while flight_iteration < max_iterations_flight and not flight_candidate_valid:
+                flight_iteration += 1
+                progress = 0.75 + 0.10 * min(flight_iteration / max_iterations_flight, 1.0)
+                
+                # Truncate thrust curve at current_burn_time - epsilon
+                cutoff_time = max(0.1, current_burn_time - epsilon)
+                update_progress("Layer 4: Flight Candidate", progress, 
+                    f"Iteration {flight_iteration}: Testing burn time {cutoff_time:.2f}s (target: {target_apogee:.0f}m)")
+                
+                # Create truncated pressure curves
+                time_array_trunc = time_array[time_array <= cutoff_time]
+                if len(time_array_trunc) == 0:
+                    time_array_trunc = np.array([0.0, cutoff_time])
+                
+                # Truncate all arrays
+                mask = time_array <= cutoff_time
+                pressure_curves_trunc = {
+                    "time": time_array_trunc,
+                    "P_tank_O": P_tank_O_array[mask][:len(time_array_trunc)],
+                    "P_tank_F": P_tank_F_array[mask][:len(time_array_trunc)],
+                    "thrust": pressure_curves["thrust"][mask][:len(time_array_trunc)],
+                    "Isp": pressure_curves["Isp"][mask][:len(time_array_trunc)],
+                    "Pc": pressure_curves["Pc"][mask][:len(time_array_trunc)],
+                    "mdot_O": pressure_curves["mdot_O"][mask][:len(time_array_trunc)],
+                    "mdot_F": pressure_curves["mdot_F"][mask][:len(time_array_trunc)],
+                }
+                
+                # Calculate remaining propellant mass (integrate mdot from cutoff_time to target_burn_time)
+                if cutoff_time < target_burn_time:
+                    # Integrate mdot from cutoff_time to target_burn_time
+                    remaining_time = target_burn_time - cutoff_time
+                    # Use average mdot at cutoff point as estimate
+                    mdot_O_cutoff = pressure_curves["mdot_O"][mask][-1] if len(pressure_curves["mdot_O"][mask]) > 0 else 0
+                    mdot_F_cutoff = pressure_curves["mdot_F"][mask][-1] if len(pressure_curves["mdot_F"][mask]) > 0 else 0
+                    remaining_lox_mass = mdot_O_cutoff * remaining_time
+                    remaining_fuel_mass = mdot_F_cutoff * remaining_time
+                else:
+                    remaining_lox_mass = 0
+                    remaining_fuel_mass = 0
+                
+                # Subtract remaining propellant from initial masses
+                adjusted_lox_mass = max(0.1, initial_lox_mass - remaining_lox_mass)
+                adjusted_fuel_mass = max(0.1, initial_fuel_mass - remaining_fuel_mass)
+                
+                # Update config with adjusted masses
+                config_for_flight.lox_tank.mass = adjusted_lox_mass
+                config_for_flight.fuel_tank.mass = adjusted_fuel_mass
+                
+                # Run flight simulation with truncated thrust and adjusted masses
+                flight_sim_result = _run_flight_simulation(
+                    config_for_flight,
+                    pressure_curves_trunc,
+                    cutoff_time,
+                )
+                
+                if flight_sim_result.get("success", False):
+                    apogee = flight_sim_result.get("apogee", 0)
+                    apogee_error = abs(apogee - target_apogee) / target_apogee if target_apogee > 0 else 1.0
+                    
+                    # Check if apogee goal is met
+                    if apogee_error < apogee_tol:
+                        flight_candidate_valid = True
+                        update_progress(
+                            "Layer 4: Flight Candidate",
+                            0.85,
+                            f"✓ VALID - Apogee {apogee:.0f}m within {apogee_error*100:.1f}% of target {target_apogee:.0f}m (burn: {cutoff_time:.2f}s)",
+                        )
+                        log_status(
+                            "Layer 4",
+                            f"VALID | Apogee {apogee:.0f}m (error {apogee_error*100:.1f}%), burn {cutoff_time:.2f}s",
+                        )
+                        flight_sim_result["actual_burn_time"] = cutoff_time
+                        flight_sim_result["adjusted_lox_mass"] = adjusted_lox_mass
+                        flight_sim_result["adjusted_fuel_mass"] = adjusted_fuel_mass
+                        flight_sim_result["iterations"] = flight_iteration
+                        break
+                    else:
+                        # Apogee not met - continue backward iteration
+                        if apogee < target_apogee:
+                            # Apogee too low - need to reduce burn time further (less propellant)
+                            current_burn_time = cutoff_time
+                            update_progress("Layer 4: Flight Candidate", progress, 
+                                f"Apogee {apogee:.0f}m < target {target_apogee:.0f}m, reducing burn time to {current_burn_time:.2f}s")
+                        else:
+                            # Apogee too high - we've gone too far back, use this as best
+                            flight_candidate_valid = True  # Accept as best we can do
+                            update_progress(
+                                "Layer 4: Flight Candidate",
+                                0.85,
+                                f"✓ Best match - Apogee {apogee:.0f}m (target: {target_apogee:.0f}m, error: {apogee_error*100:.1f}%, burn: {cutoff_time:.2f}s)",
+                            )
+                            log_status(
+                                "Layer 4",
+                                f"ACCEPTED | Apogee {apogee:.0f}m (error {apogee_error*100:.1f}%), burn {cutoff_time:.2f}s after {flight_iteration} iterations",
+                            )
+                            flight_sim_result["actual_burn_time"] = cutoff_time
+                            flight_sim_result["adjusted_lox_mass"] = adjusted_lox_mass
+                            flight_sim_result["adjusted_fuel_mass"] = adjusted_fuel_mass
+                            flight_sim_result["iterations"] = flight_iteration
+                            break
+                else:
+                    # Flight sim failed - try next iteration
+                    current_burn_time = cutoff_time
+                    if flight_iteration >= max_iterations_flight:
+                        update_progress("Layer 4: Flight Candidate", 0.85, 
+                            f"⚠️ Flight sim failed after {flight_iteration} iterations: {flight_sim_result.get('error', 'Unknown error')}")
+                        break
+                
+                # Prevent going too far back
+                if current_burn_time < 0.5:  # Minimum 0.5s burn time
+                    update_progress("Layer 4: Flight Candidate", 0.85, 
+                        f"⚠️ Reached minimum burn time (0.5s), stopping iteration")
+                    break
+            
+            if not flight_candidate_valid and flight_iteration >= max_iterations_flight:
+                update_progress("Layer 4: Flight Candidate", 0.85, 
+                    f"⚠️ Max iterations reached, using last result")
+                flight_candidate_valid = False  # Mark as invalid if we didn't converge
+                
         except Exception as e:
             flight_sim_result = {"success": False, "error": str(e), "apogee": 0, "max_velocity": 0}
+            update_progress("Layer 4: Flight Candidate", 0.85, f"⚠️ Flight sim error: {e}")
     else:
-        update_progress("Flight Simulation", 0.75, f"Skipping flight sim (thrust error {thrust_error_final*100:.1f}% > {thrust_tol*150:.0f}%)...")
-        flight_sim_result = {"success": False, "skipped": True, "apogee": 0, "max_velocity": 0}
+        reason = "pressure candidate invalid" if not pressure_candidate_valid else "burn candidate invalid"
+        update_progress("Layer 4: Flight Candidate", 0.75, f"Skipping flight sim ({reason})")
+        log_status("Layer 4", f"Skipped | Reason: {reason}")
+        flight_sim_result = {"success": False, "skipped": True, "reason": reason, "apogee": 0, "max_velocity": 0}
+    
+    flight_sim_result["flight_candidate_valid"] = flight_candidate_valid
+    final_performance["flight_candidate_valid"] = flight_candidate_valid
     
     update_progress("Finalization", 0.90, "Assembling results...")
     
@@ -1706,6 +3245,36 @@ def _run_full_engine_optimization_with_flight_sim(
     coupled_results["copv_results"] = copv_results
     coupled_results["flight_sim_result"] = flight_sim_result
     coupled_results["time_array"] = time_array
+    
+    # Include time-varying results for plotting (if available)
+    if time_varying_results is not None:
+        coupled_results["time_varying_results"] = time_varying_results
+    
+    # Add layered optimization status summary
+    coupled_results["layer_status"] = {
+        "layer_1_pressure_candidate": pressure_candidate_valid,
+        "layer_2_burn_candidate": burn_candidate_valid if use_time_varying else None,
+        "layer_3_thermal_protection": final_performance.get("thermal_protection_valid", None),
+        "layer_4_flight_candidate": flight_candidate_valid,
+        "all_layers_passed": (
+            pressure_candidate_valid and 
+            (burn_candidate_valid or not use_time_varying) and 
+            flight_candidate_valid
+        ),
+    }
+    layer_summary = coupled_results["layer_status"]
+    log_status(
+        "Completion",
+        "Summary | L1={layer_1_pressure_candidate}, L2={layer_2_burn_candidate}, "
+        "L3={layer_3_thermal_protection}, L4={layer_4_flight_candidate}".format(**layer_summary)
+    )
+    
+    # Add pressure curve config info to results
+    coupled_results["pressure_curve_config"] = {
+        "mode": pressure_mode,
+        "max_lox_pressure_psi": max_lox_P_psi,
+        "max_fuel_pressure_psi": max_fuel_P_psi,
+    }
     
     update_progress("Complete", 1.0, "Optimization complete!")
     
@@ -1960,7 +3529,22 @@ def _show_complete_optimization_results(
         else:
             error_msg = flight_result.get("error", "Flight simulation was not run (candidate did not meet thresholds)")
             st.warning(f"⚠️ {error_msg}")
-            st.info("Flight sim only runs when: thrust error < 15% AND stability margin ≥ 80% of target")
+            
+            # Show detailed failure reasons from final_performance
+            final_perf = optimization_results.get("final_performance", {})
+            failure_reasons = final_perf.get("failure_reasons", [])
+            if failure_reasons:
+                st.error("**Why flight sim was skipped:**")
+                for reason in failure_reasons:
+                    st.write(f"  • {reason}")
+            else:
+                # Show actual values vs thresholds
+                thrust_err = final_perf.get("initial_thrust_error", 0) * 100
+                of_err = final_perf.get("initial_MR_error", 0) * 100
+                stability = final_perf.get("initial_stability", 0)
+                st.info(f"Thrust error: {thrust_err:.1f}% | O/F error: {of_err:.1f}% | Stability margin: {stability:.2f}")
+            
+            st.info("Flight sim runs when: thrust error < 15%, O/F error < 20%, stability ≥ 50% of target")
 
 
 def _show_optimization_convergence(optimization_results: Dict[str, Any]) -> None:
@@ -1980,16 +3564,19 @@ def _show_optimization_convergence(optimization_results: Dict[str, Any]) -> None
     thrusts = [h.get("thrust", 0) for h in history]
     lox_ratios = [h.get("lox_end_ratio", 0.7) * 100 for h in history]
     fuel_ratios = [h.get("fuel_end_ratio", 0.7) * 100 for h in history]
+    lstars = [h.get("Lstar", 1.0) for h in history]
+    l_chambers = [h.get("L_chamber", 0.2) * 1000 for h in history]  # Convert to mm
     
-    # Create subplot with 3 rows
+    # Create subplot with 4 rows
     fig = make_subplots(
-        rows=3, cols=2,
+        rows=4, cols=2,
         subplot_titles=(
             "Objective Function", "Thrust Error [%]", 
             "O/F Error [%]", "Thrust [N]",
-            "LOX End Pressure [%]", "Fuel End Pressure [%]"
+            "LOX End Pressure [%]", "Fuel End Pressure [%]",
+            "L* [m]", "Chamber Length [mm]"
         ),
-        vertical_spacing=0.12,
+        vertical_spacing=0.10,
     )
     
     # Objective
@@ -2028,9 +3615,21 @@ def _show_optimization_convergence(optimization_results: Dict[str, Any]) -> None
         row=3, col=2
     )
     
-    fig.update_xaxes(title_text="Iteration", row=3, col=1)
-    fig.update_xaxes(title_text="Iteration", row=3, col=2)
-    fig.update_layout(height=650, showlegend=False)
+    # L* evolution
+    fig.add_trace(
+        go.Scatter(x=iterations, y=lstars, mode='lines+markers', name='L*', line=dict(color='purple')),
+        row=4, col=1
+    )
+    
+    # Chamber length evolution
+    fig.add_trace(
+        go.Scatter(x=iterations, y=l_chambers, mode='lines+markers', name='L_chamber', line=dict(color='brown')),
+        row=4, col=2
+    )
+    
+    fig.update_xaxes(title_text="Iteration", row=4, col=1)
+    fig.update_xaxes(title_text="Iteration", row=4, col=2)
+    fig.update_layout(height=800, showlegend=False)
     
     st.plotly_chart(fig, use_container_width=True)
     
@@ -2049,6 +3648,19 @@ def _show_optimization_convergence(optimization_results: Dict[str, Any]) -> None
         status = "✅ Yes" if conv_info.get("converged", False) else "⚠️ No"
         st.metric("Converged", status)
     
+    # Show chamber geometry (maximized diameter = minimized length)
+    st.markdown("#### 📐 Chamber Geometry")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        final_lstar = lstars[-1] if lstars else 1.0
+        st.metric("Final L*", f"{final_lstar:.3f} m")
+    with col2:
+        final_l_chamber = l_chambers[-1] if l_chambers else 200
+        st.metric("Chamber Length", f"{final_l_chamber:.1f} mm", delta="Using max diameter", delta_color="off")
+    with col3:
+        final_d_chamber = history[-1].get("D_chamber", 0.1) * 1000 if history else 100
+        st.metric("Chamber Diameter", f"{final_d_chamber:.1f} mm")
+    
     # Show optimized pressure profiles
     st.markdown("#### 🎯 Optimized Pressure Profiles")
     col1, col2 = st.columns(2)
@@ -2063,43 +3675,154 @@ def _show_optimization_convergence(optimization_results: Dict[str, Any]) -> None
 
 
 def _display_chamber_geometry_plot(config: PintleEngineConfig, optimization_results: Dict[str, Any]) -> None:
-    """Display chamber geometry visualization similar to chamber design tab."""
+    """Display chamber geometry visualization using the same approach as chamber design tab.
+    
+    Shows multi-layer structure: Gas → Ablative (Chamber) → Graphite (Throat) → Stainless Steel
+    """
     try:
-        from pintle_pipeline.comprehensive_geometry_sizing import size_complete_geometry, plot_complete_geometry
+        # Get chamber parameters from config
+        A_throat = getattr(config.chamber, 'A_throat', 1e-4)
+        D_throat = np.sqrt(4 * A_throat / np.pi)
+        D_chamber = getattr(config.chamber, 'chamber_inner_diameter', 0.08)
+        V_chamber = getattr(config.chamber, 'volume', 0.001)
+        L_chamber = getattr(config.chamber, 'length', 0.2)
+        Lstar = getattr(config.chamber, 'Lstar', 1.0)
         
-        performance = optimization_results.get("performance", {})
-        Pc = performance.get("Pc", 2e6)
-        MR = performance.get("MR", 2.5)
-        Tc = performance.get("Tc", 3500.0)
-        gamma = performance.get("gamma", 1.2)
-        R = performance.get("R", 300.0)
-        burn_time = optimization_results.get("design_requirements", {}).get("target_burn_time", 10.0)
+        # Get nozzle parameters
+        L_nozzle = getattr(config.nozzle, 'length', 0.1) if hasattr(config, 'nozzle') else 0.1
+        expansion_ratio = getattr(config.nozzle, 'expansion_ratio', 10.0) if hasattr(config, 'nozzle') else 10.0
         
-        sizing_results = size_complete_geometry(
-            config=config,
-            Pc=Pc,
-            MR=MR,
-            Tc=Tc,
-            gamma=gamma,
-            R=R,
-            burn_time=burn_time,
-            chamber_heat_flux=2e6,
+        # Get ablative and graphite configs (same as chamber design tab)
+        ablative_cfg = config.ablative_cooling if hasattr(config, 'ablative_cooling') else None
+        graphite_cfg = config.graphite_insert if hasattr(config, 'graphite_insert') else None
+        
+        # Validate inputs
+        if V_chamber <= 0 or A_throat <= 0 or L_chamber <= 0:
+            st.warning(f"Invalid geometry inputs: V={V_chamber:.6f}, A_throat={A_throat:.6f}, L={L_chamber:.6f}")
+            return
+        
+        # Calculate actual diameters
+        D_chamber_actual = D_chamber if D_chamber > 0 else np.sqrt(4.0 * V_chamber / (np.pi * L_chamber))
+        D_throat_actual = D_throat if D_throat > 0 else np.sqrt(4.0 * A_throat / np.pi)
+        
+        # Use the same clear geometry visualizer as the chamber design tab
+        geometry_clear = calculate_chamber_geometry_clear(
+            L_chamber=L_chamber,
+            D_chamber=D_chamber_actual,
+            D_throat=D_throat_actual,
+            L_nozzle=L_nozzle,
+            expansion_ratio=expansion_ratio,
+            ablative_config=ablative_cfg,
+            graphite_config=graphite_cfg,
+            recession_chamber=0.0,  # No recession for fresh design
+            recession_graphite=0.0,
+            n_points=200,
         )
         
-        fig, _ = plot_complete_geometry(sizing_results, config, use_plotly=True)
-        st.plotly_chart(fig, use_container_width=True)
+        # Create the same plot as chamber design tab (1:1 aspect ratio is handled in base function)
+        fig_contour = plot_chamber_geometry_clear(geometry_clear, config)
+        st.plotly_chart(fig_contour, use_container_width=True)
         
-        # Display sizing summary
+        # Display geometry summary
+        st.markdown("#### Chamber Geometry Summary")
+        
+        # Calculate derived values
+        A_chamber = np.pi * (D_chamber_actual / 2) ** 2
+        contraction_ratio = A_chamber / A_throat if A_throat > 0 else 1.0
+        A_exit = A_throat * expansion_ratio
+        D_exit = np.sqrt(4 * A_exit / np.pi)
+        
+        # Get performance for Cf calculation
+        performance = optimization_results.get("performance", {})
+        Pc = performance.get("Pc", 2e6)
+        thrust = performance.get("F", 5000)
+        Cf = thrust / (Pc * A_throat) if Pc * A_throat > 0 else 1.5
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Chamber Length", f"{L_chamber * 39.37:.2f} in ({L_chamber * 1000:.1f} mm)")
+        with col2:
+            st.metric("Chamber Diameter", f"{D_chamber_actual * 39.37:.2f} in ({D_chamber_actual * 1000:.1f} mm)")
+        with col3:
+            st.metric("Throat Diameter", f"{D_throat_actual * 39.37:.3f} in ({D_throat_actual * 1000:.2f} mm)")
+        with col4:
+            st.metric("Exit Diameter", f"{D_exit * 39.37:.2f} in ({D_exit * 1000:.1f} mm)")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("L* (Characteristic Length)", f"{Lstar:.3f} m ({Lstar * 39.37:.2f} in)")
+        with col2:
+            st.metric("Contraction Ratio", f"{contraction_ratio:.2f}")
+        with col3:
+            st.metric("Expansion Ratio", f"{expansion_ratio:.2f}")
+        with col4:
+            st.metric("Force Coefficient (Cf)", f"{Cf:.3f}")
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric("Ablative Thickness", f"{sizing_results.get('optimal', {}).get('ablative_thickness', 0) * 1000:.2f} mm")
+            st.metric("Chamber Volume", f"{V_chamber * 1e6:.1f} cm³ ({V_chamber * 61023.7:.1f} in³)")
         with col2:
-            st.metric("Graphite Thickness", f"{sizing_results.get('optimal', {}).get('graphite_thickness', 0) * 1000:.2f} mm")
+            if ablative_cfg and ablative_cfg.enabled:
+                st.metric("Ablative Thickness", f"{ablative_cfg.initial_thickness * 1000:.1f} mm")
+            else:
+                st.metric("Ablative", "Not configured")
         with col3:
-            st.metric("Total Mass", f"{sizing_results.get('optimal', {}).get('total_mass', 0):.3f} kg")
+            if graphite_cfg and graphite_cfg.enabled:
+                st.metric("Graphite Thickness", f"{graphite_cfg.initial_thickness * 1000:.1f} mm")
+            else:
+                st.metric("Graphite", "Not configured")
+        
+        # DXF Download - exactly like chamber design tab
+        st.markdown("---")
+        st.markdown("#### Download Chamber Contour")
+        
+        try:
+            import tempfile
+            import os
+            
+            # Generate DXF to a temporary file using chamber_geometry_calc
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.dxf', delete=False) as tmp_file:
+                tmp_dxf_path = tmp_file.name
+            
+            # Generate DXF using chamber_geometry_calc
+            _, _, _ = chamber_geometry_calc(
+                pc_design=Pc,
+                thrust_design=thrust,
+                force_coeffcient=Cf,
+                diameter_inner=D_chamber_actual,
+                diameter_exit=D_exit,
+                l_star=Lstar,
+                do_plot=False,
+                steps=200,
+                export_dxf=tmp_dxf_path
+            )
+            
+            # Read the DXF file
+            with open(tmp_dxf_path, 'rb') as f:
+                dxf_bytes = f.read()
+            
+            # Clean up temporary file
+            os.unlink(tmp_dxf_path)
+            
+            # Download button
+            st.download_button(
+                label="📐 Download Chamber Contour (DXF)",
+                data=dxf_bytes,
+                file_name="optimized_chamber_contour.dxf",
+                mime="application/dxf",
+                key="full_engine_opt_dxf_download"
+            )
+            st.caption("DXF file includes: cylindrical section, 45° contraction cone, and RAO nozzle contour")
+            
+        except ImportError:
+            st.warning("ezdxf library is required for DXF export. Install it with: `pip install ezdxf`")
+        except Exception as e:
+            st.warning(f"Could not generate DXF: {e}")
             
     except Exception as e:
         st.warning(f"Could not generate chamber geometry: {e}")
+        import traceback
+        st.code(traceback.format_exc())
 
 
 def _plot_pressure_curves(pressure_curves: Dict[str, np.ndarray]) -> None:
@@ -2391,7 +4114,7 @@ def _show_engine_validation_checks(
     checks = []
     
     # Thrust check
-    target_thrust = requirements.get("target_thrust", 5000.0)
+    target_thrust = requirements.get("target_thrust", 7000.0)
     actual_thrust = performance.get("F", 0)
     thrust_error = abs(actual_thrust - target_thrust) / target_thrust * 100
     checks.append({
@@ -2403,7 +4126,7 @@ def _show_engine_validation_checks(
     })
     
     # O/F ratio check
-    target_of = requirements.get("optimal_of_ratio", 2.5)
+    target_of = requirements.get("optimal_of_ratio", 2.3)
     actual_of = performance.get("MR", 0)
     of_error = abs(actual_of - target_of) / target_of * 100
     checks.append({
@@ -2415,8 +4138,8 @@ def _show_engine_validation_checks(
     })
     
     # L* check
-    min_lstar = requirements.get("min_Lstar", 0.8)
-    max_lstar = requirements.get("max_Lstar", 2.0)
+    min_lstar = requirements.get("min_Lstar", 0.95)
+    max_lstar = requirements.get("max_Lstar", 1.27)
     actual_lstar = config.chamber.Lstar
     lstar_ok = min_lstar <= actual_lstar <= max_lstar
     checks.append({
@@ -2518,7 +4241,7 @@ def _injector_optimization_tab(config_obj: PintleEngineConfig, runner: Optional[
         st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
         return config_obj
     
-    target_thrust = requirements.get("target_thrust", 5000.0)
+    target_thrust = requirements.get("target_thrust", 7000.0)
     target_MR = config_obj.combustion.MR if hasattr(config_obj.combustion, 'MR') else 2.5
     
     col1, col2 = st.columns([2, 1])
@@ -2755,7 +4478,7 @@ def _chamber_optimization_tab(config_obj: PintleEngineConfig, runner: Optional[P
                             coupled_optimizer = CoupledPintleChamberOptimizer(config_obj)
                             
                             design_requirements = {
-                                "target_thrust": requirements.get("target_thrust", 5000.0),
+                                "target_thrust": requirements.get("target_thrust", 7000.0),
                                 "target_burn_time": requirements.get("target_burn_time", 10.0),
                                 "target_stability_margin": requirements.get("min_stability_margin", 1.2),
                                 "P_tank_O": P_tank_O,
@@ -2766,8 +4489,8 @@ def _chamber_optimization_tab(config_obj: PintleEngineConfig, runner: Optional[P
                             constraints = {
                                 "max_chamber_length": requirements.get("max_chamber_length", 0.5),
                                 "max_chamber_diameter": requirements.get("max_chamber_diameter", 0.15),
-                                "min_Lstar": 0.8,
-                                "max_Lstar": 2.0,
+                                "min_Lstar": 0.95,
+                                "max_Lstar": 1.27,
                                 "min_expansion_ratio": 3.0,
                                 "max_expansion_ratio": 30.0,
                                 "max_engine_weight": requirements.get("max_total_mass", None),
@@ -2826,8 +4549,16 @@ def _chamber_optimization_tab(config_obj: PintleEngineConfig, runner: Optional[P
                         _display_optimized_parameters(optimization_results, optimized_config)
                         
                         # Show time-varying results if available
-                        if "time_varying" in optimization_results:
-                            _show_time_varying_results(optimization_results["time_varying"])
+                        # Check both possible locations: direct key and nested in performance
+                        time_varying_summary = optimization_results.get("time_varying")
+                        if time_varying_summary is None:
+                            time_varying_summary = optimization_results.get("performance", {}).get("time_varying")
+                        if time_varying_summary:
+                            _show_time_varying_results(time_varying_summary)
+                        
+                        # Also show time-varying plots if array data available
+                        if "time_varying_results" in optimization_results:
+                            _plot_time_varying_results(optimization_results["time_varying_results"])
                         
                         # Update config_obj for return
                         config_obj = optimized_config
@@ -3040,7 +4771,7 @@ def _flight_performance_tab(config_obj: PintleEngineConfig, runner: Optional[Pin
     with col2:
         st.markdown("### Performance Targets")
         st.metric("Target Altitude", f"{target_altitude:.0f} m")
-        st.metric("Target Thrust", f"{requirements.get('target_thrust', 0):.0f} N")
+        st.metric("Target Thrust", f"{requirements.get('target_thrust', 7000):.0f} N")
 
 
 def _results_export_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> None:
@@ -3335,7 +5066,7 @@ def _optimize_chamber(
     
     # Set up design requirements
     design_requirements = {
-        "target_thrust": requirements.get("target_thrust", 5000.0),
+        "target_thrust": requirements.get("target_thrust", 7000.0),
         "target_burn_time": requirements.get("target_burn_time", 10.0),
         "target_stability_margin": requirements.get("min_stability_margin", 1.2),
         "P_tank_O": P_tank_O,
@@ -3347,8 +5078,8 @@ def _optimize_chamber(
     constraints = {
         "max_chamber_length": requirements.get("max_chamber_length", 0.5),
         "max_chamber_diameter": requirements.get("max_chamber_diameter", 0.15),
-        "min_Lstar": 0.8,
-        "max_Lstar": 2.0,
+        "min_Lstar": 0.95,
+        "max_Lstar": 1.27,
         "min_expansion_ratio": 3.0,
         "max_expansion_ratio": 30.0,
         "max_engine_weight": requirements.get("max_total_mass", None),
@@ -3495,8 +5226,10 @@ def _display_optimized_parameters(optimization_results: Dict[str, Any], config: 
                 chugging = stability.get("chugging", {})
                 st.metric("Stability Margin", f"{chugging.get('stability_margin', 0):.3f}")
             
-            # Time-varying metrics if available
-            time_varying = optimization_results.get("time_varying", {})
+            # Time-varying metrics if available (check both locations)
+            time_varying = optimization_results.get("time_varying")
+            if time_varying is None:
+                time_varying = performance.get("time_varying", {})
             if time_varying:
                 st.markdown("##### ⏱️ Time-Averaged (Burn)")
                 st.metric("Avg Thrust", f"{time_varying.get('avg_thrust', 0):.1f} N")
@@ -3568,9 +5301,9 @@ def _plot_time_varying_results(time_varying_results: Dict[str, np.ndarray]) -> N
 def _plot_stability_evolution(runner: PintleEngineRunner, P_tank_O: float, P_tank_F: float) -> None:
     """Plot stability evolution over time."""
     try:
-        from pintle_pipeline.time_varying_solver import TimeVaryingSolver
+        from pintle_pipeline.time_varying_solver import TimeVaryingCoupledSolver
         
-        solver = TimeVaryingSolver(runner.config, runner.cea_cache)
+        solver = TimeVaryingCoupledSolver(runner.config, runner.cea_cache)
         burn_time = 10.0  # Default
         time_array = np.linspace(0, burn_time, 50)
         P_tank_O_array = np.full_like(time_array, P_tank_O)

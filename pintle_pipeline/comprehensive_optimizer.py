@@ -118,11 +118,29 @@ class ComprehensivePintleOptimizer:
                 if target_mr is not None:
                     mr_error = abs(MR_actual - target_mr) / target_mr
                 
-                # Stability penalty
+                # Stability penalty (check all three types)
                 stability = results.get("stability_results", {})
+                
+                # Chugging stability
                 chugging = stability.get("chugging", {})
-                stability_margin = chugging.get("stability_margin", 0.0)
-                stability_penalty = max(0.0, 1.2 - stability_margin)  # Want margin > 1.2
+                chugging_margin = chugging.get("stability_margin", 0.0)
+                
+                # Acoustic stability
+                acoustic = stability.get("acoustic", {})
+                acoustic_margin = acoustic.get("stability_margin", 0.0)
+                
+                # Feed system stability
+                feed_system = stability.get("feed_system", {})
+                feed_margin = feed_system.get("stability_margin", 0.0)
+                
+                # Default minimums (can be overridden by constraints if provided)
+                min_stability = 1.2
+                chugging_penalty = max(0.0, min_stability - chugging_margin)
+                acoustic_penalty = max(0.0, min_stability - acoustic_margin)
+                feed_penalty = max(0.0, min_stability - feed_margin)
+                
+                # Combined stability penalty
+                stability_penalty = chugging_penalty + acoustic_penalty + feed_penalty
                 
                 # Combined objective
                 objective_value = (

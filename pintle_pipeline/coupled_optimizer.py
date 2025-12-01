@@ -104,6 +104,10 @@ class CoupledPintleChamberOptimizer:
         prev_pintle_params = None
         prev_chamber_params = None
         
+        # Track time-varying results from the last successful optimization
+        last_time_varying_results = None
+        last_time_varying_summary = None
+        
         for iteration in range(max_iterations):
             iteration_result = {
                 "iteration": iteration,
@@ -172,16 +176,33 @@ class CoupledPintleChamberOptimizer:
                 iteration_result["chamber_config"] = self._extract_chamber_params(current_config)
                 iteration_result["chamber_performance"] = chamber_results["performance"]
                 
+                # Preserve time-varying results if available (from _optimize_chamber_time_varying)
+                if "time_varying_results" in chamber_results:
+                    last_time_varying_results = chamber_results["time_varying_results"]
+                if "performance" in chamber_results and "time_varying" in chamber_results["performance"]:
+                    last_time_varying_summary = chamber_results["performance"]["time_varying"]
+                
             except Exception as e:
                 import warnings
                 warnings.warn(f"Chamber optimization failed at iteration {iteration}: {e}")
                 iteration_result["chamber_config"] = self._extract_chamber_params(current_config)
             
             # Step 3: Evaluate final performance
+            # Use chamber performance which includes time_varying data, augment with single-point eval
             try:
                 runner = PintleEngineRunner(current_config)
                 final_performance = runner.evaluate(P_tank_O, P_tank_F)
-                iteration_result["performance"] = final_performance
+                
+                # Merge with chamber performance to preserve time_varying data
+                if iteration_result.get("chamber_performance"):
+                    merged_performance = dict(iteration_result["chamber_performance"])
+                    # Update with single-point values but keep time_varying from chamber optimization
+                    for key, value in final_performance.items():
+                        if key != "time_varying":  # Don't overwrite time_varying
+                            merged_performance[key] = value
+                    iteration_result["performance"] = merged_performance
+                else:
+                    iteration_result["performance"] = final_performance
             except Exception as e:
                 import warnings
                 warnings.warn(f"Performance evaluation failed at iteration {iteration}: {e}")
@@ -224,7 +245,11 @@ class CoupledPintleChamberOptimizer:
         runner = PintleEngineRunner(current_config)
         final_performance = runner.evaluate(P_tank_O, P_tank_F)
         
-        return {
+        # Include time-varying summary in final performance if available
+        if last_time_varying_summary is not None:
+            final_performance["time_varying"] = last_time_varying_summary
+        
+        result = {
             "optimized_config": current_config,
             "iteration_history": iteration_history,
             "convergence_info": {
@@ -236,6 +261,12 @@ class CoupledPintleChamberOptimizer:
             "design_requirements": design_requirements,
             "constraints": constraints,
         }
+        
+        # Include time-varying results (array data) if available for plotting
+        if last_time_varying_results is not None:
+            result["time_varying_results"] = last_time_varying_results
+        
+        return result
     
     def _optimize_chamber_time_varying(
         self,

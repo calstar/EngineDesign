@@ -236,7 +236,7 @@ chamber:
   volume: 0.001244586
   A_throat: 0.001037155
   length: 0.1423623
-  Lstar: 1.2
+  Lstar: 1.11  # Mid-range between min (0.95) and max (1.27)
   chamber_inner_diameter: 0.12065
   design_pressure: 4481594.0
   design_thrust: 7000.0
@@ -245,7 +245,7 @@ nozzle:
   A_throat: 0.001037155
   A_exit: 0.00810732
   expansion_ratio: 7.8169
-  exit_diameter: 0.1016
+  exit_diameter: 0.101
   efficiency: 0.95
 solver:
   method: brentq
@@ -263,17 +263,18 @@ lox_tank:
   lox_h: 1.14
   lox_radius: 0.06985
   ox_tank_pos: 0.8
-  mass: 22.0  # LOX propellant mass [kg] (not tank structure mass)
+  mass: 4.035  # LOX propellant mass [kg] (not tank structure mass)
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
   fuel_tank_pos: 3
-  mass: 4.0  # RP-1 propellant mass [kg] (not tank structure mass)
+  mass: 8.762  # RP-1 propellant mass [kg] (not tank structure mass)
 press_tank:
   press_h: 0.457
   press_radius: 0.0762
   pres_tank_pos: 3.6
   mass: null
+  free_volume_L: 4.5  # COPV free internal volume [L]
 # Rocket configuration - NEW MASS MODEL
 # =====================================
 # Coordinate system: z=0 at rocket tail, positive toward nose
@@ -297,7 +298,7 @@ rocket:
   engine_mass: 8.0                 # Engine + plumbing [kg]
   lox_tank_structure_mass: 5.0     # Empty LOX tank [kg]
   fuel_tank_structure_mass: 3.0    # Empty fuel tank [kg]
-  copv_dry_mass: 5.0               # Empty COPV tank [kg]
+  copv_dry_mass: 2.969             # Empty COPV tank [kg]
   engine_cm_offset: 0.15           # Engine CM above nozzle exit [m]
   
   # COMPUTED: propulsion_dry_mass = engine + lox_tank + fuel_tank + copv = 21.0 kg

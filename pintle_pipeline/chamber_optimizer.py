@@ -374,7 +374,7 @@ class ChamberOptimizer:
                 "fun": weight_constraint,
             })
         
-        # Constraint: Stability margin (must meet minimum)
+        # Constraint: Stability margin (must meet minimum for all three types)
         def stability_constraint(x):
             try:
                 config = self._update_config_from_x(x, self.base_config)
@@ -382,11 +382,33 @@ class ChamberOptimizer:
                 results = runner.evaluate(P_tank_O, P_tank_F)
                 
                 stability = results.get("stability_results", {})
-                chugging = stability.get("chugging", {})
-                stability_margin = chugging.get("stability_margin", 0.0)
                 
+                # Chugging stability
+                chugging = stability.get("chugging", {})
+                chugging_margin = chugging.get("stability_margin", 0.0)
+                
+                # Acoustic stability
+                acoustic = stability.get("acoustic", {})
+                acoustic_margin = acoustic.get("stability_margin", 0.0)
+                
+                # Feed system stability
+                feed_system = stability.get("feed_system", {})
+                feed_margin = feed_system.get("stability_margin", 0.0)
+                
+                # Get minimum requirements (with fallback to general target_stability_margin)
                 min_stability = design_requirements.get("target_stability_margin", 1.2)
-                return stability_margin - min_stability
+                chugging_min = design_requirements.get("chugging_margin_min", min_stability)
+                acoustic_min = design_requirements.get("acoustic_margin_min", min_stability)
+                feed_min = design_requirements.get("feed_stability_min", min_stability)
+                
+                # Return minimum margin (all must pass, so use the worst case)
+                min_margin = min(
+                    chugging_margin - chugging_min,
+                    acoustic_margin - acoustic_min,
+                    feed_margin - feed_min
+                )
+                
+                return min_margin
                 
             except Exception:
                 return -1e6  # Penalty for invalid configuration

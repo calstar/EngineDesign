@@ -186,7 +186,18 @@ class PintleEngineRunner:
         Cd_F = diagnostics.get("Cd_F", np.nan)
         
         # Calculate stability analysis if enabled
-        stability_results = None
+        stability_results = {
+            "stability_state": "unstable",
+            "stability_score": 0.0,
+            "is_stable": False,
+            "chugging": {"frequency": 0.0, "stability_margin": 0.0, "stability_index": 0.0, "period": 0.0, "tau_residence": 0.0, "Lstar": 0.0},
+            "acoustic": {"stability_margin": 0.0, "modes": {}, "longitudinal_modes": [], "transverse_modes": [], "sound_speed": 0.0},
+            "feed_system": {"pogo_frequency": 0.0, "surge_frequency": 0.0, "water_hammer_margin": 0.0, "stability_margin": 0.0, "sound_speed": 0.0},
+            "mode_coupling": [],
+            "Lstar": 0.0,
+            "issues": ["Stability analysis not available"],
+            "recommendations": [],
+        }
         try:
             from pintle_pipeline.stability_analysis import comprehensive_stability_analysis
             
@@ -204,6 +215,7 @@ class PintleEngineRunner:
         except Exception as e:
             import warnings
             warnings.warn(f"Stability analysis failed: {e}")
+            # Keep default empty structure above
         
         # Compile results
         results = {
@@ -240,6 +252,7 @@ class PintleEngineRunner:
             "Cd_F": Cd_F,
             "cooling": cooling_results,
             "stability": stability_results,
+            "stability_results": stability_results,  # Alias for compatibility with optimization code
             "pressure_profile": pressure_profile,
             "chamber_intrinsics": chamber_intrinsics,
             "injector_pressure": injector_pressure_diagnostics,

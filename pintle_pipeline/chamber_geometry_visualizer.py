@@ -413,13 +413,35 @@ def plot_chamber_geometry_clear(geometry: Dict[str, np.ndarray], config: Optiona
         showlegend=False,
     ))
     
+    # Calculate data ranges for proper 1:1 aspect ratio
+    x_min, x_max = positions.min(), positions.max()
+    y_max = max(np.max(R_stainless), np.max(R_gas))
+    y_min = -y_max  # Symmetric about centerline
+    
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    
+    # Add 5% padding
+    x_pad = 0.05 * x_range
+    y_pad = 0.05 * y_range
+    
     fig.update_layout(
         title="Chamber Geometry: Gas → Ablative (Chamber) → Graphite (Throat) → Stainless Steel",
         xaxis_title="Axial Position [m]",
         yaxis_title="Radius [m]",
         height=600,
         showlegend=True,
-        yaxis=dict(scaleanchor="x", scaleratio=1),
+        # Force 1:1 aspect ratio with explicit ranges
+        xaxis=dict(
+            range=[x_min - x_pad, x_max + x_pad],
+            constrain="domain",
+        ),
+        yaxis=dict(
+            range=[y_min - y_pad, y_max + y_pad],
+            scaleanchor="x",
+            scaleratio=1,
+            constrain="domain",
+        ),
     )
     
     return fig

@@ -508,7 +508,7 @@ class RocketConfig(BaseModel):
     inertia: list[float] = Field(description="AIRFRAME inertia only (without motor/propulsion), relative to airframe CM [Ixx, Iyy, Izz] [kg·m²]. Motor inertia is added separately by RocketPy from propulsion_dry_mass.")
     radius: float = Field(gt=0, description="Rocket body radius (outer diameter / 2) [m]")
     rocket_length: Optional[float] = Field(default=None, gt=0, description="Total rocket length from tail to nose tip [m]. Used for MoI estimation.")
-    motor_position: float = Field(default=0.5, description="Nozzle exit position from rocket tail (z=0 at tail, positive toward nose) [m]")
+    motor_position: float = Field(default=0.0, description="Nozzle exit position from rocket tail (z=0 at tail, positive toward nose) [m]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
     
     # LEGACY fields - kept for backward compatibility

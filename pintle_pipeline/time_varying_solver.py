@@ -90,6 +90,8 @@ class TimeVaryingState:
     # Stability
     chugging_frequency: float  # [Hz]
     chugging_stability_margin: float
+    stability_state: str  # "stable", "marginal", or "unstable"
+    stability_score: float  # 0-1 score from comprehensive analysis
     acoustic_modes: Dict[str, float]
     feed_stability: Dict[str, float]
     
@@ -688,6 +690,8 @@ class TimeVaryingCoupledSolver:
                 cstar_actual,
                 gamma_chamber,
                 Pc,
+                R=R_chamber,
+                Tc=Tc,
             )
             chugging_freq = chugging["frequency"]
             stability_margin = chugging.get("stability_margin", 0.5)
@@ -695,9 +699,9 @@ class TimeVaryingCoupledSolver:
             acoustic = calculate_acoustic_modes(
                 self.L_chamber,
                 D_chamber_new,
+                Tc,
                 gamma_chamber,
                 R_chamber,
-                Tc,
             )
             
             feed_stability = {
@@ -705,6 +709,39 @@ class TimeVaryingCoupledSolver:
                 "surge_frequency": np.nan,
                 "stability_margin": 1.0,
             }
+        
+        # Use comprehensive stability analysis if available
+        comprehensive_stability = None
+        try:
+            from pintle_pipeline.stability_analysis import comprehensive_stability_analysis
+            
+            # Create diagnostics dict for comprehensive analysis
+            diagnostics = {
+                "mdot_O": mdot_O,
+                "mdot_F": mdot_F,
+                "P_tank_O": P_tank_O,
+                "P_tank_F": P_tank_F,
+            }
+            
+            comprehensive_stability = comprehensive_stability_analysis(
+                config=self.config,
+                Pc=Pc,
+                MR=MR,
+                mdot_total=mdot_total,
+                cstar=cstar_actual,
+                gamma=gamma_chamber,
+                R=R_chamber,
+                Tc=Tc,
+                diagnostics=diagnostics,
+            )
+            
+            # Update stability_margin from comprehensive analysis
+            stability_margin = comprehensive_stability.get("chugging", {}).get("stability_margin", stability_margin)
+            chugging_freq = comprehensive_stability.get("chugging", {}).get("frequency", chugging_freq)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Comprehensive stability analysis failed: {e}")
+            comprehensive_stability = None
         
         # Multi-layer thermal analysis (phenolic → stainless steel)
         # Calculate temperature profile through wall to check stainless steel temperature
@@ -829,7 +866,6 @@ class TimeVaryingCoupledSolver:
             Lstar=Lstar_new,
             D_chamber=D_chamber_new,
             D_throat=D_throat_new,  # CRITICAL: This stays constant with graphite, grows without graphite
-            D_throat=D_throat_new,
             D_exit=D_exit_new,
             eps=eps_new,
             recession_chamber=recession_chamber_new,
@@ -865,6 +901,8 @@ class TimeVaryingCoupledSolver:
             equilibrium_factor=equilibrium_factor,
             chugging_frequency=chugging_freq,
             chugging_stability_margin=stability_margin,
+            stability_state=comprehensive_stability.get("stability_state", "unstable") if comprehensive_stability else "unstable",
+            stability_score=comprehensive_stability.get("stability_score", 0.0) if comprehensive_stability else 0.0,
             acoustic_modes=acoustic,
             feed_stability=feed_stability,
             heat_flux_chamber=heat_flux_chamber,
@@ -975,6 +1013,8 @@ class TimeVaryingCoupledSolver:
             "throat_area_change_pct": np.array([(s.A_throat - self.A_throat_initial) / self.A_throat_initial * 100.0 for s in self.state_history]),
             "chugging_frequency": np.array([s.chugging_frequency for s in self.state_history]),
             "chugging_stability_margin": np.array([s.chugging_stability_margin for s in self.state_history]),
+            "stability_state": np.array([s.stability_state for s in self.state_history]),
+            "stability_score": np.array([s.stability_score for s in self.state_history]),
             "heat_flux_chamber": np.array([s.heat_flux_chamber for s in self.state_history]),
             "heat_flux_throat": np.array([s.heat_flux_throat for s in self.state_history]),
             "ablative_recession_rate": np.array([s.ablative_recession_rate for s in self.state_history]),
