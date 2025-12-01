@@ -1006,7 +1006,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             key="opt_require_stable_state",
             help="If checked, optimizer will only converge when stability_state == 'stable'. If unchecked, allows 'marginal' state."
         )
-
+        
         stability_margin_handicap = st.slider(
             "Stability Margin Handicap",
             min_value=0.0,
@@ -1627,6 +1627,9 @@ def _run_full_engine_optimization_with_flight_sim(
     def update_progress(stage: str, progress: float, message: str):
         if progress_callback:
             progress_callback(stage, progress, message)
+    
+    # Add a clear separator line at the start of each optimization run
+    log_status("Run", "-" * 80)
     
     update_progress("Initialization", 0.02, "Extracting requirements...")
     
@@ -2564,11 +2567,26 @@ def _run_full_engine_optimization_with_flight_sim(
                             chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
                             min_stability = max(0.0, min(1.0, (float(np.min(chugging)) - 0.3) * 1.5))
                         
-                        # Check thrust
-                        thrust_hist = results_layer2.get("F", np.full(n_time_points, target_thrust))
-                        check_indices = np.arange(n_time_points - 1)  # Exclude t=burn_time
-                        thrust_errors = np.abs(thrust_hist[check_indices] - target_thrust) / target_thrust
-                        max_thrust_err = float(np.max(thrust_errors))
+                        # Check thrust – be robust to shorter-than-expected histories
+                        thrust_hist = np.atleast_1d(
+                            results_layer2.get("F", np.full(n_time_points, target_thrust))
+                        )
+                        available_n = min(thrust_hist.shape[0], n_time_points)
+                        if available_n >= 2:
+                            check_indices = np.arange(available_n - 1)  # Exclude last point
+                            thrust_hist = thrust_hist[:available_n]
+                            thrust_errors = (
+                                np.abs(thrust_hist[check_indices] - target_thrust) / target_thrust
+                            )
+                            max_thrust_err = float(np.max(thrust_errors))
+                        elif available_n == 1:
+                            # Only one valid point – use it as an approximate error
+                            max_thrust_err = float(
+                                abs(thrust_hist[0] - target_thrust) / max(target_thrust, 1e-9)
+                            )
+                        else:
+                            # No valid points – treat as very bad candidate
+                            max_thrust_err = 1.0
                         
                         # Penalty for poor performance
                         stability_penalty = max(0, 0.7 - min_stability) * 10.0  # Want stability >= 0.7
@@ -2578,6 +2596,18 @@ def _run_full_engine_optimization_with_flight_sim(
                         obj = recession_chamber * 1000 + recession_throat * 1000 + stability_penalty + thrust_penalty
                         return obj
                     except Exception as e:
+                        # Detailed logging to debug time-varying solver issues inside Layer 2
+                        import traceback
+                        log_status(
+                            "Layer 2 Objective Error",
+                            (
+                                f"Exception in layer2_objective: {repr(e)} | "
+                                f"x_layer2={np.array(x_layer2).tolist()} | "
+                                f"time_len={len(time_array)}, "
+                                f"P_O_len={len(P_tank_O_array)}, P_F_len={len(P_tank_F_array)} | "
+                                f"traceback={traceback.format_exc(limit=3).replace(chr(10), ' | ')}"
+                            ),
+                        )
                         return 1e6
                 
                 # Optimize Layer 2
@@ -2609,16 +2639,33 @@ def _run_full_engine_optimization_with_flight_sim(
             # Now run time series with optimized initial guesses
             update_progress("Layer 2: Burn Candidate", 0.64, "Running time series analysis with optimized guesses...")
             optimized_runner = PintleEngineRunner(optimized_config)  # Recreate with updated config
-            # NOTE: Use the standard time-varying solver here for robustness.
-            # The fully-coupled solver can be more fragile for edge-case configs
-            # and is still accessible from dedicated analysis tools.
-            full_time_results = optimized_runner.evaluate_arrays_with_time(
-                time_array,
-                P_tank_O_array,
-                P_tank_F_array,
-                track_ablative_geometry=True,
-                use_coupled_solver=False,
-            )
+            # Use the standard time-varying solver here for robustness.
+            try:
+                full_time_results = optimized_runner.evaluate_arrays_with_time(
+                    time_array,
+                    P_tank_O_array,
+                    P_tank_F_array,
+                    track_ablative_geometry=True,
+                    use_coupled_solver=False,
+                )
+            except Exception as e:
+                import traceback
+                # Log detailed context so we can see exactly what failed inside the time-varying solver
+                log_status(
+                    "Layer 2 BurnCandidate Error",
+                    (
+                        f"Exception in burn-candidate time series: {repr(e)} | "
+                        f"time_len={len(time_array)}, P_O_len={len(P_tank_O_array)}, "
+                        f"P_F_len={len(P_tank_F_array)} | "
+                        f"ablative_thickness={getattr(getattr(optimized_config, 'ablative_cooling', None), 'initial_thickness', None)} | "
+                        f"graphite_thickness={getattr(getattr(optimized_config, 'graphite_insert', None), 'initial_thickness', None)} | "
+                        f"traceback={traceback.format_exc(limit=4).replace(chr(10), ' | ')}"
+                    ),
+                )
+                # Mark time-varying analysis as failed and fall back to sample-based behavior
+                use_time_varying = False
+                burn_candidate_valid = pressure_candidate_valid
+                full_time_results = {}
             
             # Use time-varying results for pressure curves
             pressure_curves = {
@@ -2725,9 +2772,9 @@ def _run_full_engine_optimization_with_flight_sim(
                 # Align histories to available_n
                 thrust_history = thrust_history[:available_n]
                 MR_history = MR_history[:available_n]
-                
+            
                 # Check thrust error at each time point (excluding last)
-                thrust_errors = np.abs(thrust_history[check_indices] - target_thrust) / target_thrust
+            thrust_errors = np.abs(thrust_history[check_indices] - target_thrust) / target_thrust
             max_thrust_error = float(np.max(thrust_errors))
             avg_thrust_error = float(np.mean(thrust_errors))
             
@@ -2773,24 +2820,24 @@ def _run_full_engine_optimization_with_flight_sim(
                     min_stability_state_time = "marginal"
                 else:
                     min_stability_state_time = "unstable"
-                
-                # Stability check for Layer 2 (time-varying, excluding t=burn_time)
-                if require_stable_state:
-                    # Require "stable" state throughout burn (or at least not "unstable")
-                    stability_valid_time = (min_stability_state_time != "unstable") and (min_stability_score_time >= min_stability_score * 0.7)  # 70% of target for Layer 2
-                else:
-                    # Allow "marginal" but require minimum score
-                    stability_valid_time = (min_stability_state_time != "unstable") and (min_stability_score_time >= min_stability_score * 0.7)
-                
+            
+            # Stability check for Layer 2 (time-varying, excluding t=burn_time)
+            if require_stable_state:
+                # Require "stable" state throughout burn (or at least not "unstable")
+                stability_valid_time = (min_stability_state_time != "unstable") and (min_stability_score_time >= min_stability_score * 0.7)  # 70% of target for Layer 2
+            else:
+                # Allow "marginal" but require minimum score
+                stability_valid_time = (min_stability_state_time != "unstable") and (min_stability_score_time >= min_stability_score * 0.7)
+            
                 # Burn candidate valid if all time points (excluding last) meet goals
-                burn_candidate_valid = (
-                    stability_valid_time and
+            burn_candidate_valid = (
+                stability_valid_time and
                     max_thrust_error < thrust_tol * 1.5 and  # Max error at any point (excluding last)
-                    max_of_error < 0.20  # Max O/F error at any point
-                )
-                final_performance["burn_candidate_valid"] = burn_candidate_valid
-                final_performance["max_thrust_error_time"] = max_thrust_error
-                final_performance["max_of_error_time"] = max_of_error
+                max_of_error < 0.20  # Max O/F error at any point
+            )
+            final_performance["burn_candidate_valid"] = burn_candidate_valid
+            final_performance["max_thrust_error_time"] = max_thrust_error
+            final_performance["max_of_error_time"] = max_of_error
             
             update_progress(
                 "Layer 2: Burn Candidate",
