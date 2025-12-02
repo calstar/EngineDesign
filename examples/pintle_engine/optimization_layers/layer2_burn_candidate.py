@@ -25,9 +25,12 @@ def run_layer2_burn_candidate(
     P_tank_F_array: np.ndarray,
     target_thrust: float,
     thrust_tol: float,
+    optimal_of: float,  # CRITICAL: Pass target O/F ratio
     n_time_points: int,
     update_progress: Callable,
     log_status: Callable,
+    max_lox_P_psi: float = None,  # For pressure optimization
+    max_fuel_P_psi: float = None,  # For pressure optimization
 ) -> Tuple[PintleEngineConfig, Dict[str, Any], Dict[str, Any], bool]:
     """
     Run Layer 2: Burn Candidate Optimization.
@@ -43,9 +46,25 @@ def run_layer2_burn_candidate(
     ablative_cfg = optimized_config.ablative_cooling if hasattr(optimized_config, 'ablative_cooling') else None
     graphite_cfg = optimized_config.graphite_insert if hasattr(optimized_config, 'graphite_insert') else None
     
-    # Optimization variables for Layer 2
+    # CRITICAL FIX: Layer 2 MUST optimize pressure curves to maintain thrust/O/F!
+    # The problem: Layer 1 gives good initial performance, but as recession happens,
+    # thrust/O/F drift. Layer 2 needs to adjust pressures to compensate.
+    
+    # Optimization variables for Layer 2:
+    # 1. Thermal protection (ablative/graphite) - minimize recession
+    # 2. Pressure scaling factors - adjust pressures to maintain thrust/O/F
     layer2_bounds = []
     layer2_x0 = []
+    
+    # Add pressure scaling variables (if max pressures provided)
+    optimize_pressures = (max_lox_P_psi is not None and max_fuel_P_psi is not None)
+    if optimize_pressures:
+        # Scale factors for initial pressures (0.7-1.1x to allow some adjustment)
+        layer2_bounds.append((0.7, 1.1))  # LOX pressure scale
+        layer2_bounds.append((0.7, 1.1))  # Fuel pressure scale
+        # Start at 1.0 (no change from Layer 1)
+        layer2_x0.append(1.0)
+        layer2_x0.append(1.0)
     
     if ablative_cfg and ablative_cfg.enabled:
         layer2_bounds.append((0.003, 0.020))  # 3-20mm
@@ -62,7 +81,7 @@ def run_layer2_burn_candidate(
         layer2_x0 = np.array(layer2_x0)
         
         # Track Layer 2 optimization progress
-        layer2_state = {"iter": 0, "max_iter": 20}
+        layer2_state = {"iter": 0, "max_iter": 50}  # Increased iterations for pressure optimization
         
         def layer2_callback(xk):
             layer2_state["iter"] += 1
@@ -75,10 +94,23 @@ def run_layer2_burn_candidate(
             )
         
         def layer2_objective(x_layer2):
-            """Optimize initial thermal protection guesses to minimize recession."""
+            """Optimize thermal protection AND pressure curves to maintain thrust/O/F."""
             try:
                 config_layer2 = copy.deepcopy(optimized_config)
                 idx = 0
+                
+                # CRITICAL: Apply pressure scaling if optimizing pressures
+                P_O_array_scaled = P_tank_O_array.copy()
+                P_F_array_scaled = P_tank_F_array.copy()
+                if optimize_pressures:
+                    lox_scale = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
+                    idx += 1
+                    fuel_scale = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
+                    idx += 1
+                    # Scale entire pressure curves
+                    P_O_array_scaled = P_tank_O_array * lox_scale
+                    P_F_array_scaled = P_tank_F_array * fuel_scale
+                
                 if ablative_cfg and ablative_cfg.enabled:
                     config_layer2.ablative_cooling.initial_thickness = float(
                         np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1])
@@ -95,8 +127,8 @@ def run_layer2_burn_candidate(
                 try:
                     results_layer2 = runner_layer2.evaluate_arrays_with_time(
                         time_array,
-                        P_tank_O_array,
-                        P_tank_F_array,
+                        P_O_array_scaled,  # Use scaled pressures!
+                        P_F_array_scaled,  # Use scaled pressures!
                         track_ablative_geometry=True,
                         use_coupled_solver=True,  # Use fully-coupled solver for Layer 2
                     )
@@ -114,12 +146,26 @@ def run_layer2_burn_candidate(
                 recession_chamber = float(np.max(results_layer2.get("recession_chamber", [0.0])))
                 recession_throat = float(np.max(results_layer2.get("recession_throat", [0.0])))
                 
+                # CRITICAL FIX: Robust stability extraction - handle NaN/inf values
                 stability_scores = results_layer2.get("stability_score", None)
                 if stability_scores is not None:
-                    min_stability = float(np.min(stability_scores))
+                    # Filter out NaN/inf values
+                    valid_scores = [s for s in np.atleast_1d(stability_scores) if np.isfinite(s)]
+                    if len(valid_scores) > 0:
+                        min_stability = float(np.min(valid_scores))
+                    else:
+                        min_stability = 0.5  # Default to marginal if all invalid
                 else:
-                    chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
-                    min_stability = max(0.0, min(1.0, (float(np.min(chugging)) - 0.3) * 1.5))
+                    # Fallback: try to get from individual margins
+                    try:
+                        chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
+                        chugging_valid = [c for c in np.atleast_1d(chugging) if np.isfinite(c)]
+                        if len(chugging_valid) > 0:
+                            min_stability = max(0.0, min(1.0, (float(np.min(chugging_valid)) - 0.3) * 1.5))
+                        else:
+                            min_stability = 0.5  # Default to marginal
+                    except Exception:
+                        min_stability = 0.5  # Safe default
                 
                 # CRITICAL FIX: Robust handling of thrust history array
                 thrust_hist = np.atleast_1d(results_layer2.get("F", np.full(n_time_points, target_thrust)))
@@ -138,22 +184,38 @@ def run_layer2_burn_candidate(
                     avg_thrust_err = 1.0
                 
                 # Also check O/F errors (if available)
-                MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(n_time_points, 2.3)))
+                MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(n_time_points, optimal_of)))
                 max_MR_err = 0.0  # Initialize
                 if len(MR_hist) > 0:
-                    # Use target O/F from config or default
-                    target_MR = 2.3  # Default, should be passed as parameter
-                    MR_errors = np.abs(MR_hist - target_MR) / max(target_MR, 1e-9)
+                    # Use target O/F passed as parameter
+                    MR_errors = np.abs(MR_hist - optimal_of) / max(optimal_of, 1e-9)
                     max_MR_err = float(np.max(MR_errors))
                 else:
                     max_MR_err = 1.0
                 
-                stability_penalty = max(0, 0.7 - min_stability) * 10.0
-                thrust_penalty = max(0, max_thrust_err - thrust_tol * 1.5) * 5.0
-                MR_penalty = max(0, max_MR_err - 0.25) * 3.0  # Penalize O/F errors > 25%
+                # CRITICAL FIX: MUCH stronger penalties for thrust/O/F errors
+                # Layer 2 MUST maintain thrust and O/F throughout burn - these are PRIMARY goals
+                stability_penalty = max(0, 0.3 - min_stability) * 5.0  # Reduced penalty (stability is secondary)
+                # Thrust penalty: MUCH stronger - 54.7% error is unacceptable!
+                thrust_penalty = (max_thrust_err ** 2) * 500.0  # Squared error, heavy penalty
+                # O/F penalty: MUCH stronger - 66.7% error is catastrophic!
+                MR_penalty = (max_MR_err ** 2) * 1000.0  # Squared error, very heavy penalty
                 
-                # Objective: minimize recession while meeting stability/thrust/O/F goals
-                obj = recession_chamber * 1000 + recession_throat * 1000 + stability_penalty + thrust_penalty + MR_penalty
+                # Also penalize average errors to encourage consistent performance
+                if available_n >= 2:
+                    avg_thrust_penalty = (avg_thrust_err ** 2) * 200.0
+                else:
+                    avg_thrust_penalty = 0.0
+                
+                # Objective: PRIMARY = thrust/O/F accuracy, SECONDARY = recession, TERTIARY = stability
+                obj = (
+                    thrust_penalty +           # PRIMARY: Thrust accuracy (heavily weighted)
+                    MR_penalty +                # PRIMARY: O/F accuracy (heavily weighted)
+                    avg_thrust_penalty +        # PRIMARY: Consistent thrust
+                    recession_chamber * 100 +   # SECONDARY: Recession (reduced weight)
+                    recession_throat * 100 +    # SECONDARY: Recession (reduced weight)
+                    stability_penalty           # TERTIARY: Stability (lowest weight)
+                )
                 return obj
             except Exception as e:
                 # Log error for debugging

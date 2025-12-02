@@ -12,8 +12,15 @@ import pandas as pd
 import streamlit as st
 from plotly.subplots import make_subplots
 import plotly.graph_objects as go
+import time
+import uuid
 
 from pintle_pipeline.config_schemas import PintleEngineConfig
+
+# CRITICAL FIX: Generate unique keys for Streamlit plots to avoid duplicate key errors
+def _get_unique_key(base_name: str) -> str:
+    """Generate a unique key for Streamlit elements."""
+    return f"{base_name}_{uuid.uuid4().hex[:8]}"
 
 
 def plot_pressure_curves(pressure_curves: Dict[str, np.ndarray]) -> None:
@@ -52,7 +59,7 @@ def plot_pressure_curves(pressure_curves: Dict[str, np.ndarray]) -> None:
     fig.update_yaxes(title_text="Isp [s]", row=2, col=2)
     
     fig.update_layout(height=600, showlegend=True)
-    st.plotly_chart(fig, use_container_width=True, key="pressure_curves_plot")
+    st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("pressure_curves_plot"))
     
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -97,7 +104,7 @@ def plot_copv_pressure(copv_results: Dict[str, Any], pressure_curves: Dict[str, 
     fig.update_yaxes(title_text="Tank Pressure [psi]", secondary_y=True)
     
     fig.update_layout(height=400, title="COPV and Tank Pressure Blowdown")
-    st.plotly_chart(fig, use_container_width=True, key="copv_pressure_plot")
+    st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("copv_pressure_plot"))
 
 
 def plot_flight_trajectory(flight_obj, requirements: Dict[str, Any]) -> None:
@@ -131,7 +138,7 @@ def plot_flight_trajectory(flight_obj, requirements: Dict[str, Any]) -> None:
             fig.update_yaxes(title_text="Velocity [m/s]", row=1, col=2)
             
             fig.update_layout(height=400, showlegend=True)
-            st.plotly_chart(fig, use_container_width=True, key="flight_trajectory_plot")
+            st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("flight_trajectory_plot"))
     except Exception as e:
         st.warning(f"Could not plot flight trajectory: {e}")
 
@@ -204,7 +211,7 @@ def plot_optimization_convergence(optimization_results: Dict[str, Any]) -> None:
     fig.update_xaxes(title_text="Iteration", row=4, col=2)
     fig.update_layout(height=800, showlegend=False)
     
-    st.plotly_chart(fig, use_container_width=True, key="optimization_summary_plot")
+    st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("optimization_summary_plot"))
     
     conv_info = optimization_results.get("convergence_info", {})
     pressure_info = optimization_results.get("optimized_pressure_curves", {})
@@ -302,5 +309,5 @@ def plot_time_varying_results(time_varying_results: Dict[str, np.ndarray]) -> No
     fig.update_yaxes(title_text="Mass Flow [kg/s]", row=2, col=2)
     
     fig.update_layout(height=600, showlegend=True)
-    st.plotly_chart(fig, use_container_width=True, key="time_varying_results_plot")
+    st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("time_varying_results_plot"))
 
