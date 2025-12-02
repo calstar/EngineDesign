@@ -28,6 +28,7 @@ from .. import (
     plot_flight_trajectory,
     plot_time_varying_results,
     generate_segmented_pressure_curve,
+    calculate_copv_pressure_curve,
 )
 from ..layer2_pressure import run_layer2_pressure
 from ..layer3_thermal_protection import run_layer3_thermal_protection
@@ -2362,6 +2363,43 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                         }
                     )
 
+                    # ------------------------------------------------------------------
+                    # COPV evaluation from converged Layer 2 curves (T0 = Tp = 260 K)
+                    # ------------------------------------------------------------------
+                    try:
+                        copv_volume_m3 = float(requirements.get("copv_free_volume_m3") or 0.0)
+                    except Exception:
+                        copv_volume_m3 = 0.0
+
+                    if copv_volume_m3 > 0.0:
+                        opt_config = st.session_state.get("optimized_config", config_obj)
+                        if opt_config is None:
+                            opt_config = config_obj
+
+                        copv_results = calculate_copv_pressure_curve(
+                            time_array=times,
+                            mdot_O=df_ts["mdot_O (kg/s)"].to_numpy(dtype=float),
+                            mdot_F=df_ts["mdot_F (kg/s)"].to_numpy(dtype=float),
+                            P_tank_O=np.asarray(P_tank_O_opt, dtype=float),
+                            P_tank_F=np.asarray(P_tank_F_opt, dtype=float),
+                            config=opt_config,
+                            copv_volume_m3=copv_volume_m3,
+                            T0_K=260.0,
+                            Tp_K=260.0,
+                        )
+
+                        # Store for cross-tab reuse
+                        st.session_state["layer2_copv_results"] = copv_results
+
+                        # Dedicated COPV pressure plot for Layer 2-only workflow
+                        st.markdown("#### COPV Pressure Curve (Layer 2, T = 260 K)")
+                        pressure_curves_l2 = {
+                            "time": times,
+                            "P_tank_O": np.asarray(P_tank_O_opt, dtype=float),
+                            "P_tank_F": np.asarray(P_tank_F_opt, dtype=float),
+                        }
+                        plot_copv_pressure(copv_results, pressure_curves_l2)
+
                     # Burn summary – use Layer 2 summary (from final pressure curves)
                     layer2_summary = (
                         layer2_results.get("summary", {})
@@ -2689,6 +2727,7 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 height=300,
                 margin=dict(l=40, r=20, t=30, b=40),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                yaxis_type="log",
             )
             layer3_objective_plot_container.plotly_chart(fig_hist, use_container_width=True)
     except Exception:
@@ -2780,6 +2819,7 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                         height=300,
                         margin=dict(l=40, r=20, t=30, b=40),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        yaxis_type="log",
                     )
                     layer3_objective_plot_container.plotly_chart(fig, use_container_width=True)
                 except Exception:
@@ -2846,7 +2886,17 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
     layer3_results = st.session_state.get("layer3_results", None)
     
     if (optimization_results and layer3_valid is not None) or layer3_results:
-        if layer3_valid:
+        # Prefer the most recent Layer 3 run results when determining validity.
+        # Full‑pipeline runs populate optimization_results.layer_status, but a
+        # Layer 3‑only run writes its own status into layer3_results.
+        thermal_valid = None
+        if isinstance(layer3_results, dict):
+            thermal_valid = layer3_results.get("thermal_results", {}).get("thermal_protection_valid")
+        if thermal_valid is None:
+            # Fallback to legacy layer_status flag if present
+            thermal_valid = bool(layer3_valid)
+        
+        if thermal_valid:
             st.success("✅ Layer 3: Thermal Protection VALID")
         else:
             st.error("❌ Layer 3: Thermal Protection INVALID")
@@ -2884,6 +2934,7 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     yaxis_title="Objective Value",
                     height=300,
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    yaxis_type="log",
                 )
                 st.plotly_chart(obj_fig, use_container_width=True, key="layer3_objective_history_plot")
         except Exception:
