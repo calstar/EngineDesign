@@ -34,8 +34,8 @@ from .helpers import (
 from .layer1_static_optimization import (
     create_layer1_apply_x_to_config,
 )
-from .layer2_burn_candidate import (
-    run_layer2_burn_candidate,
+from .layer2_pressure import (
+    run_layer2_pressure,
 )
 from .layer3_thermal_protection import (
     run_layer3_thermal_protection,

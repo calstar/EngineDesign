@@ -10,7 +10,7 @@ optimization_layers/
 ├── helpers.py               # Shared helper functions (pressure curves, variable conversion)
 ├── layer0_pre_optimization.py  # Layer 0: Coupled geometry + pintle pre-optimization
 ├── layer1_static_optimization.py  # Layer 1: Static optimization (geometry + pressure curves)
-├── layer2_burn_candidate.py      # Layer 2: Time-series burn candidate optimization
+├── layer2_pressure.py             # Layer 2: Pressure curve optimization
 ├── layer3_thermal_protection.py  # Layer 3: Thermal protection optimization
 ├── layer4_flight_simulation.py   # Layer 4: Flight simulation and validation
 └── display_functions.py          # Display and plotting functions for results
@@ -29,10 +29,10 @@ optimization_layers/
 - **Function**: `create_layer1_objective()`, `validate_layer1_results()`
 - **Note**: This is where pressure curves are iterated over
 
-### Layer 2: Burn Candidate
-- **File**: `layer2_burn_candidate.py`
-- **Purpose**: Optimize initial thermal protection guesses based on time-series analysis
-- **Function**: `run_layer2_burn_candidate()`
+### Layer 2: Pressure Curve Optimization
+- **File**: `layer2_pressure.py`
+- **Purpose**: Optimize fuel and oxidizer pressure curves for time series solver
+- **Function**: `run_layer2_pressure()`
 
 ### Layer 3: Thermal Protection
 - **File**: `layer3_thermal_protection.py`

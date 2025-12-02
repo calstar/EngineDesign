@@ -28,7 +28,7 @@ from .. import (
     plot_time_varying_results,
     generate_segmented_pressure_curve,
 )
-from ..layer2_burn_candidate import run_layer2_burn_candidate
+from ..layer2_pressure import run_layer2_pressure
 from ..layer3_thermal_protection import run_layer3_thermal_protection
 from ..layer4_flight_simulation import run_layer4_flight_simulation
 from ..copv_flight_helpers import run_flight_simulation
@@ -1787,17 +1787,60 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 pass  # Can add logging if needed
             
             # Run Layer 2
-            optimized_config, full_time_results, time_varying_summary, burn_candidate_valid = run_layer2_burn_candidate(
+            max_lox_pressure_pa = requirements.get("max_P_tank_O", 9e6)
+            max_fuel_pressure_pa = requirements.get("max_P_tank_F", 7e6)
+            optimized_config, P_tank_O_optimized, P_tank_F_optimized, summary, success = run_layer2_pressure(
                 layer1_config,
                 time_array,
-                P_tank_O_array,
-                P_tank_F_array,
                 target_thrust,
                 thrust_tol,
                 n_time_points,
                 update_progress,
                 log_status,
+                max_lox_pressure_pa,
+                max_fuel_pressure_pa,
             )
+            
+            # Convert results to match expected format
+            # Run time series with optimized pressure curves to get full results
+            optimized_runner = PintleEngineRunner(optimized_config)
+            try:
+                full_time_results = optimized_runner.evaluate_arrays_with_time(
+                    time_array,
+                    P_tank_O_optimized,
+                    P_tank_F_optimized,
+                    track_ablative_geometry=True,
+                    use_coupled_solver=False,
+                )
+            except Exception as e:
+                full_time_results = {}
+            
+            # Build time-varying summary
+            if full_time_results:
+                chugging_stability_history = full_time_results.get("chugging_stability_margin", np.array([1.0]))
+                min_time_stability_margin = float(np.min(chugging_stability_history))
+                
+                stability_scores = full_time_results.get("stability_score", None)
+                if stability_scores is None:
+                    min_stability_score_time = max(0.0, min(1.0, (min_time_stability_margin - 0.3) * 1.5))
+                else:
+                    min_stability_score_time = float(np.min(stability_scores))
+                
+                time_varying_summary = {
+                    "avg_thrust": float(np.mean(full_time_results.get("F", [target_thrust]))),
+                    "min_thrust": float(np.min(full_time_results.get("F", [target_thrust]))),
+                    "max_thrust": float(np.max(full_time_results.get("F", [target_thrust]))),
+                    "thrust_std": float(np.std(full_time_results.get("F", [0]))),
+                    "avg_isp": float(np.mean(full_time_results.get("Isp", [250]))),
+                    "min_stability_margin": min_time_stability_margin,
+                    "min_stability_score": min_stability_score_time,
+                    "max_recession_chamber": float(np.max(full_time_results.get("recession_chamber", [0.0]))),
+                    "max_recession_throat": float(np.max(full_time_results.get("recession_throat", [0.0]))),
+                }
+            else:
+                time_varying_summary = {}
+            
+            burn_candidate_valid = success
             
             progress_bar.empty()
             status_text.empty()

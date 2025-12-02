@@ -5,7 +5,7 @@ This package contains the modular layers of the optimization pipeline:
 Modules:
 - helpers.py: Pressure curve generation and variable conversion
 - layer1_static_optimization.py: Layer 1 geometry optimization
-- layer2_burn_candidate.py: Layer 2 burn candidate optimization  
+- layer2_pressure.py: Layer 2 pressure curve optimization  
 - layer3_thermal_protection.py: Layer 3 thermal protection sizing
 - layer4_flight_simulation.py: Layer 4 flight simulation
 - display_results.py: Plotting and visualization functions
@@ -20,7 +20,7 @@ Usage:
         optimizer_vars_from_segments,
         # Layer functions
         create_layer1_apply_x_to_config,
-        run_layer2_burn_candidate,
+        run_layer2_pressure,
         run_layer3_thermal_protection,
         run_layer4_flight_simulation,
         # Display
@@ -45,9 +45,9 @@ from .layer1_static_optimization import (
     create_layer1_apply_x_to_config,
 )
 
-# Layer 2: Burn candidate optimization
-from .layer2_burn_candidate import (
-    run_layer2_burn_candidate,
+# Layer 2: Pressure curve optimization
+from .layer2_pressure import (
+    run_layer2_pressure,
 )
 
 # Layer 3: Thermal protection optimization
@@ -93,7 +93,7 @@ __all__ = [
     # Layer 1
     'create_layer1_apply_x_to_config',
     # Layer 2
-    'run_layer2_burn_candidate',
+    'run_layer2_pressure',
     # Layer 3
     'run_layer3_thermal_protection',
     # Layer 4

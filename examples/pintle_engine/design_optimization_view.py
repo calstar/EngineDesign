@@ -66,7 +66,7 @@ from optimization_layers import (
     optimizer_vars_from_segments,
     # Layer functions
     create_layer1_apply_x_to_config,
-    run_layer2_burn_candidate,
+    run_layer2_pressure,
     run_layer3_thermal_protection,
     run_layer4_flight_simulation,
     # Display functions
