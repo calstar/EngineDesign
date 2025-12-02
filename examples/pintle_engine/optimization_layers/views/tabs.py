@@ -2657,6 +2657,44 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
     st.markdown("#### Layer 3 Objective Convergence")
     layer3_objective_plot_container = st.empty()
 
+    # If we have a previous objective history from a prior Layer 3 run, render it
+    # so that the convergence plot remains visible even after the run completes
+    # or if Layer 3 ultimately fails / is marked INVALID.
+    try:
+        history = st.session_state.get("layer3_objective_history", [])
+        if history:
+            df_hist = pd.DataFrame(history)
+            fig_hist = go.Figure()
+            fig_hist.add_trace(
+                go.Scatter(
+                    x=df_hist["evaluation"],
+                    y=df_hist["objective"],
+                    mode="lines+markers",
+                    name="Objective",
+                    line=dict(color="#1f77b4"),
+                )
+            )
+            fig_hist.add_trace(
+                go.Scatter(
+                    x=df_hist["evaluation"],
+                    y=df_hist["best_objective"],
+                    mode="lines",
+                    name="Best Objective",
+                    line=dict(color="#ff7f0e", dash="dash"),
+                )
+            )
+            fig_hist.update_layout(
+                xaxis_title="Evaluation",
+                yaxis_title="Objective Value",
+                height=300,
+                margin=dict(l=40, r=20, t=30, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            layer3_objective_plot_container.plotly_chart(fig_hist, use_container_width=True)
+    except Exception:
+        # Never let plotting errors break the rest of the tab UI.
+        pass
+
     if st.button("🚀 Run Layer 3 Optimization", type="primary", key="run_layer3"):
         try:
             # ------------------------------------------------------------------
@@ -2753,7 +2791,10 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 status_text.text(f"{stage} | {message}")
             
             def log_status(stage: str, message: str):
-                pass
+                # Surface key log messages in the status text area while the
+                # detailed iteration log is written to disk by the core Layer 3
+                # implementation.
+                status_text.text(f"{stage} | {message}")
             
             # Run Layer 3
             optimized_config, updated_time_results, thermal_results = run_layer3_thermal_protection(
@@ -2809,6 +2850,45 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             st.success("✅ Layer 3: Thermal Protection VALID")
         else:
             st.error("❌ Layer 3: Thermal Protection INVALID")
+
+        # If we have an objective history from a prior Layer 3 run, keep showing
+        # the convergence plot here as well so that users can inspect why a run
+        # may have failed or produced an invalid result.
+        try:
+            history = st.session_state.get("layer3_objective_history", [])
+            if history:
+                st.markdown("#### Layer 3 Objective Function History")
+                df_hist = pd.DataFrame(history)
+                obj_fig = go.Figure()
+                obj_fig.add_trace(
+                    go.Scatter(
+                        x=df_hist["evaluation"],
+                        y=df_hist["objective"],
+                        mode="lines+markers",
+                        name="Objective",
+                        line=dict(color="#1f77b4"),
+                    )
+                )
+                obj_fig.add_trace(
+                    go.Scatter(
+                        x=df_hist["evaluation"],
+                        y=df_hist["best_objective"],
+                        mode="lines",
+                        name="Best Objective",
+                        line=dict(color="#ff7f0e", dash="dash"),
+                    )
+                )
+                obj_fig.update_layout(
+                    title="Layer 3 Objective Function History",
+                    xaxis_title="Evaluation",
+                    yaxis_title="Objective Value",
+                    height=300,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(obj_fig, use_container_width=True, key="layer3_objective_history_plot")
+        except Exception:
+            # Plotting is best-effort only; don't break the status panel.
+            pass
         
         # Show final thermal protection thicknesses
         opt_config = st.session_state.get("optimized_config", config_obj)
