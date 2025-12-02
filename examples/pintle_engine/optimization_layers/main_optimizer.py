@@ -52,6 +52,9 @@ from .utils import (
 )
 
 
+TOTAL_WALL_THICKNESS_M = 0.0127  # 0.5 inch total wall (outer - inner diameter)
+
+
 
 def run_full_engine_optimization_with_flight_sim(
     config_obj: PintleEngineConfig,
@@ -166,26 +169,27 @@ def run_full_engine_optimization_with_flight_sim(
     
     # =========================================================================
     # OPTIMIZATION VARIABLES:
-    # Engine Geometry (7 vars):
+    # Engine Geometry (8 vars):
     # [0] A_throat (throat area, m²)
     # [1] Lstar (characteristic length, m)
     # [2] expansion_ratio
-    # [3] d_pintle_tip (m)
-    # [4] h_gap (m)
-    # [5] n_orifices (will be rounded to int)
-    # [6] d_orifice (m)
+    # [3] chamber_outer_diameter (m) - bounded between 0.5× and 1.0× max OD
+    # [4] d_pintle_tip (m)
+    # [5] h_gap (m)
+    # [6] n_orifices (will be rounded to int)
+    # [7] d_orifice (m)
     #
     # Thermal Protection (2 vars):
-    # [7] ablative_thickness (m) - chamber liner thickness
-    # [8] graphite_thickness (m) - throat insert thickness
+    # [8] ablative_thickness (m) - chamber liner thickness
+    # [9] graphite_thickness (m) - throat insert thickness
     #
     # Initial Pressures (2 vars) - CRITICAL: Optimize for regulated pressure:
-    # [9] P_O_start_psi (absolute initial LOX pressure, psi)
-    # [10] P_F_start_psi (absolute initial Fuel pressure, psi)
+    # [10] P_O_start_psi (absolute initial LOX pressure, psi)
+    # [11] P_F_start_psi (absolute initial Fuel pressure, psi)
     #
     # Pressure Curve Segments (optimizer picks N segments, up to 20):
-    # [11] n_segments_lox (1-20, rounded to int) - number of segments for LOX
-    # [12] n_segments_fuel (1-20, rounded to int) - number of segments for Fuel
+    # [12] n_segments_lox (1-20, rounded to int) - number of segments for LOX
+    # [13] n_segments_fuel (1-20, rounded to int) - number of segments for Fuel
     #
     # For each segment (up to 20 segments per tank, 5 vars per segment):
     # - type (0=linear, 1=blowdown) - prefer linear for regulation
@@ -194,9 +198,9 @@ def run_full_engine_optimization_with_flight_sim(
     # - end_pressure_ratio (0.7-1.0 for regulation, ratio of initial pressure - should be ~1.0)
     # - decay_tau_ratio (0-1, fraction of segment duration, only for blowdown)
     #
-    # Variables [13:] contain segment parameters for LOX then Fuel
-    # LOX segments: [13] to [13 + n_segments_lox*5 - 1]
-    # Fuel segments: [13 + n_segments_lox*5] to [13 + (n_segments_lox + n_segments_fuel)*5 - 1]
+    # Variables [14:] contain segment parameters for LOX then Fuel
+    # LOX segments: [14] to [14 + n_segments_lox*5 - 1]
+    # Fuel segments: [14 + n_segments_lox*5] to [14 + (n_segments_lox + n_segments_fuel)*5 - 1]
     #
     # CRITICAL: For regulation, we want flat profiles (start ≈ end ≈ 1.0)
     # This prevents blowdown and maintains consistent thrust throughout burn
@@ -264,20 +268,22 @@ def run_full_engine_optimization_with_flight_sim(
     min_P_ratio = 0.5  # Minimum 50% of max pressure
     max_P_ratio = 0.95  # Maximum 95% of max pressure (safety margin)
     
+    min_outer_diameter = max_chamber_od * 0.5
     bounds = [
         (min_A_throat_safe, 2e-3),  # [0] A_throat: Must be > max injector area to 50mm diameter
-        (min_Lstar, max_Lstar), # [1] Lstar
-        (4.0, 20.0),            # [2] expansion_ratio
-        (0.008, 0.030),         # [3] d_pintle_tip (reduced max to keep fuel area reasonable)
-        (0.0003, 0.0015),       # [4] h_gap (reduced max to keep fuel area reasonable)
-        (6, 16),                # [5] n_orifices (reduced max to keep LOX area reasonable)
-        (0.001, 0.004),         # [6] d_orifice (reduced max to keep LOX area reasonable)
-        (0.003, 0.020),         # [7] ablative_thickness: 3mm to 20mm
-        (0.003, 0.015),         # [8] graphite_thickness: 3mm to 15mm
-        (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),  # [9] P_O_start_psi (absolute pressure)
-        (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [10] P_F_start_psi (absolute pressure)
-        (1, 20),                # [11] n_segments_lox (1-20 segments)
-        (1, 20),                # [12] n_segments_fuel (1-20 segments)
+        (min_Lstar, max_Lstar),     # [1] Lstar
+        (4.0, 20.0),                # [2] expansion_ratio
+        (min_outer_diameter, max_chamber_od),  # [3] outer diameter variable
+        (0.008, 0.030),             # [4] d_pintle_tip (reduced max to keep fuel area reasonable)
+        (0.0003, 0.0015),           # [5] h_gap (reduced max to keep fuel area reasonable)
+        (6, 16),                    # [6] n_orifices (reduced max to keep LOX area reasonable)
+        (0.001, 0.004),             # [7] d_orifice (reduced max to keep LOX area reasonable)
+        (0.003, 0.020),             # [8] ablative_thickness: 3mm to 20mm
+        (0.003, 0.015),             # [9] graphite_thickness: 3mm to 15mm
+        (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),    # [10] P_O_start_psi (absolute pressure)
+        (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [11] P_F_start_psi (absolute pressure)
+        (1, 20),                    # [12] n_segments_lox (1-20 segments)
+        (1, 20),                    # [13] n_segments_fuel (1-20 segments)
     ]
     
     # Add bounds for segment parameters (up to max_segments_per_tank segments * 5 vars * 2 tanks)
@@ -314,20 +320,22 @@ def run_full_engine_optimization_with_flight_sim(
     P_F_start_init = max_fuel_P_psi * 0.80
     
     # Initial guess: start with default_n_segments segments per tank
+    outer_diameter_init = np.clip(max_chamber_od * 0.9, min_outer_diameter, max_chamber_od)
     x0 = [
         A_throat_init,          # [0] A_throat (guaranteed > injector areas)
         (min_Lstar + max_Lstar) / 2,  # [1] Lstar
         10.0,                   # [2] expansion_ratio
-        default_d_pintle,       # [3] d_pintle_tip
-        default_h_gap,         # [4] h_gap
-        default_n_orifices,     # [5] n_orifices
-        default_d_orifice,     # [6] d_orifice
-        np.clip(ablative_init, 0.003, 0.020),   # [7] ablative_thickness
-        np.clip(graphite_init, 0.003, 0.015),   # [8] graphite_thickness
-        P_O_start_init,        # [9] P_O_start_psi (absolute initial LOX pressure)
-        P_F_start_init,        # [10] P_F_start_psi (absolute initial Fuel pressure)
-        float(default_n_segments),  # [11] n_segments_lox
-        float(default_n_segments),  # [12] n_segments_fuel
+        outer_diameter_init,    # [3] chamber outer diameter
+        default_d_pintle,       # [4] d_pintle_tip
+        default_h_gap,          # [5] h_gap
+        default_n_orifices,     # [6] n_orifices
+        default_d_orifice,      # [7] d_orifice
+        np.clip(ablative_init, 0.003, 0.020),   # [8] ablative_thickness
+        np.clip(graphite_init, 0.003, 0.015),   # [9] graphite_thickness
+        P_O_start_init,         # [10] P_O_start_psi (absolute initial LOX pressure)
+        P_F_start_init,         # [11] P_F_start_psi (absolute initial Fuel pressure)
+        float(default_n_segments),  # [12] n_segments_lox
+        float(default_n_segments),  # [13] n_segments_fuel
     ]
     
     # CRITICAL FIX: Initial guess for segments - prefer FLAT/REGULATED profiles
@@ -376,24 +384,25 @@ def run_full_engine_optimization_with_flight_sim(
         A_throat = float(np.clip(x[0], bounds[0][0], bounds[0][1]))
         Lstar = float(np.clip(x[1], bounds[1][0], bounds[1][1]))
         expansion_ratio = float(np.clip(x[2], bounds[2][0], bounds[2][1]))
-        d_pintle_tip = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
-        h_gap = float(np.clip(x[4], bounds[4][0], bounds[4][1]))
-        n_orifices = int(round(np.clip(x[5], bounds[5][0], bounds[5][1])))
-        d_orifice = float(np.clip(x[6], bounds[6][0], bounds[6][1]))
-        ablative_thickness = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
-        graphite_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        D_chamber_outer = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
+        d_pintle_tip = float(np.clip(x[4], bounds[4][0], bounds[4][1]))
+        h_gap = float(np.clip(x[5], bounds[5][0], bounds[5][1]))
+        n_orifices = int(round(np.clip(x[6], bounds[6][0], bounds[6][1])))
+        d_orifice = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
+        ablative_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        graphite_thickness = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         
         # CRITICAL: Extract initial pressures (absolute values in psi)
-        P_O_start_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
-        P_F_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+        P_O_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+        P_F_start_psi = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
         
         # Extract segment counts
-        n_segments_lox = int(round(np.clip(x[11], bounds[11][0], bounds[11][1])))
-        n_segments_fuel = int(round(np.clip(x[12], bounds[12][0], bounds[12][1])))
+        n_segments_lox = int(round(np.clip(x[12], bounds[12][0], bounds[12][1])))
+        n_segments_fuel = int(round(np.clip(x[13], bounds[13][0], bounds[13][1])))
         
         # Extract segment parameters for LOX
         vars_per_segment = 5
-        idx_base_lox = 13  # Updated index after initial pressures
+        idx_base_lox = 14  # Updated index after initial pressures
         # CRITICAL FIX: Ensure we don't exceed array bounds
         max_lox_idx = min(idx_base_lox + max_segments_per_tank * vars_per_segment, len(x))
         x_lox_segments = x[idx_base_lox:max_lox_idx]
@@ -455,13 +464,13 @@ def run_full_engine_optimization_with_flight_sim(
         config._optimizer_segments['lox'] = lox_segments
         config._optimizer_segments['fuel'] = fuel_segments
         
-        # Chamber: ALWAYS use maximum diameter to minimize length
+        # Chamber geometry - outer diameter is now an optimization variable
         V_chamber = Lstar * A_throat
-        # CRITICAL FIX: Remove arbitrary 0.95 factor - use max allowable diameter directly
-        # The max_chamber_od already accounts for safety margins, no need to reduce further
-        D_chamber = max_chamber_od  # Use full allowable diameter
-        A_chamber = np.pi * (D_chamber / 2) ** 2
-        R_chamber = D_chamber / 2
+        D_chamber_inner = D_chamber_outer - TOTAL_WALL_THICKNESS_M
+        if D_chamber_inner <= 0:
+            D_chamber_inner = max(D_chamber_outer * 0.3, 0.01)
+        A_chamber = np.pi * (D_chamber_inner / 2) ** 2
+        R_chamber = D_chamber_inner / 2
         # Safe sqrt with validation
         R_throat = np.sqrt(max(0, A_throat / np.pi))
         
@@ -498,8 +507,10 @@ def run_full_engine_optimization_with_flight_sim(
         config.chamber.volume = V_chamber
         config.chamber.Lstar = Lstar
         config.chamber.length = L_chamber
-        if hasattr(config.chamber, 'chamber_inner_diameter'):
-            config.chamber.chamber_inner_diameter = D_chamber
+        # Inner diameter is physically meaningful for flow/volume; outer diameter is
+        # tracked via the optimization variable but not stored on the pydantic model
+        # to avoid schema errors.
+        setattr(config.chamber, 'chamber_inner_diameter', D_chamber_inner)
         if hasattr(config.chamber, 'contraction_ratio'):
             config.chamber.contraction_ratio = contraction_ratio
         if hasattr(config.chamber, 'A_chamber'):
@@ -684,91 +695,97 @@ def run_full_engine_optimization_with_flight_sim(
         if iteration <= 3 or iteration % 25 == 0:
             # Format best_objective safely (handle inf/NaN)
             best_obj_str = f"{opt_state['best_objective']:.3e}" if np.isfinite(opt_state['best_objective']) else "inf"
+            curr_obj_str = f"{opt_state.get('last_valid_obj', float('inf')):.3e}" if np.isfinite(opt_state.get('last_valid_obj', float('inf'))) else "inf"
             update_progress(
                 "Stage: Optimization (Geometry + Pressure)", 
                 progress, 
-                f"Iter {iteration}/{max_iterations} | Best obj: {best_obj_str} | Next: Layer 1 (Static Test)"
+                f"Iter {iteration}/{max_iterations} | Curr obj: {curr_obj_str} | Best obj: {best_obj_str}"
             )
         elif iteration % 10 == 0:
+            curr_obj_str = f"{opt_state.get('last_valid_obj', float('inf')):.3e}" if np.isfinite(opt_state.get('last_valid_obj', float('inf'))) else "inf"
+            best_obj_str = f"{opt_state['best_objective']:.3e}" if np.isfinite(opt_state['best_objective']) else "inf"
             update_progress(
                 "Stage: Optimization (Geometry + Pressure)", 
                 progress, 
-                f"Iteration {iteration}/{max_iterations}... | Next: Layer 1 (Static Test)"
+                f"Iter {iteration}/{max_iterations} | Curr obj: {curr_obj_str} | Best obj: {best_obj_str}"
             )
         
-        try:
-            config, curr_lox_end_ratio, curr_fuel_end_ratio = apply_x_to_config(x, config_base)
+        config, curr_lox_end_ratio, curr_fuel_end_ratio = apply_x_to_config(x, config_base)
+        
+        # CRITICAL FIX: Add constraint checking BEFORE expensive evaluation
+        # Prevent "Supply > Demand" by checking injector/throat area ratio
+        # Supply > Demand happens when injector flow area is too large relative to throat
+        A_throat_check = config.chamber.A_throat
+        
+        # Calculate injector flow areas
+        if hasattr(config, 'injector') and config.injector.type == "pintle":
+            geom = config.injector.geometry
+            # LOX flow area: N_orifices * π * (d_orifice/2)^2
+            A_lox_injector = geom.lox.n_orifices * np.pi * (geom.lox.d_orifice / 2) ** 2
+            # Fuel flow area: annulus between pintle tip and reservoir
+            R_inner = geom.fuel.d_pintle_tip / 2
+            R_outer = R_inner + geom.fuel.h_gap
+            A_fuel_injector = np.pi * (R_outer ** 2 - R_inner ** 2)
             
-            # CRITICAL FIX: Add constraint checking BEFORE expensive evaluation
-            # Prevent "Supply > Demand" by checking injector/throat area ratio
-            # Supply > Demand happens when injector flow area is too large relative to throat
-            A_throat_check = config.chamber.A_throat
-            
-            # Calculate injector flow areas
-            if hasattr(config, 'injector') and config.injector.type == "pintle":
-                geom = config.injector.geometry
-                # LOX flow area: N_orifices * π * (d_orifice/2)^2
-                A_lox_injector = geom.lox.n_orifices * np.pi * (geom.lox.d_orifice / 2) ** 2
-                # Fuel flow area: annulus between pintle tip and reservoir
-                R_inner = geom.fuel.d_pintle_tip / 2
-                R_outer = R_inner + geom.fuel.h_gap
-                A_fuel_injector = np.pi * (R_outer ** 2 - R_inner ** 2)
+            # CRITICAL: Check if injector areas are reasonable relative to throat
+            # Typical injector areas should be 10-50% of throat area (depends on pressure drop)
+            # If injector area >> throat area, we'll get Supply > Demand
+            # CRITICAL FIX: Tightened from 2.0x to 1.0x - injector area should NEVER exceed throat area
+            # Even 1.0x is generous - typical is 0.1-0.5x
+            max_injector_area_ratio = 1.0  # Strict limit - injector area must be <= throat area
+            if A_throat_check > 0:
+                lox_ratio = A_lox_injector / A_throat_check
+                fuel_ratio = A_fuel_injector / A_throat_check
                 
-                # CRITICAL: Check if injector areas are reasonable relative to throat
-                # Typical injector areas should be 10-50% of throat area (depends on pressure drop)
-                # If injector area >> throat area, we'll get Supply > Demand
-                # CRITICAL FIX: Tightened from 2.0x to 1.0x - injector area should NEVER exceed throat area
-                # Even 1.0x is generous - typical is 0.1-0.5x
-                max_injector_area_ratio = 1.0  # Strict limit - injector area must be <= throat area
-                if A_throat_check > 0:
-                    lox_ratio = A_lox_injector / A_throat_check
-                    fuel_ratio = A_fuel_injector / A_throat_check
+                # CRITICAL FIX: HARD CONSTRAINT - reject invalid geometries immediately
+                # Injector area > throat area causes "Supply > Demand" - this is physically impossible
+                # Don't just penalize - reject and force optimizer to find valid geometry
+                if lox_ratio > max_injector_area_ratio or fuel_ratio > max_injector_area_ratio:
+                    # Return very high penalty that scales with violation
+                    excess_lox = max(0, lox_ratio - max_injector_area_ratio)
+                    excess_fuel = max(0, fuel_ratio - max_injector_area_ratio)
+                    # Massive penalty that forces optimizer away from invalid region
+                    constraint_penalty = 1e6 * (1.0 + excess_lox ** 2 + excess_fuel ** 2)
                     
-                    # CRITICAL FIX: HARD CONSTRAINT - reject invalid geometries immediately
-                    # Injector area > throat area causes "Supply > Demand" - this is physically impossible
-                    # Don't just penalize - reject and force optimizer to find valid geometry
-                    if lox_ratio > max_injector_area_ratio or fuel_ratio > max_injector_area_ratio:
-                        # Return very high penalty that scales with violation
-                        excess_lox = max(0, lox_ratio - max_injector_area_ratio)
-                        excess_fuel = max(0, fuel_ratio - max_injector_area_ratio)
-                        # Massive penalty that forces optimizer away from invalid region
-                        constraint_penalty = 1e6 * (1.0 + excess_lox ** 2 + excess_fuel ** 2)
-                        
-                        # Log to help debug
+                    # Log to help debug
+                    if opt_state["iteration"] % 50 == 0:
+                        log_status(
+                            "Layer 1 Constraint",
+                            f"Iter {opt_state['iteration']}: INVALID geometry - Injector area too large (LOX: {lox_ratio:.2f}x, Fuel: {fuel_ratio:.2f}x throat) - REJECTED",
+                        )
+                    return constraint_penalty
+                
+                # CRITICAL FIX: Check if injector geometry can achieve target O/F
+                # O/F = mdot_O / mdot_F = (Cd_O * A_LOX * sqrt(rho_O * delta_p_O)) / (Cd_F * A_fuel * sqrt(rho_F * delta_p_F))
+                # For typical conditions: Cd_O ≈ 0.4, Cd_F ≈ 0.65, rho_O ≈ 1140, rho_F ≈ 780
+                # Typical delta_p ratios: delta_p_O / delta_p_F ≈ 1.0-1.5 (similar pressures)
+                # So: MR ≈ (0.4/0.65) * (A_LOX/A_fuel) * sqrt(1140/780) * sqrt(delta_p_O/delta_p_F)
+                #    ≈ 0.62 * (A_LOX/A_fuel) * 1.21 * 1.1 ≈ 0.82 * (A_LOX/A_fuel)
+                # Therefore: A_LOX/A_fuel ≈ MR_target / 0.82 ≈ 1.22 * MR_target
+                # For MR_target = 2.30: A_LOX/A_fuel ≈ 2.81
+                
+                if A_fuel_injector > 0:
+                    area_ratio = A_lox_injector / A_fuel_injector
+                    # Estimate required area ratio for target O/F (conservative estimate)
+                    # Using typical values: Cd_O=0.4, Cd_F=0.65, rho_O=1140, rho_F=780, delta_p_ratio=1.2
+                    Cd_ratio = 0.4 / 0.65  # ≈ 0.62
+                    rho_ratio = np.sqrt(1140.0 / 780.0)  # ≈ 1.21
+                    delta_p_ratio_est = np.sqrt(1.2)  # ≈ 1.10
+                    area_ratio_factor = Cd_ratio * rho_ratio * delta_p_ratio_est  # ≈ 0.82
+                    required_area_ratio = optimal_of / area_ratio_factor  # For MR=2.30: ≈ 2.81
+                    
+                    # Allow ±50% tolerance (geometry can be adjusted with pressure)
+                    area_ratio_error = abs(area_ratio - required_area_ratio) / required_area_ratio if required_area_ratio > 0 else 1.0
+                    
+                    if area_ratio_error > 0.5:  # Area ratio is way off
+                        # This geometry CANNOT achieve target O/F - reject early
+                        constraint_penalty = 1e5 * (1.0 + area_ratio_error ** 2)
                         if opt_state["iteration"] % 50 == 0:
-                            log_status("Layer 1 Constraint", 
-                                f"Iter {opt_state['iteration']}: INVALID geometry - Injector area too large (LOX: {lox_ratio:.2f}x, Fuel: {fuel_ratio:.2f}x throat) - REJECTED")
+                            log_status(
+                                "Layer 1 Constraint",
+                                f"Iter {opt_state['iteration']}: Injector area ratio {area_ratio:.2f} cannot achieve target O/F {optimal_of:.2f} (required: {required_area_ratio:.2f}) - penalty {constraint_penalty:.1e}",
+                            )
                         return constraint_penalty
-                    
-                    # CRITICAL FIX: Check if injector geometry can achieve target O/F
-                    # O/F = mdot_O / mdot_F = (Cd_O * A_LOX * sqrt(rho_O * delta_p_O)) / (Cd_F * A_fuel * sqrt(rho_F * delta_p_F))
-                    # For typical conditions: Cd_O ≈ 0.4, Cd_F ≈ 0.65, rho_O ≈ 1140, rho_F ≈ 780
-                    # Typical delta_p ratios: delta_p_O / delta_p_F ≈ 1.0-1.5 (similar pressures)
-                    # So: MR ≈ (0.4/0.65) * (A_LOX/A_fuel) * sqrt(1140/780) * sqrt(delta_p_O/delta_p_F)
-                    #    ≈ 0.62 * (A_LOX/A_fuel) * 1.21 * 1.1 ≈ 0.82 * (A_LOX/A_fuel)
-                    # Therefore: A_LOX/A_fuel ≈ MR_target / 0.82 ≈ 1.22 * MR_target
-                    # For MR_target = 2.30: A_LOX/A_fuel ≈ 2.81
-                    
-                    if A_fuel_injector > 0:
-                        area_ratio = A_lox_injector / A_fuel_injector
-                        # Estimate required area ratio for target O/F (conservative estimate)
-                        # Using typical values: Cd_O=0.4, Cd_F=0.65, rho_O=1140, rho_F=780, delta_p_ratio=1.2
-                        Cd_ratio = 0.4 / 0.65  # ≈ 0.62
-                        rho_ratio = np.sqrt(1140.0 / 780.0)  # ≈ 1.21
-                        delta_p_ratio_est = np.sqrt(1.2)  # ≈ 1.10
-                        area_ratio_factor = Cd_ratio * rho_ratio * delta_p_ratio_est  # ≈ 0.82
-                        required_area_ratio = optimal_of / area_ratio_factor  # For MR=2.30: ≈ 2.81
-                        
-                        # Allow ±50% tolerance (geometry can be adjusted with pressure)
-                        area_ratio_error = abs(area_ratio - required_area_ratio) / required_area_ratio if required_area_ratio > 0 else 1.0
-                        
-                        if area_ratio_error > 0.5:  # Area ratio is way off
-                            # This geometry CANNOT achieve target O/F - reject early
-                            constraint_penalty = 1e5 * (1.0 + area_ratio_error ** 2)
-                            if opt_state["iteration"] % 50 == 0:
-                                log_status("Layer 1 Constraint", 
-                                    f"Iter {opt_state['iteration']}: Injector area ratio {area_ratio:.2f} cannot achieve target O/F {optimal_of:.2f} (required: {required_area_ratio:.2f}) - penalty {constraint_penalty:.1e}")
-                            return constraint_penalty
             
             # CRITICAL FIX: For each geometry candidate, solve for optimal pressure to achieve target thrust/O/F
             # This is the fundamental fix - we can't optimize geometry with fixed pressure!
@@ -777,8 +794,8 @@ def run_full_engine_optimization_with_flight_sim(
             
             # CRITICAL: Get initial pressures from optimization variables (not segments)
             # Initial pressures are now optimization variables [9] and [10]
-            P_O_guess_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
-            P_F_guess_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+            P_O_guess_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+            P_F_guess_psi = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
             
             # Also get segments for pressure drop penalty calculation
             lox_segments = getattr(config, '_optimizer_segments', {}).get('lox', [])
@@ -1090,11 +1107,11 @@ def run_full_engine_optimization_with_flight_sim(
             
             # Total objective
             obj = (
-                thrust_penalty +      # Thrust (PRIMARY)
-                of_penalty +          # O/F (PRIMARY)
-                stability_weight +     # Stability (SECONDARY - reduced weight)
-                pressure_drop_penalty +  # Pressure regulation (penalize drop > 5%)
-                bounds_penalty        # Bounds violation
+                thrust_penalty +          # Thrust (PRIMARY)
+                of_penalty +              # O/F (PRIMARY)
+                stability_weight +        # Stability (SECONDARY - reduced weight)
+                pressure_drop_penalty +   # Pressure regulation (penalize drop > 5%)
+                bounds_penalty            # Bounds violation
             )
             
             # Protect against NaN/Inf
@@ -1111,18 +1128,22 @@ def run_full_engine_optimization_with_flight_sim(
                 if opt_state['consecutive_failures'] > 200:
                     # Return a very large penalty to force optimizer to try different region
                     if opt_state["iteration"] % 50 == 0:
-                        log_status("Layer 1 Warning", 
-                            f"Iter {iteration}: {opt_state['consecutive_failures']} consecutive failures - optimizer may be stuck")
+                        log_status(
+                            "Layer 1 Warning",
+                            f"Iter {iteration}: {opt_state['consecutive_failures']} consecutive failures - optimizer may be stuck",
+                        )
                     return 1e5  # Very large penalty to force exploration
             
             # Calculate chamber geometry for tracking using proper method
             A_throat_curr = float(np.clip(x[0], bounds[0][0], bounds[0][1]))
             Lstar_curr = float(np.clip(x[1], bounds[1][0], bounds[1][1]))
             V_chamber_curr = Lstar_curr * A_throat_curr
-            # CRITICAL FIX: Remove arbitrary 0.95 factor
-            D_chamber_curr = max_chamber_od  # Use full allowable diameter
-            A_chamber_curr = np.pi * (D_chamber_curr / 2) ** 2
-            R_chamber_curr = D_chamber_curr / 2
+            D_outer_curr = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
+            D_inner_curr = D_outer_curr - TOTAL_WALL_THICKNESS_M
+            if D_inner_curr <= 0:
+                D_inner_curr = max(D_outer_curr * 0.3, 0.01)
+            A_chamber_curr = np.pi * (D_inner_curr / 2) ** 2
+            R_chamber_curr = D_inner_curr / 2
             # Safe sqrt with validation
             R_throat_curr = np.sqrt(max(0, A_throat_curr / np.pi))
             # Safe division with validation
@@ -1141,13 +1162,13 @@ def run_full_engine_optimization_with_flight_sim(
                 L_chamber_curr = V_chamber_curr / A_chamber_curr if A_chamber_curr > 0 else 0.2
             
             # Extract ablative/graphite thicknesses and pressure control points for history
-            abl_thick_curr = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
-            gra_thick_curr = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+            abl_thick_curr = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+            gra_thick_curr = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
             
             # Calculate combined stability margin (minimum of all three) for backward compatibility
             combined_stability_margin = min(chugging_margin, acoustic_margin, feed_margin)
             
-            # CRITICAL FIX: x[9] and x[10] are segment COUNTS, not pressure ratios!
+            # CRITICAL FIX: x[12] and x[13] are segment COUNTS, not pressure ratios!
             # Get actual pressure ratios from segments, not from wrong array indices
             lox_segments_hist = getattr(config, '_optimizer_segments', {}).get('lox', [])
             fuel_segments_hist = getattr(config, '_optimizer_segments', {}).get('fuel', [])
@@ -1178,7 +1199,8 @@ def run_full_engine_optimization_with_flight_sim(
                 "Pc": Pc_actual,
                 "Lstar": Lstar_curr,
                 "L_chamber": L_chamber_curr,
-                "D_chamber": D_chamber_curr,
+                "D_chamber_inner": D_inner_curr,
+                "D_chamber_outer": D_outer_curr,
                 "stability_margin": combined_stability_margin,  # Backward compatibility
                 "stability_state": stability_state,  # New: "stable", "marginal", or "unstable"
                 "stability_score": stability_score,  # New: 0-1 score
@@ -1254,23 +1276,6 @@ def run_full_engine_optimization_with_flight_sim(
                 opt_state["converged"] = False
             
             return obj
-            
-        except Exception as e:
-            # CRITICAL: Log the actual error so we can debug why all evaluations are failing
-            if opt_state["iteration"] <= 5 or opt_state["iteration"] % 50 == 0:
-                error_msg = str(e)
-                import traceback
-                tb_str = traceback.format_exc()
-                # Log to both status and print for debugging
-                try:
-                    log_status("Objective Error", f"Iter {opt_state['iteration']}: {error_msg[:200]}")
-                except:
-                    pass  # If log_status doesn't exist, just continue
-                # Also print to help debug
-                print(f"Objective Error at iteration {opt_state['iteration']}: {error_msg}")
-                if opt_state["iteration"] <= 3:
-                    print(f"Traceback:\n{tb_str[:500]}")
-            return 1e6  # Penalty for failed evaluation
     
     # Run optimization using L-BFGS-B (supports bounds natively, much better for high-dim)
     # This is far more efficient than Nelder-Mead for 19 dimensions
@@ -1538,8 +1543,8 @@ def run_full_engine_optimization_with_flight_sim(
     best_x = opt_state.get("best_x", result.x if hasattr(result, 'x') else x0)
     if len(best_x) > 10:
         # Extract initial pressures (absolute values in psi)
-        P_O_start_optimized_psi = float(np.clip(best_x[9], bounds[9][0], bounds[9][1]))
-        P_F_start_optimized_psi = float(np.clip(best_x[10], bounds[10][0], bounds[10][1]))
+        P_O_start_optimized_psi = float(np.clip(best_x[10], bounds[10][0], bounds[10][1]))
+        P_F_start_optimized_psi = float(np.clip(best_x[11], bounds[11][0], bounds[11][1]))
         
         # Also get from segments as fallback/verification
         lox_segments = getattr(optimized_config, '_optimizer_segments', {}).get('lox', [])
@@ -2364,6 +2369,11 @@ def run_full_engine_optimization_with_flight_sim(
     # LAYER 4: FLIGHT SIMULATION AND VALIDATION
     # Validate trajectory performance and adjust tank fills (propellant masses)
     # to hit apogee targets. Flight sim handles truncation when tanks run out.
+    #
+    # NOTE: When run from the Layer 1 tab, `use_time_varying` is False. In that
+    # case we should NOT run the full RocketPy‑based flight simulation, since
+    # the user explicitly requested a static optimization only. We still
+    # compute COPV / diagnostics above, but skip Layer 4 entirely.
     # ==========================================================================
     # ==========================================================================
     flight_sim_result: Dict[str, Any] = {
@@ -2375,10 +2385,13 @@ def run_full_engine_optimization_with_flight_sim(
     }
 
     # Determine if we should run flight sim
-    # CRITICAL FIX: Layer 4 should run if Layer 1 passed and we have pressure curves.
-    # Allow execution even when downstream layers struggle so we can still deliver trajectory insights.
+    # CRITICAL BEHAVIOR: Only run Layer 4 when time‑varying analysis is enabled.
+    # For Layer 1 (static) runs – where `use_time_varying=False` – we never
+    # call the RocketPy‑backed flight simulation. This keeps the "Layer 1"
+    # UI tab from unexpectedly triggering Layer 4 work.
     should_run_flight = (
-        pressure_candidate_valid  # Layer 1 must pass
+        use_time_varying
+        and pressure_candidate_valid  # Layer 1 must pass
         and pressure_curves is not None  # Need pressure curves available
     )
 
@@ -2420,7 +2433,9 @@ def run_full_engine_optimization_with_flight_sim(
             )
     else:
         # Determine reason for skipping flight sim
-        if not layer1_acceptable:
+        if not use_time_varying:
+            reason = "time‑varying analysis disabled (Layer 1 static optimization)"
+        elif not layer1_acceptable:
             reason = f"Layer 1 thrust error {layer1_thrust_error_pct:.1f}% too high"
         elif not pressure_candidate_valid:
             reason = "pressure candidate invalid"

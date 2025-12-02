@@ -34,6 +34,9 @@ from chamber_geometry import (
 )
 
 
+TOTAL_WALL_THICKNESS_M = 0.0127  # 0.5 inch total wall (outer - inner diameter)
+
+
 def create_layer1_apply_x_to_config(
     bounds: list,
     max_segments_per_tank: int,
@@ -56,24 +59,25 @@ def create_layer1_apply_x_to_config(
         A_throat = float(np.clip(x[0], bounds[0][0], bounds[0][1]))
         Lstar = float(np.clip(x[1], bounds[1][0], bounds[1][1]))
         expansion_ratio = float(np.clip(x[2], bounds[2][0], bounds[2][1]))
-        d_pintle_tip = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
-        h_gap = float(np.clip(x[4], bounds[4][0], bounds[4][1]))
-        n_orifices = int(round(np.clip(x[5], bounds[5][0], bounds[5][1])))
-        d_orifice = float(np.clip(x[6], bounds[6][0], bounds[6][1]))
-        ablative_thickness = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
-        graphite_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        D_chamber_outer = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
+        d_pintle_tip = float(np.clip(x[4], bounds[4][0], bounds[4][1]))
+        h_gap = float(np.clip(x[5], bounds[5][0], bounds[5][1]))
+        n_orifices = int(round(np.clip(x[6], bounds[6][0], bounds[6][1])))
+        d_orifice = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
+        ablative_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        graphite_thickness = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         
         # CRITICAL: Extract initial pressures (absolute values in psi)
-        P_O_start_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
-        P_F_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+        P_O_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+        P_F_start_psi = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
         
         # Extract segment counts
-        n_segments_lox = int(round(np.clip(x[11], bounds[11][0], bounds[11][1])))
-        n_segments_fuel = int(round(np.clip(x[12], bounds[12][0], bounds[12][1])))
+        n_segments_lox = int(round(np.clip(x[12], bounds[12][0], bounds[12][1])))
+        n_segments_fuel = int(round(np.clip(x[13], bounds[13][0], bounds[13][1])))
         
         # Extract segment parameters for LOX
         vars_per_segment = 5
-        idx_base_lox = 13  # Updated index after initial pressures
+        idx_base_lox = 14  # Updated index after initial pressures and segment counts
         max_lox_idx = min(idx_base_lox + max_segments_per_tank * vars_per_segment, len(x))
         x_lox_segments = x[idx_base_lox:max_lox_idx]
         n_segments_lox = min(n_segments_lox, len(x_lox_segments) // vars_per_segment)
@@ -123,9 +127,13 @@ def create_layer1_apply_x_to_config(
         
         # Chamber geometry
         V_chamber = Lstar * A_throat
-        D_chamber = max_chamber_od
-        A_chamber = np.pi * (D_chamber / 2) ** 2
-        R_chamber = D_chamber / 2
+        # Convert outer diameter to inner diameter by subtracting wall thickness (0.5 inch total)
+        D_chamber_inner = D_chamber_outer - TOTAL_WALL_THICKNESS_M
+        if D_chamber_inner <= 0:
+            # Fallback: keep at least 30% of outer diameter or 10mm
+            D_chamber_inner = max(D_chamber_outer * 0.3, 0.01)
+        A_chamber = np.pi * (D_chamber_inner / 2) ** 2
+        R_chamber = D_chamber_inner / 2
         R_throat = np.sqrt(max(0, A_throat / np.pi))
         
         if A_throat > 0 and A_chamber > 0:
@@ -147,8 +155,9 @@ def create_layer1_apply_x_to_config(
         config.chamber.volume = V_chamber
         config.chamber.Lstar = Lstar
         config.chamber.length = L_chamber
-        if hasattr(config.chamber, 'chamber_inner_diameter'):
-            config.chamber.chamber_inner_diameter = D_chamber
+        # Only store inner diameter on the chamber config; outer diameter is an
+        # optimization variable but not part of the pydantic ChamberConfig schema.
+        setattr(config.chamber, 'chamber_inner_diameter', D_chamber_inner)
         if hasattr(config.chamber, 'contraction_ratio'):
             config.chamber.contraction_ratio = contraction_ratio
         if hasattr(config.chamber, 'A_chamber'):

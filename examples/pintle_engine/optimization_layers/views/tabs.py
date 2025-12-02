@@ -545,7 +545,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             "Stability Margin Handicap",
             min_value=0.0,
             max_value=1.0,
-            value=1.0,
+            value=0.0,
             step=0.05,
             key="opt_stability_margin_handicap",
             help=(
@@ -1670,24 +1670,63 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         else:
             st.error("❌ Layer 1: Pressure Candidate INVALID")
         
-        # Show Layer 1 performance metrics
+        # Show Layer 1 convergence history (same plot as full optimizer tab)
+        st.markdown("#### Optimization Convergence History")
+        from .helpers import plot_optimization_convergence
+        plot_optimization_convergence(optimization_results)
+        
+        # Show Layer 1 performance metrics (forward‑mode style)
         performance = optimization_results.get("performance", {})
         if performance:
-            st.markdown("#### Performance at t=0")
+            # Explicitly show the tank pressures at which performance is evaluated
+            P_O_start_psi = performance.get("P_O_start_psi")
+            P_F_start_psi = performance.get("P_F_start_psi")
+            if P_O_start_psi is not None or P_F_start_psi is not None:
+                st.markdown("#### Evaluation Tank Pressures (t = 0)")
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    if P_O_start_psi is not None:
+                        st.metric("LOX Tank Pressure", f"{P_O_start_psi:.1f} psi")
+                with col_p2:
+                    if P_F_start_psi is not None:
+                        st.metric("Fuel Tank Pressure", f"{P_F_start_psi:.1f} psi")
+
+            st.markdown("#### Performance at t = 0 (Forward Mode Metrics)")
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 if "thrust" in performance:
                     st.metric("Thrust", f"{performance['thrust']:.0f} N")
-            with col2:
                 if "Isp" in performance:
                     st.metric("Isp", f"{performance['Isp']:.1f} s")
-            with col3:
-                if "MR" in performance:
-                    st.metric("O/F Ratio", f"{performance['MR']:.2f}")
-            with col4:
+            with col2:
                 if "Pc" in performance:
                     st.metric("Chamber Pressure", f"{performance['Pc']/1e6:.2f} MPa")
-        
+                if "P_exit" in performance:
+                    st.metric("Exit Pressure", f"{performance['P_exit'] * 1e-6:.2f} MPa")
+            with col3:
+                if "mdot_total" in performance:
+                    st.metric("Total Mass Flow", f"{performance['mdot_total']:.3f} kg/s")
+                if "mdot_O" in performance:
+                    st.metric("Oxidizer Flow", f"{performance['mdot_O']:.3f} kg/s")
+            with col4:
+                if "mdot_F" in performance:
+                    st.metric("Fuel Flow", f"{performance['mdot_F']:.3f} kg/s")
+                if "MR" in performance:
+                    st.metric("O/F Ratio", f"{performance['MR']:.3f}")
+
+            # Additional nozzle / performance metrics
+            col5, col6, col7 = st.columns(3)
+            with col5:
+                if "cstar_actual" in performance:
+                    st.metric("c* (actual)", f"{performance['cstar_actual']:.1f} m/s")
+            with col6:
+                if "v_exit" in performance:
+                    st.metric("Exit Velocity", f"{performance['v_exit']:.1f} m/s")
+            with col7:
+                Cf_actual = performance.get("Cf_actual", performance.get("Cf"))
+                if Cf_actual is not None:
+                    st.metric("Cf (actual)", f"{Cf_actual:.3f}")
+
         # Show optimized parameters
         opt_params = optimization_results.get("optimized_parameters", {})
         if opt_params:
@@ -1710,11 +1749,14 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     st.caption(f"Orifices: {int(opt_params['n_orifices'])}")
                 if "d_orifice" in opt_params:
                     st.caption(f"Orifice Diameter: {opt_params['d_orifice'] * 1000:.2f} mm")
-        
-        # Show pressure curves if available
-        if "optimized_pressure_curves" in optimization_results:
-            st.markdown("#### Pressure Curves")
-            plot_pressure_curves(optimization_results["optimized_pressure_curves"])
+            
+            # Chamber geometry visualization (Layer 1 only)
+            st.markdown("#### Chamber Geometry (Layer 1 Result)")
+            try:
+                from .helpers import _display_chamber_geometry_plot
+                _display_chamber_geometry_plot(config_obj, optimization_results)
+            except Exception as e:
+                st.warning(f"Could not render chamber geometry plot: {e}")
     else:
         st.info("💡 Layer 1 has not been run yet. Click 'Run Layer 1 Optimization' above or use the Full Engine Optimizer.")
     
