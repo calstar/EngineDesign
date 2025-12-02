@@ -990,6 +990,15 @@ def run_layer2_pressure(
                 return 1e6
             
             thrust_hist = thrust_hist[:available_n]
+            # Robustly clamp any non-finite thrust values so that downstream
+            # penalties stay finite and the optimizer can move away from
+            # pathological regions instead of getting stuck with NaNs.
+            thrust_hist = np.nan_to_num(
+                thrust_hist,
+                nan=0.0,
+                posinf=1e6,
+                neginf=-1e6,
+            )
             time_hist = time_eval[:available_n]
             
             # Note: Initial pressures are fixed from Layer 1 and assumed to produce peak_thrust
@@ -1000,6 +1009,20 @@ def run_layer2_pressure(
             mdot_F_hist = np.atleast_1d(results_layer2.get("mdot_F", np.zeros(available_n)))
             mdot_O_hist = mdot_O_hist[:available_n]
             mdot_F_hist = mdot_F_hist[:available_n]
+            # Clamp non-finite mass-flow values; NaNs here would otherwise
+            # propagate into impulse / capacity penalties and stall the search.
+            mdot_O_hist = np.nan_to_num(
+                mdot_O_hist,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
+            mdot_F_hist = np.nan_to_num(
+                mdot_F_hist,
+                nan=0.0,
+                posinf=0.0,
+                neginf=0.0,
+            )
             
             # Integrate mass flow rates to get total propellant consumed
             total_lox_mass = float(np.trapezoid(mdot_O_hist, time_hist))  # kg
@@ -1049,15 +1072,33 @@ def run_layer2_pressure(
             # Check 3: Stability (must pass minimum threshold)
             stability_scores = results_layer2.get("stability_score", None)
             if stability_scores is not None:
+                stability_scores = np.nan_to_num(
+                    np.atleast_1d(stability_scores),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
                 min_stability = float(np.min(stability_scores))
             else:
                 chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
+                chugging = np.nan_to_num(
+                    np.atleast_1d(chugging),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
                 min_stability = max(0.0, min(1.0, (float(np.min(chugging)) - 0.3) * 1.5))
             
             stability_penalty = 0.0
             if min_stability_margin is not None:
                 # Check against minimum stability margin
                 chugging_margins = results_layer2.get("chugging_stability_margin", np.array([1.0]))
+                chugging_margins = np.nan_to_num(
+                    np.atleast_1d(chugging_margins),
+                    nan=0.0,
+                    posinf=0.0,
+                    neginf=0.0,
+                )
                 min_chugging = float(np.min(chugging_margins))
                 if min_chugging < min_stability_margin:
                     stability_penalty = (min_stability_margin - min_chugging) * 50.0
@@ -1070,6 +1111,12 @@ def run_layer2_pressure(
             if optimal_of_ratio is not None:
                 MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(available_n, optimal_of_ratio)))
                 MR_hist = MR_hist[:available_n]
+                MR_hist = np.nan_to_num(
+                    MR_hist,
+                    nan=optimal_of_ratio,
+                    posinf=optimal_of_ratio * 5.0,
+                    neginf=0.0,
+                )
                 avg_MR = float(np.mean(MR_hist))
                 MR_error = abs(avg_MR - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
                 # Allow 20% O/F error before penalty

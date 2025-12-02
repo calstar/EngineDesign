@@ -26,6 +26,7 @@ def run_layer3_thermal_protection(
     n_time_points: int,
     update_progress: Callable,
     log_status: Callable,
+    objective_callback: Optional[Callable[[int, float, float], None]] = None,
 ) -> Tuple[PintleEngineConfig, Dict[str, Any], Dict[str, Any]]:
     """
     Run Layer 3: Thermal Protection Optimization.
@@ -74,7 +75,13 @@ def run_layer3_thermal_protection(
     
     if len(layer3_x0) > 0:
         layer3_x0 = np.array(layer3_x0)
-        
+
+        # Track optimization evaluations for optional streaming to UI
+        layer3_state: Dict[str, Any] = {
+            "eval_index": 0,
+            "best_objective": float("inf"),
+        }
+
         def layer3_objective(x_layer3):
             """Optimize thermal protection to minimize mass while meeting recession requirements."""
             try:
@@ -118,6 +125,21 @@ def run_layer3_thermal_protection(
                 # Objective: minimize mass (thickness) + recession penalty
                 total_thickness = np.sum(x_layer3)
                 obj = total_thickness * 1000 + recession_penalty  # Convert to mm for scaling
+
+                # Optional: stream objective history to external callback (e.g., UI plot)
+                if objective_callback is not None:
+                    try:
+                        layer3_state["eval_index"] += 1
+                        eval_idx = int(layer3_state["eval_index"])
+                        best_obj = float(layer3_state["best_objective"])
+                        if obj < best_obj:
+                            best_obj = obj
+                            layer3_state["best_objective"] = best_obj
+                        objective_callback(eval_idx, float(obj), float(best_obj))
+                    except Exception:
+                        # Never let UI/consumer callback break the optimizer loop
+                        pass
+
                 return obj
             except Exception:
                 return 1e6

@@ -2264,6 +2264,22 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 else:
                     layer2_config_dict = {}
 
+                # Helper to recursively convert NumPy types into plain Python
+                # types so that YAML stays portable and can be loaded safely.
+                def _sanitize_for_yaml(obj):
+                    import numpy as _np
+
+                    if isinstance(obj, _np.ndarray):
+                        return obj.tolist()
+                    if isinstance(obj, _np.generic):
+                        # NumPy scalar → native Python scalar
+                        return obj.item()
+                    if isinstance(obj, dict):
+                        return {k: _sanitize_for_yaml(v) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [_sanitize_for_yaml(v) for v in obj]
+                    return obj
+
                 # Attach design requirements and all Layer 2 outputs.
                 layer2_config_dict.setdefault("design_requirements", requirements)
                 layer2_config_dict.setdefault("layer2", {})
@@ -2280,22 +2296,14 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 # Optionally attach full time-series results if present (can be large).
                 full_results = layer2_results_safe.get("full_time_results")
                 if isinstance(full_results, dict):
-                    # Convert NumPy arrays to lists so YAML can serialize them.
-                    sanitized_full_results = {}
-                    for k, v in full_results.items():
-                        try:
-                            if hasattr(v, "tolist"):
-                                sanitized_full_results[k] = v.tolist()
-                            else:
-                                sanitized_full_results[k] = v
-                        except Exception:
-                            # Fallback: keep raw value if tolist() fails
-                            sanitized_full_results[k] = v
-                    layer2_config_dict["layer2"]["full_time_results"] = sanitized_full_results
+                    # Recursively sanitize all NumPy values
+                    layer2_config_dict["layer2"]["full_time_results"] = _sanitize_for_yaml(full_results)
 
                 import yaml
 
-                layer2_yaml_str = yaml.dump(layer2_config_dict, default_flow_style=False)
+                # Final pass: make sure the entire structure is YAML‑friendly
+                safe_layer2_config = _sanitize_for_yaml(layer2_config_dict)
+                layer2_yaml_str = yaml.dump(safe_layer2_config, default_flow_style=False)
 
                 st.download_button(
                     label="💾 Download Layer 2 Results (YAML)",
@@ -2536,19 +2544,119 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
         return config_obj
     
-    # Check for Layer 2 results (prerequisite)
+    st.markdown("---")
+    st.markdown("### Run Layer 3 Individually")
+
+    # ------------------------------------------------------------------
+    # Resolve / load Layer 2 results (prerequisite)
+    # ------------------------------------------------------------------
     layer2_results = st.session_state.get("layer2_results") or (
         st.session_state.get("optimization_results", {}).get("time_varying_results")
     )
     layer2_config = st.session_state.get("optimized_config", config_obj)
-    
+
+    # Optional: allow user to upload a Layer 2 results YAML produced by the
+    # "Download Layer 2 Results (YAML)" button. This enables a Layer 3‑only
+    # workflow without re‑running Layer 2 in the current session.
+    st.markdown("#### Optional: Load Layer 2 Results (YAML)")
+    uploaded_layer2_file_for_layer3 = st.file_uploader(
+        "Upload `layer2_results.yaml`",
+        type=["yaml", "yml"],
+        key="layer3_layer2_results_upload",
+        help=(
+            "Load a Layer 2 results YAML previously exported from this app. "
+            "This will populate the converged pressure curves and time‑varying "
+            "results so you can run Layer 3 without re‑running Layer 2."
+        ),
+    )
+
+    if uploaded_layer2_file_for_layer3 is not None:
+        import yaml
+
+        # Read the uploaded content once so we can try multiple loaders if needed.
+        raw_bytes = uploaded_layer2_file_for_layer3.read()
+
+        uploaded_layer2_dict = None
+
+        try:
+            # First, try the safe loader.
+            uploaded_layer2_dict = yaml.safe_load(raw_bytes)
+        except Exception:
+            # Some older / external YAMLs may contain Python / NumPy‑specific tags
+            # such as `!!python/object/apply:numpy._core.multiarray.scalar`, which
+            # `safe_load` cannot construct. In that case, fall back to the
+            # unsafe loader and warn the user. This is acceptable here because
+            # the file is expected to come from this app.
+            try:
+                uploaded_layer2_dict = yaml.unsafe_load(raw_bytes)
+                st.warning(
+                    "Loaded Layer 2 YAML using an unsafe loader due to Python/NumPy‑specific tags. "
+                    "Only upload files generated by this app or otherwise trusted sources."
+                )
+            except Exception as e_unsafe:
+                st.error(f"Could not parse uploaded Layer 2 YAML: {e_unsafe}")
+                uploaded_layer2_dict = None
+
+        # At this point, uploaded_layer2_dict may have come from either safe or
+        # unsafe loading. As long as we have a mapping, normalize it into the
+        # expected in‑session structures so that Layer 3 can run even on
+        # legacy YAMLs.
+        if isinstance(uploaded_layer2_dict, dict):
+            # Try to rebuild the optimized PintleEngineConfig from the full mapping.
+            try:
+                uploaded_layer2_config = PintleEngineConfig(**uploaded_layer2_dict)
+                st.session_state["optimized_config"] = uploaded_layer2_config
+                st.session_state["config_obj"] = uploaded_layer2_config
+                st.session_state["config_dict"] = uploaded_layer2_config.model_dump(exclude_none=False)
+                layer2_config = uploaded_layer2_config
+            except Exception:
+                uploaded_layer2_config = None
+
+            # If the YAML contains design requirements, update them so metrics match.
+            dr = uploaded_layer2_dict.get("design_requirements")
+            if isinstance(dr, dict):
+                requirements = dr
+                st.session_state["design_requirements"] = dr
+
+            # Normalize the embedded Layer 2 payload into the structure expected
+            # by this tab (same keys as when run in‑session).
+            layer2_block = uploaded_layer2_dict.get("layer2", {})
+            if isinstance(layer2_block, dict):
+                # Convert arrays/lists back to NumPy for internal use.
+                time_array_s = np.asarray(layer2_block.get("time_array_s", []), dtype=float)
+                P_tank_O_pa = np.asarray(layer2_block.get("P_tank_O_pa", []), dtype=float)
+                P_tank_F_pa = np.asarray(layer2_block.get("P_tank_F_pa", []), dtype=float)
+
+                layer2_results_from_yaml = {
+                    "summary": layer2_block.get("summary", {}),
+                    "time_array": time_array_s,
+                    "P_tank_O_optimized": P_tank_O_pa,
+                    "P_tank_F_optimized": P_tank_F_pa,
+                    "time_varying_summary": layer2_block.get("time_varying_summary", {}),
+                    "full_time_results": layer2_block.get("full_time_results", {}),
+                    # Assume a successful burn candidate when loading from an exported file.
+                    "burn_candidate_valid": True,
+                }
+                st.session_state["layer2_results"] = layer2_results_from_yaml
+                layer2_results = layer2_results_from_yaml
+            else:
+                st.error("Uploaded Layer 2 YAML is missing the required `layer2` section.")
+        elif uploaded_layer2_dict is not None:
+            # Parsed but not into a mapping (unexpected structure)
+            st.error("Uploaded Layer 2 file did not contain a valid YAML mapping/object.")
+
+    # Re-check Layer 2 prerequisite after optional upload handling.
     if not layer2_results:
-        st.warning("⚠️ Layer 2 must be run first. Please run Layer 2 optimization before running Layer 3.")
+        st.warning(
+            "⚠️ Layer 2 must be run first. Please run Layer 2 optimization or upload "
+            "`layer2_results.yaml` before running Layer 3."
+        )
         return config_obj
-    
-    st.markdown("---")
-    st.markdown("### Run Layer 3 Individually")
-    
+
+    # Live objective convergence plot container (persists while optimization runs)
+    st.markdown("#### Layer 3 Objective Convergence")
+    layer3_objective_plot_container = st.empty()
+
     if st.button("🚀 Run Layer 3 Optimization", type="primary", key="run_layer3"):
         try:
             # ------------------------------------------------------------------
@@ -2588,7 +2696,58 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             
             progress_bar = st.progress(0, text="Running Layer 3 optimization...")
             status_text = st.empty()
-            
+
+            # Reset any previous objective history
+            st.session_state["layer3_objective_history"] = []
+
+            def objective_callback(eval_index: int, objective: float, best_objective: float):
+                """Stream Layer 3 objective history into a live-updating convergence plot."""
+                try:
+                    history = st.session_state.get("layer3_objective_history", [])
+                    history.append(
+                        {
+                            "evaluation": int(eval_index),
+                            "objective": float(objective),
+                            "best_objective": float(best_objective),
+                        }
+                    )
+                    st.session_state["layer3_objective_history"] = history
+
+                    if not history:
+                        return
+
+                    df = pd.DataFrame(history)
+                    fig = go.Figure()
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["evaluation"],
+                            y=df["objective"],
+                            mode="lines+markers",
+                            name="Objective",
+                            line=dict(color="#1f77b4"),
+                        )
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["evaluation"],
+                            y=df["best_objective"],
+                            mode="lines",
+                            name="Best Objective",
+                            line=dict(color="#ff7f0e", dash="dash"),
+                        )
+                    )
+                    fig.update_layout(
+                        xaxis_title="Evaluation",
+                        yaxis_title="Objective Value",
+                        height=300,
+                        margin=dict(l=40, r=20, t=30, b=40),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    layer3_objective_plot_container.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    # Never let plotting errors break the optimization loop
+                    pass
+
             def update_progress(stage: str, progress: float, message: str):
                 progress_bar.progress(progress, text=f"{stage}\n{message}")
                 status_text.text(f"{stage} | {message}")
@@ -2606,6 +2765,7 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 n_time_points,
                 update_progress,
                 log_status,
+                objective_callback=objective_callback,
             )
             
             progress_bar.empty()
@@ -2668,7 +2828,18 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     st.caption("20% margin over max recession")
             
             # Show recession data
-            time_varying = optimization_results.get("time_varying_results", None)
+            # Prefer time-varying results from the main optimization_results dict,
+            # but fall back to any cached layer3_results if available.
+            time_varying = None
+            if optimization_results:
+                time_varying = optimization_results.get("time_varying_results", None)
+            elif layer3_results:
+                if isinstance(layer3_results, dict):
+                    # layer3_results may either be the full result dict or just
+                    # the time-varying portion; handle both cases.
+                    time_varying = layer3_results.get("time_varying_results", None) or layer3_results
+                else:
+                    time_varying = layer3_results
             if time_varying:
                 st.markdown("#### Recession Analysis")
                 if "max_recession_chamber" in time_varying and ablative_cfg:
