@@ -34,7 +34,7 @@ from chamber_geometry import (
 )
 
 
-TOTAL_WALL_THICKNESS_M = 0.0127  # 0.5 inch total wall (outer - inner diameter)
+TOTAL_WALL_THICKNESS_M = 0.0254  # 1.0 inch total wall (0.5 inch per side: outer - inner diameter)
 
 
 def create_layer1_apply_x_to_config(
