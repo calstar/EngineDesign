@@ -33,6 +33,7 @@ from .helpers import (
 )
 from .layer1_static_optimization import (
     create_layer1_apply_x_to_config,
+    run_layer1_global_search,
 )
 from .layer2_pressure import (
     run_layer2_pressure,
@@ -157,6 +158,33 @@ def run_full_engine_optimization_with_flight_sim(
     lox_P_end_ratio = pressure_config.get("lox_end_pct", 0.70)
     fuel_P_start = pressure_config.get("fuel_start_psi", 500) * psi_to_Pa
     fuel_P_end_ratio = pressure_config.get("fuel_end_pct", 0.70)
+
+    # ------------------------------------------------------------------
+    # Estimate ambient pressure at launch site for exit-pressure targeting
+    # ------------------------------------------------------------------
+    # Default: sea‑level ISA pressure
+    P_atm_default = 101325.0  # Pa
+    P_amb_launch = P_atm_default
+    try:
+        env_cfg = getattr(config_obj, "environment", None)
+        if env_cfg is not None and getattr(env_cfg, "elevation", None) is not None:
+            elev = float(env_cfg.elevation)
+            # Simple barometric approximation valid for low altitudes
+            # P = P0 * (1 - L*h/T0)^(g*M/(R*L))
+            P0 = 101325.0
+            T0 = 288.15
+            L = 0.0065
+            g = 9.80665
+            M = 0.0289644
+            R = 8.3144598
+            exponent = g * M / (R * L)
+            factor = max(0.0, 1.0 - L * elev / T0)
+            P_amb_launch = P0 * (factor ** exponent)
+    except Exception:
+        P_amb_launch = P_atm_default
+
+    # Target exit pressure slightly under ambient to reduce separation risk
+    target_P_exit = 1 * P_amb_launch
     
     # Pressure curve mode - optimizer controls the curve shape
     pressure_mode = pressure_config.get("mode", "optimizer_controlled")
@@ -561,13 +589,16 @@ def run_full_engine_optimization_with_flight_sim(
                 config.injector.geometry.lox.d_orifice = d_orifice
                 config.injector.geometry.lox.theta_orifice = 90.0
         
-        # Ablative liner thickness (chamber protection)
-        if hasattr(config, 'ablative_cooling') and config.ablative_cooling and config.ablative_cooling.enabled:
-            config.ablative_cooling.initial_thickness = ablative_thickness
-        
-        # Graphite insert thickness (throat protection)
-        if hasattr(config, 'graphite_insert') and config.graphite_insert and config.graphite_insert.enabled:
-            config.graphite_insert.initial_thickness = graphite_thickness
+        # Thermal protection (Layer 1 ignores ablative/graphite thickness)
+        #
+        # IMPORTANT:
+        #   - Layer 1 is now strictly a *static geometry + tank‑pressure* optimizer.
+        #   - Ablative/graphite thickness sizing is owned by downstream layers
+        #     (Layer 2/3 thermal protection pipeline).
+        #   - We therefore **do not** modify `config.ablative_cooling` or
+        #     `config.graphite_insert` here; any defaults carried on
+        #     `config_base` are preserved for YAML export, but are not part of
+        #     the Layer 1 decision variables.
         
         return config, lox_end_ratio, fuel_end_ratio
     
@@ -575,7 +606,17 @@ def run_full_engine_optimization_with_flight_sim(
     update_progress("Stage: Optimization Setup", 0.09, "Checking initial configuration...")
     try:
         init_config, _, _ = apply_x_to_config(x0, config_base)
-        init_runner = PintleEngineRunner(init_config)
+
+        # Layer 1 is strictly static; disable ablative/graphite effects for
+        # all runner evaluations in this layer so thermal protection does not
+        # influence geometry/pressure optimization.
+        init_config_runner = copy.deepcopy(init_config)
+        if hasattr(init_config_runner, "ablative_cooling") and init_config_runner.ablative_cooling:
+            init_config_runner.ablative_cooling.enabled = False
+        if hasattr(init_config_runner, "graphite_insert") and init_config_runner.graphite_insert:
+            init_config_runner.graphite_insert.enabled = False
+
+        init_runner = PintleEngineRunner(init_config_runner)
         # CRITICAL FIX: Get starting pressures from segments, not from wrong array indices!
         # x0[9] is n_segments_lox (integer), not a pressure ratio!
         # x0[13] would be out of bounds or a segment parameter, not a pressure ratio!
@@ -817,8 +858,17 @@ def run_full_engine_optimization_with_flight_sim(
             
             # CRITICAL FIX: For each geometry candidate, solve for optimal pressure to achieve target thrust/O/F
             # This is the fundamental fix - we can't optimize geometry with fixed pressure!
-            # We need to find the pressure that makes this geometry work, THEN evaluate error
-            test_runner = PintleEngineRunner(config)
+            # We need to find the pressure that makes this geometry work, THEN evaluate error.
+            #
+            # IMPORTANT: Layer 1 is static only; disable ablative/graphite on the
+            # runner so thermal protection physics are excluded from this layer.
+            config_runner = copy.deepcopy(config)
+            if hasattr(config_runner, "ablative_cooling") and config_runner.ablative_cooling:
+                config_runner.ablative_cooling.enabled = False
+            if hasattr(config_runner, "graphite_insert") and config_runner.graphite_insert:
+                config_runner.graphite_insert.enabled = False
+
+            test_runner = PintleEngineRunner(config_runner)
             
             # CRITICAL: Get initial pressures from optimization variables (not segments)
             # Initial pressures are now optimization variables [9] and [10]
@@ -1033,6 +1083,12 @@ def run_full_engine_optimization_with_flight_sim(
             # Calculate errors with tolerances (safe division)
             thrust_error = abs(F_actual - target_thrust) / target_thrust if target_thrust > 0 else 1.0
             of_error = abs(MR_actual - optimal_of) / optimal_of if optimal_of > 0 else 0
+
+            # Exit pressure objective: keep close to target exit pressure at launch
+            P_exit_actual = best_results.get("P_exit", results.get("P_exit", 0.0))
+            exit_pressure_error = 0.0
+            if target_P_exit > 0:
+                exit_pressure_error = abs(P_exit_actual - target_P_exit) / target_P_exit
             
             # CRITICAL: Calculate pressure drop penalty to encourage REGULATED profiles
             # For regulation, we want controlled drop-off (5-10% is acceptable, not perfectly flat)
@@ -1124,6 +1180,10 @@ def run_full_engine_optimization_with_flight_sim(
             
             # O/F error penalty (PRIMARY - highest priority)
             of_penalty = (of_error ** 2) * 150.0
+
+            # Exit pressure penalty (PRIMARY-ish: shape nozzle for near‑ambient exit)
+            # Weight moderate so it influences geometry without overpowering thrust/O/F.
+            exit_pressure_penalty = (exit_pressure_error ** 2) * 80.0
             
             # Stability penalty (SECONDARY - important but shouldn't dominate)
             # Reduced weight so stability doesn't prevent finding good thrust/O/F
@@ -1135,11 +1195,12 @@ def run_full_engine_optimization_with_flight_sim(
             
             # Total objective
             obj = (
-                thrust_penalty +          # Thrust (PRIMARY)
-                of_penalty +              # O/F (PRIMARY)
-                stability_weight +        # Stability (SECONDARY - reduced weight)
-                pressure_drop_penalty +   # Pressure regulation (penalize drop > 5%)
-                bounds_penalty            # Bounds violation
+                thrust_penalty +            # Thrust (PRIMARY)
+                of_penalty +                # O/F (PRIMARY)
+                exit_pressure_penalty +     # Exit pressure near 0.95 * P_amb (geometry / expansion shaping)
+                stability_weight +          # Stability (SECONDARY - reduced weight)
+                pressure_drop_penalty +     # Pressure regulation (penalize drop > 5%)
+                bounds_penalty              # Bounds violation
             )
             
             # Protect against NaN/Inf
@@ -1342,7 +1403,23 @@ def run_full_engine_optimization_with_flight_sim(
     if opt_state.get('objective_satisfied', False) or opt_state.get('force_maxfun_1', False):
         maxfun_capped = 1  # Force immediate stop
         log_status("Layer 1", f"Objective satisfied - setting maxfun=1 to stop immediately")
-    
+
+    # ------------------------------------------------------------------
+    # OPTIONAL: Short global search (random + DE) to refine initial guess
+    # ------------------------------------------------------------------
+    try:
+        # Keep this very lightweight so Layer 1 doesn't dominate runtime.
+        # Budget: at most ~150 evaluations, scaled by user max_iterations.
+        max_global_evals = int(min(150, max(50, max_iterations * 3)))
+        x0 = run_layer1_global_search(objective, bounds, x0, max_evals=max_global_evals)
+        log_status(
+            "Layer 1",
+            f"Global search pre-pass completed (max_evals={max_global_evals}); proceeding to local optimization",
+        )
+    except Exception as e:
+        # Global search is a bonus; any failure should not stop the main optimizer.
+        log_status("Layer 1", f"Global search skipped due to error: {str(e)[:80]}")
+
     result = minimize(
         objective,
         x0,
@@ -1465,7 +1542,15 @@ def run_full_engine_optimization_with_flight_sim(
         else:
             P_F_initial = max_fuel_P_psi * psi_to_Pa * 0.95
     
-    optimized_runner = PintleEngineRunner(optimized_config)
+    # For Layer 1 validation, use a runner with thermal protection disabled so
+    # ablative/graphite do not affect the static pass/fail checks.
+    optimized_config_runner = copy.deepcopy(optimized_config)
+    if hasattr(optimized_config_runner, "ablative_cooling") and optimized_config_runner.ablative_cooling:
+        optimized_config_runner.ablative_cooling.enabled = False
+    if hasattr(optimized_config_runner, "graphite_insert") and optimized_config_runner.graphite_insert:
+        optimized_config_runner.graphite_insert.enabled = False
+
+    optimized_runner = PintleEngineRunner(optimized_config_runner)
     initial_performance = optimized_runner.evaluate(P_O_initial, P_F_initial)
     
     # CRITICAL FIX: If O/F error is very high, re-solve for pressure before validation
@@ -2563,6 +2648,11 @@ def run_full_engine_optimization_with_flight_sim(
     coupled_results["copv_results"] = copv_results
     coupled_results["flight_sim_result"] = flight_sim_result
     coupled_results["time_array"] = time_array
+    # Exit pressure targeting info for UI
+    coupled_results["exit_pressure_targeting"] = {
+        "P_ambient_launch": P_amb_launch,
+        "target_P_exit": target_P_exit,
+    }
     
     # Include time-varying results for plotting (if available)
     if time_varying_results is not None:

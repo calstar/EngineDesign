@@ -297,7 +297,7 @@ def design_optimization_view(config_obj: PintleEngineConfig, runner: Optional[Pi
         "📋 Design Requirements",
         "🚀 Full Engine Optimizer",
         "🔧 Layer 1: Static Optimization",
-        "⏱️ Layer 2: Burn Candidate",
+        "⏱️ Layer 2: Pressure Candidate",
         "🔥 Layer 3: Thermal Protection",
         "✈️ Layer 4: Flight Simulation"
     ])

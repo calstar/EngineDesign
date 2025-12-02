@@ -1,24 +1,23 @@
 """Layer 1: Static Optimization
 
-This layer implements the main optimization loop that jointly optimizes:
-- Engine geometry (throat, L*, expansion ratio, pintle geometry)
-- Pressure curve parameters (segmented curves for LOX and fuel)
-- Initial thermal protection guesses
+This layer implements the main optimization loop that optimizes ONLY
+static (time‑independent) quantities:
 
-This is where the pressure input curves are iterated over during optimization.
+- Engine geometry (throat, L*, expansion ratio, pintle geometry)
+- Initial tank pressures for LOX and fuel (single value per tank)
+
+All **time‑varying** pressure behavior (segments/curves over the burn)
+is handled **exclusively** in Layer 2 (`layer2_pressure.py`). Layer 1
+must NOT create or manipulate pressure segments or time arrays.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Any, Optional, Tuple, Callable
+from typing import Tuple, Callable
 import numpy as np
 import copy
 
 from pintle_pipeline.config_schemas import PintleEngineConfig
-from pintle_models.runner import PintleEngineRunner
-
-# Import helpers
-from .helpers import segments_from_optimizer_vars
 
 # Import chamber geometry functions
 import sys
@@ -39,10 +38,6 @@ TOTAL_WALL_THICKNESS_M = 0.0254  # 1.0 inch total wall (0.5 inch per side: outer
 
 def create_layer1_apply_x_to_config(
     bounds: list,
-    max_segments_per_tank: int,
-    max_lox_P_psi: float,
-    max_fuel_P_psi: float,
-    target_burn_time: float,
     max_chamber_od: float,
     max_nozzle_exit: float,
 ) -> Callable:
@@ -51,8 +46,22 @@ def create_layer1_apply_x_to_config(
     Returns a function that converts optimizer variables to engine config.
     """
     
-    def apply_x_to_config(x: np.ndarray, base_config: PintleEngineConfig) -> Tuple[PintleEngineConfig, float, float]:
-        """Apply optimization variables to config. Returns (config, lox_end_ratio, fuel_end_ratio)."""
+    def apply_x_to_config(
+        x: np.ndarray,
+        base_config: PintleEngineConfig,
+    ) -> Tuple[PintleEngineConfig, float, float]:
+        """Apply optimization variables to config.
+
+        Returns:
+            config: Updated engine configuration
+            P_O_start_psi: Initial LOX tank pressure [psi]
+            P_F_start_psi: Initial fuel tank pressure [psi]
+
+        Note:
+            Layer 1 is **static only**. It chooses *single* initial tank
+            pressures which Layer 2 then uses as the starting point for
+            full time‑varying pressure‑curve optimization.
+        """
         config = copy.deepcopy(base_config)
         
         # Clip all values to bounds to ensure we stay within limits
@@ -64,66 +73,18 @@ def create_layer1_apply_x_to_config(
         h_gap = float(np.clip(x[5], bounds[5][0], bounds[5][1]))
         n_orifices = int(round(np.clip(x[6], bounds[6][0], bounds[6][1])))
         d_orifice = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
+        # NOTE: Indices 8 and 9 in `x` were previously used for ablative and graphite
+        # thickness optimization. Layer 1 is now strictly geometry + initial tank
+        # pressure only, so we intentionally ignore these values here to keep the
+        # optimizer dimensionality stable while removing thermal‑protection coupling.
         ablative_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
         graphite_thickness = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         
-        # CRITICAL: Extract initial pressures (absolute values in psi)
+        # CRITICAL: Extract initial pressures (absolute values in psi).
+        # These are the ONLY pressure‑related quantities optimized at
+        # this layer; no time‑varying curves or segments are created.
         P_O_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
         P_F_start_psi = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
-        
-        # Extract segment counts
-        n_segments_lox = int(round(np.clip(x[12], bounds[12][0], bounds[12][1])))
-        n_segments_fuel = int(round(np.clip(x[13], bounds[13][0], bounds[13][1])))
-        
-        # Extract segment parameters for LOX
-        vars_per_segment = 5
-        idx_base_lox = 14  # Updated index after initial pressures and segment counts
-        max_lox_idx = min(idx_base_lox + max_segments_per_tank * vars_per_segment, len(x))
-        x_lox_segments = x[idx_base_lox:max_lox_idx]
-        n_segments_lox = min(n_segments_lox, len(x_lox_segments) // vars_per_segment)
-        if n_segments_lox < 1:
-            n_segments_lox = 1
-        # CRITICAL: For regulation, segments use ratios relative to INITIAL pressure, not max
-        lox_segments = segments_from_optimizer_vars(
-            x_lox_segments, n_segments_lox, P_O_start_psi, target_burn_time, use_initial_as_base=True
-        )
-        
-        # Extract segment parameters for Fuel
-        idx_base_fuel = idx_base_lox + max_segments_per_tank * vars_per_segment
-        max_fuel_idx = min(idx_base_fuel + max_segments_per_tank * vars_per_segment, len(x))
-        x_fuel_segments = x[idx_base_fuel:max_fuel_idx]
-        n_segments_fuel = min(n_segments_fuel, len(x_fuel_segments) // vars_per_segment)
-        if n_segments_fuel < 1:
-            n_segments_fuel = 1
-        # CRITICAL: For regulation, segments use ratios relative to INITIAL pressure, not max
-        fuel_segments = segments_from_optimizer_vars(
-            x_fuel_segments, n_segments_fuel, P_F_start_psi, target_burn_time, use_initial_as_base=True
-        )
-        
-        # Calculate end ratios
-        if lox_segments:
-            lox_start_psi = lox_segments[0]["start_pressure_psi"]
-            lox_end_psi = lox_segments[-1]["end_pressure_psi"]
-            lox_end_ratio = lox_end_psi / max_lox_P_psi if max_lox_P_psi > 0 else 0.7
-            if lox_end_psi > lox_start_psi:
-                lox_end_ratio = lox_start_psi / max_lox_P_psi if max_lox_P_psi > 0 else 0.7
-        else:
-            lox_end_ratio = 0.7
-        
-        if fuel_segments:
-            fuel_start_psi = fuel_segments[0]["start_pressure_psi"]
-            fuel_end_psi = fuel_segments[-1]["end_pressure_psi"]
-            fuel_end_ratio = fuel_end_psi / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.7
-            if fuel_end_psi > fuel_start_psi:
-                fuel_end_ratio = fuel_start_psi / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.7
-        else:
-            fuel_end_ratio = 0.7
-        
-        # Store segments in config for later retrieval
-        if not hasattr(config, '_optimizer_segments'):
-            config._optimizer_segments = {}
-        config._optimizer_segments['lox'] = lox_segments
-        config._optimizer_segments['fuel'] = fuel_segments
         
         # Chamber geometry
         V_chamber = Lstar * A_throat
@@ -196,13 +157,126 @@ def create_layer1_apply_x_to_config(
                 config.injector.geometry.lox.theta_orifice = 90.0
         
         # Thermal protection
-        if hasattr(config, 'ablative_cooling') and config.ablative_cooling and config.ablative_cooling.enabled:
-            config.ablative_cooling.initial_thickness = ablative_thickness
+        #
+        # IMPORTANT: Layer 1 no longer optimizes or modifies ablative/graphite
+        # thickness. Those are handled exclusively in downstream layers
+        # (Layer 2/3). We leave any existing values on `base_config` untouched
+        # so that YAML export can still reflect sensible defaults, but we do
+        # not change them here.
         
-        if hasattr(config, 'graphite_insert') and config.graphite_insert and config.graphite_insert.enabled:
-            config.graphite_insert.initial_thickness = graphite_thickness
-        
-        return config, lox_end_ratio, fuel_end_ratio
+        # Layer 1 returns the static initial tank pressures; any time‑varying
+        # curves are the responsibility of Layer 2.
+        return config, P_O_start_psi, P_F_start_psi
     
     return apply_x_to_config
+
+
+def run_layer1_global_search(
+    objective: Callable[[np.ndarray], float],
+    bounds: list,
+    x0: np.ndarray,
+    max_evals: int = 150,
+    random_seed: int = 42,
+) -> np.ndarray:
+    """
+    Lightweight global search for Layer 1 using random sampling + short DE.
+
+    This is intended to very quickly improve the starting point before the
+    main local optimizer (L-BFGS-B) runs in the orchestrator.
+
+    - Keeps evaluation budget small (max_evals) to avoid long runtimes.
+    - Always respects the provided bounds.
+    - Falls back gracefully if scipy's differential_evolution is unavailable.
+    """
+    try:
+        from scipy.optimize import differential_evolution
+    except Exception:
+        differential_evolution = None
+
+    if max_evals <= 0 or objective is None:
+        return x0
+
+    rng = np.random.default_rng(random_seed)
+
+    bounds_arr = np.asarray(bounds, dtype=float)
+    lower = bounds_arr[:, 0]
+    upper = bounds_arr[:, 1]
+
+    # Ensure starting point is within bounds
+    best_x = np.clip(np.asarray(x0, dtype=float), lower, upper)
+    try:
+        best_f = float(objective(best_x))
+    except Exception:
+        # If evaluation fails, just return the original guess
+        return x0
+
+    evals_used = 1
+    dim = best_x.size
+
+    # ------------------------------------------------------------------
+    # Phase 1: Random sampling within bounds (very small number of points)
+    # ------------------------------------------------------------------
+    n_random = max(5, min(20, max_evals // 3))
+    for _ in range(n_random):
+        if evals_used >= max_evals:
+            break
+        candidate = lower + rng.random(dim) * (upper - lower)
+        try:
+            f_val = float(objective(candidate))
+        except Exception:
+            evals_used += 1
+            continue
+        evals_used += 1
+        if np.isfinite(f_val) and f_val < best_f:
+            best_f = f_val
+            best_x = candidate
+
+    # ------------------------------------------------------------------
+    # Phase 2: Very short Differential Evolution (if available)
+    # ------------------------------------------------------------------
+    if differential_evolution is not None and evals_used < max_evals:
+        # Rough heuristic to keep DE cheap; cap iterations and population.
+        # For typical Layer 1 dimensionality (~20 vars) this keeps runtime modest.
+        remaining_evals = max_evals - evals_used
+        popsize = 8
+        # Each DE iter uses approximately popsize * dim evaluations
+        approx_evals_per_iter = max(1, popsize * dim)
+        maxiter = max(1, min(5, remaining_evals // approx_evals_per_iter))
+
+        if maxiter > 0:
+            # Wrap objective to track best solution without exceeding budget
+            def wrapped_obj(v: np.ndarray) -> float:
+                nonlocal best_x, best_f, evals_used
+                if evals_used >= max_evals:
+                    # Return current best to encourage convergence without new work
+                    return best_f
+                try:
+                    f_val_inner = float(objective(v))
+                except Exception:
+                    evals_used += 1
+                    return 1e9
+                evals_used += 1
+                if np.isfinite(f_val_inner) and f_val_inner < best_f:
+                    best_f = f_val_inner
+                    best_x = np.asarray(v, dtype=float)
+                return f_val_inner
+
+            try:
+                _ = differential_evolution(
+                    wrapped_obj,
+                    bounds=bounds,
+                    maxiter=maxiter,
+                    popsize=popsize,
+                    tol=0.01,
+                    polish=False,
+                    updating="deferred",
+                    mutation=(0.5, 1.0),
+                    recombination=0.7,
+                    seed=random_seed,
+                )
+            except Exception:
+                # If DE fails for any reason, just keep the best point found so far.
+                pass
+
+    return best_x
 

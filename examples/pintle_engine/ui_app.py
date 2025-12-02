@@ -421,7 +421,14 @@ def summarize_results(results: Dict[str, Any]) -> None:
     st.metric("Mixture Ratio (O/F)", f"{MR:.3f}")
     st.metric("c* (actual)", f"{cstar:.1f} m/s")
     st.metric("Exit Velocity", f"{v_exit:.1f} m/s")
+    # Exit pressure and target (if provided by optimizer)
     st.metric("Exit Pressure", format_value(results["P_exit"], "pressure", pressure_unit) + f" {pressure_unit}")
+    target_P_exit = results.get("target_P_exit", None)
+    if target_P_exit is not None:
+        st.metric(
+            "Target Exit Pressure",
+            format_value(target_P_exit, "pressure", pressure_unit) + f" {pressure_unit}",
+        )
     
     # Thrust coefficient
     Cf_actual = results.get("Cf_actual", results.get("Cf", np.nan))

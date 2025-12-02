@@ -13,6 +13,7 @@ import streamlit as st
 import copy
 import sys
 from pathlib import Path
+import plotly.graph_objects as go
 
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_models.runner import PintleEngineRunner
@@ -1555,12 +1556,13 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
     """Layer 1: Static Optimization tab."""
     st.subheader("Layer 1: Static Optimization")
     st.markdown("""
-    **Layer 1** jointly optimizes:
+    **Layer 1** optimizes only **static** quantities:
     - **Engine geometry**: throat area, L*, expansion ratio, pintle parameters
-    - **Pressure curves**: segmented LOX and fuel pressure profiles
-    - **Initial thermal protection guesses**: ablative and graphite thicknesses
-    
-    This layer evaluates at t=0 (static) to find optimal geometry and pressure curve shapes.
+    - **Initial tank pressures**: single starting LOX and fuel tank pressures (no time history)
+
+    This layer evaluates at t=0 (static) to find an engine geometry and initial tank pressures
+    that meet the target thrust/O/F and stability requirements. All time‑varying pressure curves
+    and thermal protection sizing are handled in downstream layers (Layer 2/3).
     """)
     
     if runner is None:
@@ -1703,6 +1705,11 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     st.metric("Chamber Pressure", f"{performance['Pc']/1e6:.2f} MPa")
                 if "P_exit" in performance:
                     st.metric("Exit Pressure", f"{performance['P_exit'] * 1e-6:.2f} MPa")
+                # Show target exit pressure if available from optimizer
+                exit_targeting = optimization_results.get("exit_pressure_targeting", {})
+                target_P_exit = exit_targeting.get("target_P_exit", None)
+                if target_P_exit is not None:
+                    st.metric("Target Exit Pressure", f"{target_P_exit * 1e-6:.2f} MPa")
             with col3:
                 if "mdot_total" in performance:
                     st.metric("Total Mass Flow", f"{performance['mdot_total']:.3f} kg/s")
@@ -1757,6 +1764,38 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 _display_chamber_geometry_plot(config_obj, optimization_results)
             except Exception as e:
                 st.warning(f"Could not render chamber geometry plot: {e}")
+
+        # ------------------------------------------------------------------
+        # Layer 1 export for downstream Layer 2-only runs
+        # ------------------------------------------------------------------
+        st.markdown("#### Export Layer 1 Results for Layer 2")
+        perf = optimization_results.get("performance", {}) if isinstance(optimization_results, dict) else {}
+
+        # Start from the optimized PintleEngineConfig as YAML.
+        config_dict = config_obj.model_dump(exclude_none=False) if hasattr(config_obj, "model_dump") else {}
+
+        # Attach design requirements so Layer 2-only workflows can recover them.
+        config_dict.setdefault("design_requirements", requirements)
+
+        # Optionally attach the initial LOX/fuel tank pressures (psi) used in Layer 1.
+        P_O_start_psi = perf.get("P_O_start_psi")
+        P_F_start_psi = perf.get("P_F_start_psi")
+        if P_O_start_psi is not None:
+            config_dict["initial_lox_tank_pressure_psi"] = float(P_O_start_psi)
+        if P_F_start_psi is not None:
+            config_dict["initial_fuel_tank_pressure_psi"] = float(P_F_start_psi)
+
+        import yaml
+
+        yaml_str = yaml.dump(config_dict, default_flow_style=False)
+
+        st.download_button(
+            label="💾 Download Layer 1 Optimized Config (YAML)",
+            data=yaml_str,
+            file_name="layer1_optimized_config.yaml",
+            mime="text/yaml",
+            help="Download the optimized Layer 1 PintleEngineConfig as YAML, including design requirements and optional initial LOX/fuel tank pressures.",
+        )
     else:
         st.info("💡 Layer 1 has not been run yet. Click 'Run Layer 1 Optimization' above or use the Full Engine Optimizer.")
     
@@ -1764,16 +1803,17 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
 
 
 def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> PintleEngineConfig:
-    """Layer 2: Burn Candidate Optimization tab."""
-    st.subheader("Layer 2: Burn Candidate Optimization")
+    """Layer 2: Pressure Candidate Optimization tab."""
+    st.subheader("Layer 2: Pressure Candidate")
     st.markdown("""
-    **Layer 2** refines initial thermal protection thicknesses based on full-burn time-series analysis.
+    **Layer 2** optimizes the time-varying LOX and fuel tank pressure curves (the **pressure candidate**)
+    using full-burn time-series analysis.
     
     This layer:
-    - Runs time-varying analysis over the full burn duration
-    - Tracks ablative recession (chamber) and graphite recession (throat)
-    - Optimizes initial thermal protection thickness guesses
-    - Validates that the design can survive the burn
+    - Uses the Layer 1 static solution as a starting point
+    - Optimizes segmented tank pressure profiles over the burn
+    - Checks impulse vs. target apogee, tank capacity limits, stability margins, and O/F ratio
+    - Produces a validated pressure candidate for downstream thermal and flight analysis
     """)
     
     if runner is None:
@@ -1785,65 +1825,188 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
         return config_obj
     
-    # Check for Layer 1 results (prerequisite)
+    # Check for Layer 1 results (prerequisite) – now optional if user uploads a Layer 1 file.
     layer1_results = st.session_state.get("layer1_results") or st.session_state.get("optimization_results")
     layer1_config = st.session_state.get("optimized_config", config_obj)
-    
-    if not layer1_results:
-        st.warning("⚠️ Layer 1 must be run first. Please run Layer 1 optimization before running Layer 2.")
-        return config_obj
-    
+
     st.markdown("---")
     st.markdown("### Run Layer 2 Individually")
+
+    # Optional: allow user to upload a Layer 1 optimized config YAML produced by the Layer 1 tab.
+    st.markdown("#### Optional: Load Layer 1 Optimized Config (YAML)")
+    uploaded_layer1_file = st.file_uploader(
+        "Upload `layer1_optimized_config.yaml`",
+        type=["yaml", "yml"],
+        key="layer2_layer1_upload",
+        help="If provided, Layer 2 will use the optimized PintleEngineConfig (and optional initial LOX/Fuel tank pressures) from this file.",
+    )
+
+    uploaded_layer1_dict = None
+    uploaded_layer1_config: Optional[PintleEngineConfig] = None
+    if uploaded_layer1_file is not None:
+        import yaml
+        try:
+            uploaded_layer1_dict = yaml.safe_load(uploaded_layer1_file.read())
+            if isinstance(uploaded_layer1_dict, dict):
+                uploaded_layer1_config = PintleEngineConfig(**uploaded_layer1_dict)
+            else:
+                st.error("Uploaded Layer 1 file did not contain a valid mapping/object.")
+                uploaded_layer1_dict = None
+        except Exception as e:
+            st.error(f"Could not parse uploaded Layer 1 YAML: {e}")
+            uploaded_layer1_dict = None
+            uploaded_layer1_config = None
+
+    # Live objective convergence plot container (persists while optimization runs)
+    st.markdown("#### Layer 2 Objective Convergence")
+    objective_plot_container = st.empty()
     
     if st.button("🚀 Run Layer 2 Optimization", type="primary", key="run_layer2"):
         try:
+            # Basic design/flight requirements
             target_burn_time = requirements.get("target_burn_time", 10.0)
-            target_thrust = requirements.get("target_thrust", 7000.0)
-            thrust_tol = requirements.get("thrust_tolerance", 0.10)
+            peak_thrust = requirements.get("target_thrust", 7000.0)
+            target_apogee_m = requirements.get("target_apogee", 3048.0)  # default ~10k ft
+            optimal_of_ratio = requirements.get("optimal_of_ratio", None)
+            min_stability_margin = requirements.get("min_stability_margin", None)
             
-            # Get pressure curves from Layer 1
-            lox_segments = layer1_results.get("optimized_pressure_curves", {}).get("lox_segments", [])
-            fuel_segments = layer1_results.get("optimized_pressure_curves", {}).get("fuel_segments", [])
+            # Tank capacities (from design requirements tab)
+            max_lox_tank_capacity_kg = requirements.get("lox_tank_capacity_kg", 10.0)
+            max_fuel_tank_capacity_kg = requirements.get("fuel_tank_capacity_kg", 10.0)
             
-            if not lox_segments or not fuel_segments:
-                st.error("❌ Layer 1 results missing pressure curve segments. Please re-run Layer 1.")
-                return config_obj
+            # Rocket dry mass (stored by design requirements tab)
+            rocket_dry_mass_kg = st.session_state.get("rocket_dry_mass", None)
+            if rocket_dry_mass_kg is None:
+                # Fallback: approximate from stored design config if available
+                design_cfg = st.session_state.get("design_config", {})
+                rocket_cfg = design_cfg.get("rocket", {}) if isinstance(design_cfg, dict) else {}
+                airframe_mass = float(rocket_cfg.get("airframe_mass") or 0.0)
+                propulsion_dry_mass = float(rocket_cfg.get("propulsion_dry_mass") or 0.0)
+                rocket_dry_mass_kg = airframe_mass + propulsion_dry_mass
             
-            # Generate 200-point pressure curves
-            n_time_points = 200
+            # Resolve base config for Layer 2 and initial tank pressures.
             psi_to_Pa = 6894.76
-            time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
-            _, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
-            P_tank_O_array = lox_pressure_psi * psi_to_Pa
-            P_tank_F_array = fuel_pressure_psi * psi_to_Pa
+
+            # Prefer the uploaded optimized config if present; otherwise fall back to the in-memory Layer 1 optimized config.
+            base_layer2_config = uploaded_layer1_config or layer1_config
+
+            P_O_start_psi = None
+            P_F_start_psi = None
+
+            # 1) Try to read explicit initial tank pressures from the uploaded YAML.
+            if uploaded_layer1_dict and isinstance(uploaded_layer1_dict, dict):
+                P_O_start_psi = uploaded_layer1_dict.get("initial_lox_tank_pressure_psi", None)
+                P_F_start_psi = uploaded_layer1_dict.get("initial_fuel_tank_pressure_psi", None)
+
+            # 2) Fall back to in‑memory Layer 1 performance metrics, if available.
+            if (P_O_start_psi is None or P_F_start_psi is None) and layer1_results:
+                performance = layer1_results.get("performance", {}) if isinstance(layer1_results, dict) else {}
+                if P_O_start_psi is None:
+                    P_O_start_psi = performance.get("P_O_start_psi", None)
+                if P_F_start_psi is None:
+                    P_F_start_psi = performance.get("P_F_start_psi", None)
+
+            if P_O_start_psi is None or P_F_start_psi is None:
+                st.error(
+                    "❌ Initial LOX/Fuel tank pressures are missing. "
+                    "Either upload a Layer 1 optimized config that includes "
+                    "`initial_lox_tank_pressure_psi` and `initial_fuel_tank_pressure_psi`, "
+                    "or run Layer 1 in this session first."
+                )
+                return config_obj
+
+            initial_lox_pressure_pa = float(P_O_start_psi) * psi_to_Pa
+            initial_fuel_pressure_pa = float(P_F_start_psi) * psi_to_Pa
             
-            progress_bar = st.progress(0, text="Running Layer 2 optimization...")
+            # Optimization resolution and minimum pressure clamp
+            n_time_points = 200
+            min_pressure_pa = 1e6  # ~150 psi legacy floor
+
+            # Reset any previous objective history
+            st.session_state["layer2_objective_history"] = []
+            
+            progress_bar = st.progress(0, text="Running Layer 2 pressure optimization...")
             status_text = st.empty()
             
             def update_progress(stage: str, progress: float, message: str):
-                progress_bar.progress(progress, text=f"{stage}\n{message}")
+                # Show iteration information directly on the progress bar text
+                progress_bar.progress(progress, text=f"{stage} | {message}")
                 status_text.text(f"{stage} | {message}")
             
             def log_status(stage: str, message: str):
-                pass  # Can add logging if needed
+                # Logging is handled inside layer2_pressure; this hook can be used to surface messages in UI if desired.
+                # For now, surface key messages in the status text area to give some feedback during long runs.
+                status_text.text(f"{stage} | {message}")
+
+            def objective_callback(eval_index: int, objective: float, best_objective: float):
+                """Stream Layer 2 objective history into a live-updating convergence plot."""
+                try:
+                    history = st.session_state.get("layer2_objective_history", [])
+                    history.append(
+                        {
+                            "evaluation": int(eval_index),
+                            "objective": float(objective),
+                            "best_objective": float(best_objective),
+                        }
+                    )
+                    st.session_state["layer2_objective_history"] = history
+
+                    if not history:
+                        return
+
+                    df = pd.DataFrame(history)
+                    fig = go.Figure()
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["evaluation"],
+                            y=df["objective"],
+                            mode="lines+markers",
+                            name="Objective",
+                            line=dict(color="#1f77b4"),
+                        )
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["evaluation"],
+                            y=df["best_objective"],
+                            mode="lines",
+                            name="Best Objective",
+                            line=dict(color="#ff7f0e", dash="dash"),
+                        )
+                    )
+                    fig.update_layout(
+                        xaxis_title="Evaluation",
+                        yaxis_title="Objective Value",
+                        height=300,
+                        margin=dict(l=40, r=20, t=30, b=40),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    objective_plot_container.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    # Never let plotting errors break the optimization loop
+                    pass
             
-            # Run Layer 2
-            max_lox_pressure_pa = requirements.get("max_P_tank_O", 9e6)
-            max_fuel_pressure_pa = requirements.get("max_P_tank_F", 7e6)
-            optimized_config, P_tank_O_optimized, P_tank_F_optimized, summary, success = run_layer2_pressure(
-                layer1_config,
-                time_array,
-                target_thrust,
-                thrust_tol,
-                n_time_points,
-                update_progress,
-                log_status,
-                max_lox_pressure_pa,
-                max_fuel_pressure_pa,
+            # Run Layer 2 pressure-curve optimization (uses new API in layer2_pressure.py)
+            optimized_config, time_array, P_tank_O_optimized, P_tank_F_optimized, summary, success = run_layer2_pressure(
+                optimized_config=base_layer2_config,
+                initial_lox_pressure_pa=initial_lox_pressure_pa,
+                initial_fuel_pressure_pa=initial_fuel_pressure_pa,
+                peak_thrust=peak_thrust,
+                target_apogee_m=target_apogee_m,
+                rocket_dry_mass_kg=rocket_dry_mass_kg,
+                max_lox_tank_capacity_kg=max_lox_tank_capacity_kg,
+                max_fuel_tank_capacity_kg=max_fuel_tank_capacity_kg,
+                target_burn_time=target_burn_time,
+                n_time_points=n_time_points,
+                update_progress=update_progress,
+                log_status=log_status,
+                min_pressure_pa=min_pressure_pa,
+                optimal_of_ratio=optimal_of_ratio,
+                min_stability_margin=min_stability_margin,
+                save_evaluation_plots=True,  # Enable PNG plot updates while optimization runs
+                objective_callback=objective_callback,
             )
             
-            # Convert results to match expected format
             # Run time series with optimized pressure curves to get full results
             optimized_runner = PintleEngineRunner(optimized_config)
             try:
@@ -1869,9 +2032,9 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     min_stability_score_time = float(np.min(stability_scores))
                 
                 time_varying_summary = {
-                    "avg_thrust": float(np.mean(full_time_results.get("F", [target_thrust]))),
-                    "min_thrust": float(np.min(full_time_results.get("F", [target_thrust]))),
-                    "max_thrust": float(np.max(full_time_results.get("F", [target_thrust]))),
+                    "avg_thrust": float(np.mean(full_time_results.get("F", [peak_thrust]))),
+                    "min_thrust": float(np.min(full_time_results.get("F", [peak_thrust]))),
+                    "max_thrust": float(np.max(full_time_results.get("F", [peak_thrust]))),
                     "thrust_std": float(np.std(full_time_results.get("F", [0]))),
                     "avg_isp": float(np.mean(full_time_results.get("Isp", [250]))),
                     "min_stability_margin": min_time_stability_margin,
@@ -1894,6 +2057,11 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 "full_time_results": full_time_results,
                 "time_varying_summary": time_varying_summary,
                 "burn_candidate_valid": burn_candidate_valid,
+                # Also store converged tank pressure curves, time base, and summary
+                "summary": summary,
+                "time_array": time_array,
+                "P_tank_O_optimized": P_tank_O_optimized,
+                "P_tank_F_optimized": P_tank_F_optimized,
             }
             
             # Update config_dict
@@ -1920,7 +2088,79 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
     layer_status = optimization_results.get("layer_status", {}) if optimization_results else {}
     layer2_valid = layer_status.get("layer_2_burn_candidate", None)
     layer2_results = st.session_state.get("layer2_results", None)
-    
+
+    # ----------------------------------------------------------------------
+    # Optional: allow user to upload a Layer 2 results YAML produced by the
+    # "Download Layer 2 Results (YAML)" button. This enables resuming a
+    # Layer 2‑only workflow without re‑running the optimizer.
+    # ----------------------------------------------------------------------
+    st.markdown("#### Optional: Load Layer 2 Results (YAML)")
+    uploaded_layer2_file = st.file_uploader(
+        "Upload `layer2_results.yaml`",
+        type=["yaml", "yml"],
+        key="layer2_results_upload",
+        help=(
+            "Load a Layer 2 results YAML previously exported from this app. "
+            "This will populate the converged pressure curves and time‑varying results "
+            "so you can inspect them without re‑running the optimization."
+        ),
+    )
+
+    if uploaded_layer2_file is not None:
+        import yaml
+
+        try:
+            uploaded_layer2_dict = yaml.safe_load(uploaded_layer2_file.read())
+        except Exception as e:
+            st.error(f"Could not parse uploaded Layer 2 YAML: {e}")
+            uploaded_layer2_dict = None
+
+        if isinstance(uploaded_layer2_dict, dict):
+            # Try to rebuild the optimized PintleEngineConfig from the full mapping.
+            try:
+                uploaded_layer2_config = PintleEngineConfig(**uploaded_layer2_dict)
+                st.session_state["optimized_config"] = uploaded_layer2_config
+                st.session_state["config_obj"] = uploaded_layer2_config
+                st.session_state["config_dict"] = uploaded_layer2_config.model_dump(exclude_none=False)
+                config_obj = uploaded_layer2_config
+            except Exception:
+                # If config reconstruction fails, continue using the current config_obj.
+                uploaded_layer2_config = None
+
+            # If the YAML contains design requirements, update them so metrics match.
+            dr = uploaded_layer2_dict.get("design_requirements")
+            if isinstance(dr, dict):
+                requirements = dr
+                st.session_state["design_requirements"] = dr
+
+            # Normalize the embedded Layer 2 payload into the structure expected
+            # by the rest of this tab (same keys as when run in‑session).
+            layer2_block = uploaded_layer2_dict.get("layer2", {})
+            if isinstance(layer2_block, dict):
+                # Convert arrays/lists back to NumPy for internal use.
+                time_array_s = np.asarray(layer2_block.get("time_array_s", []), dtype=float)
+                P_tank_O_pa = np.asarray(layer2_block.get("P_tank_O_pa", []), dtype=float)
+                P_tank_F_pa = np.asarray(layer2_block.get("P_tank_F_pa", []), dtype=float)
+
+                # Build a layer2_results dict that downstream UI understands.
+                layer2_results_from_yaml = {
+                    "summary": layer2_block.get("summary", {}),
+                    "time_array": time_array_s,
+                    "P_tank_O_optimized": P_tank_O_pa,
+                    "P_tank_F_optimized": P_tank_F_pa,
+                    "time_varying_summary": layer2_block.get("time_varying_summary", {}),
+                    "full_time_results": layer2_block.get("full_time_results", {}),
+                    # Assume a successful burn candidate when loading from an exported file.
+                    "burn_candidate_valid": True,
+                }
+
+                st.session_state["layer2_results"] = layer2_results_from_yaml
+                layer2_results = layer2_results_from_yaml
+            else:
+                st.error("Uploaded Layer 2 YAML is missing the required `layer2` section.")
+        else:
+            st.error("Uploaded Layer 2 file did not contain a valid YAML mapping/object.")
+
     if (optimization_results and layer2_valid is not None) or layer2_results:
         # Check validity from either source
         is_valid = layer2_valid if layer2_valid is not None else (layer2_results.get("burn_candidate_valid", False) if layer2_results else False)
@@ -1967,6 +2207,268 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     if graphite_cfg and graphite_cfg.enabled:
                         st.metric("Graphite Thickness", f"{graphite_cfg.initial_thickness * 1000:.2f} mm")
                         st.caption("Initial guess (will be refined in Layer 3)")
+            
+            # ------------------------------------------------------------------
+            # Layer 2 export: download YAML with all Layer 2 outputs
+            # ------------------------------------------------------------------
+            layer2_results_safe = layer2_results if isinstance(layer2_results, dict) else {}
+            layer2_summary = layer2_results_safe.get("summary", {})
+            time_array_s = layer2_results_safe.get("time_array")
+            P_tank_O_opt = layer2_results_safe.get("P_tank_O_optimized")
+            P_tank_F_opt = layer2_results_safe.get("P_tank_F_optimized")
+
+            if layer2_summary and time_array_s is not None and P_tank_O_opt is not None and P_tank_F_opt is not None:
+                st.markdown("#### Download Layer 2 Results (YAML)")
+
+                # Start from the optimized PintleEngineConfig as YAML.
+                layer2_cfg = st.session_state.get("optimized_config", config_obj)
+                if hasattr(layer2_cfg, "model_dump"):
+                    layer2_config_dict = layer2_cfg.model_dump(exclude_none=False)
+                else:
+                    layer2_config_dict = {}
+
+                # Attach design requirements and all Layer 2 outputs.
+                layer2_config_dict.setdefault("design_requirements", requirements)
+                layer2_config_dict.setdefault("layer2", {})
+                layer2_config_dict["layer2"].update(
+                    {
+                        "summary": layer2_summary,
+                        "time_array_s": list(map(float, np.asarray(time_array_s, dtype=float).tolist())),
+                        "P_tank_O_pa": list(map(float, np.asarray(P_tank_O_opt, dtype=float).tolist())),
+                        "P_tank_F_pa": list(map(float, np.asarray(P_tank_F_opt, dtype=float).tolist())),
+                        "time_varying_summary": time_varying,
+                    }
+                )
+
+                # Optionally attach full time-series results if present (can be large).
+                full_results = layer2_results_safe.get("full_time_results")
+                if isinstance(full_results, dict):
+                    # Convert NumPy arrays to lists so YAML can serialize them.
+                    sanitized_full_results = {}
+                    for k, v in full_results.items():
+                        try:
+                            if hasattr(v, "tolist"):
+                                sanitized_full_results[k] = v.tolist()
+                            else:
+                                sanitized_full_results[k] = v
+                        except Exception:
+                            # Fallback: keep raw value if tolist() fails
+                            sanitized_full_results[k] = v
+                    layer2_config_dict["layer2"]["full_time_results"] = sanitized_full_results
+
+                import yaml
+
+                layer2_yaml_str = yaml.dump(layer2_config_dict, default_flow_style=False)
+
+                st.download_button(
+                    label="💾 Download Layer 2 Results (YAML)",
+                    data=layer2_yaml_str,
+                    file_name="layer2_results.yaml",
+                    mime="text/yaml",
+                    help="Download the optimized Layer 2 PintleEngineConfig plus all Layer 2 outputs (summary, pressure curves, and time-varying results).",
+                )
+            
+            # ------------------------------------------------------------------
+            # Detailed time-series plots (converged pressure, thrust, O/F, objective)
+            # ------------------------------------------------------------------
+            st.markdown("#### Converged Time-Series Plots")
+
+            layer2_results = st.session_state.get("layer2_results", {})
+            full_results = layer2_results.get("full_time_results", {})
+            time_array = layer2_results.get("time_array", None)
+            P_tank_O_opt = layer2_results.get("P_tank_O_optimized", None)
+            P_tank_F_opt = layer2_results.get("P_tank_F_optimized", None)
+
+            if (
+                isinstance(full_results, dict)
+                and time_array is not None
+                and P_tank_O_opt is not None
+                and P_tank_F_opt is not None
+            ):
+                try:
+                    PA_TO_PSI = 1.0 / 6894.76
+                    times = np.asarray(time_array, dtype=float)
+                    n = len(times)
+
+                    # Build DataFrame similar to ui_app.py time-series analysis
+                    df_ts = pd.DataFrame(
+                        {
+                            "time": times,
+                            "Thrust (kN)": np.asarray(
+                                full_results.get("F", np.full(n, np.nan)), dtype=float
+                            )
+                            / 1000.0,
+                            "Pc (psi)": np.asarray(
+                                full_results.get("Pc", np.full(n, np.nan)), dtype=float
+                            )
+                            * PA_TO_PSI,
+                            "mdot_O (kg/s)": np.asarray(
+                                full_results.get("mdot_O", np.full(n, np.nan)), dtype=float
+                            ),
+                            "mdot_F (kg/s)": np.asarray(
+                                full_results.get("mdot_F", np.full(n, np.nan)), dtype=float
+                            ),
+                            "mdot_total (kg/s)": np.asarray(
+                                full_results.get("mdot_total", np.full(n, np.nan)), dtype=float
+                            ),
+                            "MR": np.asarray(full_results.get("MR", np.full(n, np.nan)), dtype=float),
+                            "P_tank_O (psi)": np.asarray(P_tank_O_opt, dtype=float) * PA_TO_PSI,
+                            "P_tank_F (psi)": np.asarray(P_tank_F_opt, dtype=float) * PA_TO_PSI,
+                        }
+                    )
+
+                    # Burn summary – use Layer 2 summary (from final pressure curves)
+                    layer2_summary = (
+                        layer2_results.get("summary", {})
+                        if isinstance(layer2_results, dict)
+                        else {}
+                    )
+
+                    # Burn duration from time base (guard against NaNs)
+                    if n > 1 and np.isfinite(times[0]) and np.isfinite(times[-1]):
+                        burn_duration = float(times[-1] - times[0])
+                    else:
+                        burn_duration = 0.0
+
+                    avg_thrust_kN = float(np.nanmean(df_ts["Thrust (kN)"].to_numpy()))
+                    max_thrust_kN = float(np.nanmax(df_ts["Thrust (kN)"].to_numpy()))
+
+                    # Total impulse and goal from summary (already N·s)
+                    total_impulse_kNs = np.nan
+                    required_impulse_kNs = np.nan
+                    if isinstance(layer2_summary, dict):
+                        try:
+                            ti_actual = float(
+                                layer2_summary.get("total_impulse_actual", np.nan)
+                            )
+                        except (TypeError, ValueError):
+                            ti_actual = np.nan
+                        try:
+                            ri_req = float(layer2_summary.get("required_impulse", np.nan))
+                        except (TypeError, ValueError):
+                            ri_req = np.nan
+
+                        if np.isfinite(ti_actual):
+                            total_impulse_kNs = ti_actual / 1000.0
+                        if np.isfinite(ri_req):
+                            required_impulse_kNs = ri_req / 1000.0
+
+                    # Display metrics – do not recompute impulse in the UI
+                    col_ts1, col_ts2, col_ts3 = st.columns(3)
+                    col_ts1.metric("Burn duration", f"{burn_duration:.2f} s")
+                    col_ts2.metric("Average thrust", f"{avg_thrust_kN:.2f} kN")
+
+                    if np.isfinite(total_impulse_kNs) and np.isfinite(required_impulse_kNs):
+                        col_ts3.metric(
+                            "Total impulse",
+                            f"{total_impulse_kNs:.2f} kN·s",
+                            delta=f"Goal: {required_impulse_kNs:.2f} kN·s",
+                        )
+                    elif np.isfinite(total_impulse_kNs):
+                        col_ts3.metric("Total impulse", f"{total_impulse_kNs:.2f} kN·s")
+                    else:
+                        col_ts3.metric("Total impulse", "N/A")
+
+                    # Tank pressure curves (converged pressure candidate)
+                    pressure_fig = go.Figure()
+                    pressure_fig.add_trace(
+                        go.Scatter(
+                            x=df_ts["time"],
+                            y=df_ts["P_tank_O (psi)"],
+                            mode="lines+markers",
+                            name="LOX Tank",
+                            line=dict(color="blue"),
+                        )
+                    )
+                    pressure_fig.add_trace(
+                        go.Scatter(
+                            x=df_ts["time"],
+                            y=df_ts["P_tank_F (psi)"],
+                            mode="lines+markers",
+                            name="Fuel Tank",
+                            line=dict(color="orange"),
+                        )
+                    )
+                    pressure_fig.update_layout(
+                        title="Converged Tank Pressure Curves",
+                        xaxis_title="Time [s]",
+                        yaxis_title="Tank Pressure [psi]",
+                        height=350,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    st.plotly_chart(pressure_fig, use_container_width=True, key="layer2_pressure_curves")
+
+                    # Thrust vs time
+                    thrust_fig = go.Figure()
+                    thrust_fig.add_trace(
+                        go.Scatter(
+                            x=df_ts["time"],
+                            y=df_ts["Thrust (kN)"],
+                            mode="lines+markers",
+                            name="Thrust",
+                            line=dict(color="#1f77b4"),
+                        )
+                    )
+                    thrust_fig.update_layout(
+                        title="Thrust vs Time",
+                        xaxis_title="Time [s]",
+                        yaxis_title="Thrust [kN]",
+                        height=300,
+                    )
+                    st.plotly_chart(thrust_fig, use_container_width=True, key="layer2_thrust_vs_time")
+
+                    # Mixture ratio vs time
+                    of_fig = go.Figure()
+                    of_fig.add_trace(
+                        go.Scatter(
+                            x=df_ts["time"],
+                            y=df_ts["MR"],
+                            mode="lines",
+                            name="O/F",
+                            line=dict(color="#2ca02c"),
+                        )
+                    )
+                    of_fig.update_layout(
+                        title="Mixture Ratio (O/F) vs Time",
+                        xaxis_title="Time [s]",
+                        yaxis_title="O/F",
+                        height=300,
+                    )
+                    st.plotly_chart(of_fig, use_container_width=True, key="layer2_of_vs_time")
+
+                    # Objective history (from optimization loop), if available
+                    history = st.session_state.get("layer2_objective_history", [])
+                    if history:
+                        df_hist = pd.DataFrame(history)
+                        obj_fig = go.Figure()
+                        obj_fig.add_trace(
+                            go.Scatter(
+                                x=df_hist["evaluation"],
+                                y=df_hist["objective"],
+                                mode="lines+markers",
+                                name="Objective",
+                                line=dict(color="#1f77b4"),
+                            )
+                        )
+                        obj_fig.add_trace(
+                            go.Scatter(
+                                x=df_hist["evaluation"],
+                                y=df_hist["best_objective"],
+                                mode="lines",
+                                name="Best Objective",
+                                line=dict(color="#ff7f0e", dash="dash"),
+                            )
+                        )
+                        obj_fig.update_layout(
+                            title="Layer 2 Objective Function History",
+                            xaxis_title="Evaluation",
+                            yaxis_title="Objective Value",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                        )
+                        st.plotly_chart(obj_fig, use_container_width=True, key="layer2_objective_history_plot")
+                except Exception as plot_exc:
+                    st.warning(f"Could not render Layer 2 time-series plots: {plot_exc}")
     elif layer2_valid is None:
         st.info("💡 Layer 2 was skipped (time-varying analysis disabled or Layer 1 invalid).")
     else:
@@ -2012,30 +2514,32 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
     
     if st.button("🚀 Run Layer 3 Optimization", type="primary", key="run_layer3"):
         try:
-            target_burn_time = requirements.get("target_burn_time", 10.0)
-            
-            # Get pressure curves and time arrays from Layer 1
-            layer1_results = st.session_state.get("layer1_results") or st.session_state.get("optimization_results")
-            lox_segments = layer1_results.get("optimized_pressure_curves", {}).get("lox_segments", [])
-            fuel_segments = layer1_results.get("optimized_pressure_curves", {}).get("fuel_segments", [])
-            
-            if not lox_segments or not fuel_segments:
-                st.error("❌ Layer 1 results missing. Please re-run Layer 1.")
+            # ------------------------------------------------------------------
+            # Pull converged pressure curves and time base directly from Layer 2
+            # (Layer 1 no longer owns segmented pressure definitions).
+            # ------------------------------------------------------------------
+            if not isinstance(layer2_results, dict):
+                st.error("❌ Layer 2 results are not available in the expected format. Please re-run Layer 2.")
                 return config_obj
-            
-            # Generate 200-point pressure curves
-            n_time_points = 200
-            psi_to_Pa = 6894.76
-            time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
-            _, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
-            P_tank_O_array = lox_pressure_psi * psi_to_Pa
-            P_tank_F_array = fuel_pressure_psi * psi_to_Pa
-            
-            # Get full time results from Layer 2
-            if isinstance(layer2_results, dict) and "full_time_results" in layer2_results:
+
+            time_array = np.asarray(layer2_results.get("time_array"), dtype=float)
+            P_tank_O_array = np.asarray(layer2_results.get("P_tank_O_optimized"), dtype=float)
+            P_tank_F_array = np.asarray(layer2_results.get("P_tank_F_optimized"), dtype=float)
+
+            if time_array.size == 0 or P_tank_O_array.size == 0 or P_tank_F_array.size == 0:
+                st.error("❌ Layer 2 pressure curves are missing. Please run Layer 2 optimization before Layer 3.")
+                return config_obj
+
+            if not (time_array.size == P_tank_O_array.size == P_tank_F_array.size):
+                st.error("❌ Layer 2 pressure curve arrays have inconsistent lengths. Please re-run Layer 2.")
+                return config_obj
+
+            n_time_points = int(time_array.size)
+
+            # Get full time results from Layer 2 if present; otherwise recompute
+            if "full_time_results" in layer2_results and isinstance(layer2_results["full_time_results"], dict):
                 full_time_results = layer2_results["full_time_results"]
             else:
-                # Re-run time series if not available
                 runner_temp = PintleEngineRunner(layer2_config)
                 full_time_results = runner_temp.evaluate_arrays_with_time(
                     time_array,

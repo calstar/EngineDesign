@@ -55,16 +55,34 @@ def generate_pressure_curve_from_segments(
         # Default constant pressure
         return np.full(n_points, 5e6)  # 5 MPa default
     
-    pressure_array = np.zeros(n_points)
+    pressure_array = np.zeros(n_points, dtype=float)
     
     # Calculate cumulative point indices for each segment
     point_idx = 0
     for i, seg in enumerate(segments):
-        length_ratio = float(np.clip(seg.get("length_ratio", 1.0 / len(segments)), 0.01, 1.0))
+        # Robustly interpret the segment parameters. If any are non-finite, fall
+        # back to safe defaults so that a bad segment description cannot crash
+        # the optimizer; upstream logic should already treat such cases as low
+        # quality via the objective.
+        raw_lr = seg.get("length_ratio", 1.0 / max(len(segments), 1))
+        try:
+            length_ratio = float(raw_lr)
+        except (TypeError, ValueError):
+            length_ratio = 1.0 / max(len(segments), 1)
+        # Clamp and repair non-finite values.
+        if not np.isfinite(length_ratio):
+            length_ratio = 1.0 / max(len(segments), 1)
+        length_ratio = float(np.clip(length_ratio, 0.01, 1.0))
         seg_type = seg.get("type", "linear")
         P_start = float(seg["start_pressure"])
         P_end = float(seg["end_pressure"])
         k = float(seg.get("k", 0.3))  # Blowdown parameter
+        # Guard against any non-finite pressures or k slipping through.
+        if not np.isfinite(P_start) or not np.isfinite(P_end):
+            # If either endpoint is invalid, skip this segment entirely.
+            continue
+        if not np.isfinite(k):
+            k = 0.3
         
         # Ensure end <= start (decreasing pressure)
         if P_end > P_start:
@@ -75,7 +93,14 @@ def generate_pressure_curve_from_segments(
             # Last segment takes remaining points
             n_seg_points = n_points - point_idx
         else:
-            n_seg_points = int(round(length_ratio * n_points))
+            # Ensure the product is finite before casting to int.
+            n_seg_float = length_ratio * float(n_points)
+            if not np.isfinite(n_seg_float):
+                # If this ever happens, just give the segment a single point so
+                # that the optimizer receives a very "flat" and low-quality
+                # pressure curve instead of crashing.
+                n_seg_float = 1.0
+            n_seg_points = int(round(n_seg_float))
             n_seg_points = max(1, min(n_seg_points, n_points - point_idx))
         
         if n_seg_points <= 0:
@@ -520,6 +545,7 @@ def run_layer2_pressure(
     save_evaluation_plots: bool = False,  # Save PNG plots of each evaluation's pressure curves
     min_lox_pressure_floor_pa: Optional[float] = None,
     min_fuel_pressure_floor_pa: Optional[float] = None,
+    objective_callback: Optional[Callable[[int, float, float], None]] = None,  # Optional hook for streaming objective history
 ) -> Tuple[PintleEngineConfig, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], bool]:
     """
     Run Layer 2: Pressure Curve Optimization.
@@ -766,13 +792,20 @@ def run_layer2_pressure(
             base = i * VARS_PER_SEGMENT
             if base >= len(x_layer2):
                 break
-            lr = float(np.clip(x_layer2[base], 0.01, 1.0))
+            lr_raw = float(x_layer2[base])
+            if not np.isfinite(lr_raw):
+                # Non-finite length variables are treated as a neutral default.
+                # This keeps the decode step numerically robust; the associated
+                # candidate will still be scored poorly in the objective.
+                lr_raw = 1.0
+            lr = float(np.clip(lr_raw, 0.01, 1.0))
             raw_lengths.append(lr)
         
-        total_lr = sum(raw_lengths) if raw_lengths else 1.0
-        if total_lr <= 0:
+        total_lr = float(sum(raw_lengths)) if raw_lengths else 1.0
+        # Guard against numerical edge cases (e.g., all zeros or non-finite sum).
+        if not np.isfinite(total_lr) or total_lr <= 0:
             total_lr = 1.0
-        length_ratios = [lr / total_lr for lr in raw_lengths]
+        length_ratios = [lr / total_lr for lr in raw_lengths] if raw_lengths else [1.0]
         
         # Build LOX and fuel segments
         prev_lox_end = initial_lox_p
@@ -844,6 +877,20 @@ def run_layer2_pressure(
         eval_start_time = time.time()
         layer2_state["eval_count"] += 1
         eval_num = layer2_state["eval_count"]
+
+        # Ensure the optimization vector is finite. If any component is NaN or
+        # Inf, treat this candidate as invalid and return a large penalty so
+        # the optimizer moves away from this region instead of propagating
+        # non-finite values into the segment decode / pressure generation.
+        x_layer2 = np.asarray(x_layer2, dtype=float)
+        if not np.all(np.isfinite(x_layer2)):
+            layer2_logger.warning(
+                f"  → Evaluation #{eval_num} [{phase}] received non-finite x_layer2; "
+                "returning large penalty objective."
+            )
+            for handler in layer2_logger.handlers:
+                handler.flush()
+            return 1e6
         
         # Select resolution for this objective call
         if n_points is None:
@@ -1030,13 +1077,26 @@ def run_layer2_pressure(
                     of_penalty = (MR_error - 0.20) * 20.0
             
             # Objective: minimize penalties (no initial thrust penalty - it's fixed from Layer 1)
-            obj = (
-                impulse_penalty
-                + burn_time_penalty
-                + capacity_penalty
-                + stability_penalty
-                + of_penalty
-            )
+            components = [
+                impulse_penalty,
+                burn_time_penalty,
+                capacity_penalty,
+                stability_penalty,
+                of_penalty,
+            ]
+            if not all(np.isfinite(c) for c in components):
+                # If any penalty component is non-finite, treat this evaluation
+                # as invalid and return a large penalty. This prevents NaNs from
+                # leaking back into the optimizer and corrupting x_layer2.
+                layer2_logger.warning(
+                    f"    Non-finite penalty components in eval #{eval_num}; "
+                    "returning large penalty objective."
+                )
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+                return 1e6
+
+            obj = sum(components)
             
             eval_time = time.time() - eval_start_time
             
@@ -1070,6 +1130,18 @@ def run_layer2_pressure(
                 )
             
             layer2_state["last_obj"] = obj
+
+            # Stream objective history to external callback (e.g., UI plot) if provided
+            if objective_callback is not None:
+                try:
+                    objective_callback(
+                        int(layer2_state.get("eval_count", eval_num)),
+                        float(obj),
+                        float(layer2_state.get("best_obj", obj)),
+                    )
+                except Exception:
+                    # Never let UI/consumer callback break the optimizer loop
+                    pass
             
             # Flush log
             for handler in layer2_logger.handlers:
