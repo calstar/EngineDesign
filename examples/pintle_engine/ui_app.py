@@ -5233,7 +5233,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 burn_time = st.number_input("Burn time [s]", min_value=0.5, value=default_burn, step=0.5, key="flight_burn_time",
                     help="Total burn duration. Simulation may truncate earlier if propellant runs out.")
             with col4:
-                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
+                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 18.0
                 m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox",
                     help="Initial liquid oxidizer mass. This is PROPELLANT only (not tank structure). Depletes during burn.")
             with col5:
@@ -5268,7 +5268,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             burn_time = None
             colpf1, colpf2 = st.columns(2)
             with colpf1:
-                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 20.0
+                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 18.0
                 m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox_ds",
                     help="Initial liquid oxidizer mass. Burn truncates when LOX runs out.")
             with colpf2:
@@ -5532,6 +5532,21 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             prop_cm = 0.0
         
         st.caption(f"**Calculated propulsion CM:** {prop_cm:.3f} m above nozzle")
+
+        # Airframe center of mass without motor/propulsion (for RocketPy)
+        # Default: use existing value if present; otherwise fall back to heuristic used in flight_sim.py
+        _cm_wo_motor = rocket.get("cm_wo_motor")
+        if _cm_wo_motor is None:
+            _cm_wo_motor = motor_pos + 1.5
+        cm_wo_motor = st.number_input(
+            "Airframe CM without motor [m]",
+            value=float(_cm_wo_motor),
+            key="flight_cm_wo_motor",
+            help=(
+                "Center of mass of the airframe ONLY (no engine, tanks, or propellant), "
+                "measured from rocket tail (z=0). Used by RocketPy as center_of_mass_without_motor."
+            ),
+        )
         
         # Store new model values
         rocket["airframe_mass"] = float(airframe)
@@ -5544,6 +5559,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         rocket["propulsion_dry_mass"] = float(propulsion)  # Computed total
         rocket["propulsion_cm_offset"] = float(prop_cm)    # Computed CM
         rocket["motor_position"] = float(motor_pos)
+        rocket["cm_wo_motor"] = float(cm_wo_motor)
         rocket["radius"] = float(r_radius)
         rocket["rocket_length"] = float(rocket_length)  # For MoI estimation
         rocket["inertia"] = [float(i_xx), float(i_yy), float(i_zz)]
@@ -5556,7 +5572,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         fins.setdefault("root_chord", 0.2)
         fins.setdefault("tip_chord", 0.1)
         fins.setdefault("fin_span", 0.3)
-        fins.setdefault("fin_position", 0.0)
+        fins.setdefault("fin_position", 1.05)
         colF1, colF2, colF3 = st.columns(3)
         with colF1:
             fins["no_fins"] = int(st.number_input("Fin count", value=int(fins["no_fins"]), min_value=1, step=1, key="flight_fins_count",
@@ -5572,6 +5588,43 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fins["fin_position"]), key="flight_fins_pos",
                 help="Leading edge distance from tail (z=0). Place near tail (0 - 0.3m) for stability."))
         rocket["fins"] = fins
+
+        # Strakes
+        st.markdown("##### Strakes")
+        st.caption("Optional strakes for extra stability. Same coordinate system as fins (z from tail).")
+        strakes = rocket.get("strakes") if rocket.get("strakes") is not None else {}
+        strakes.setdefault("no_fins", 3)          # number of strakes
+        strakes.setdefault("root_chord", 0.2)
+        strakes.setdefault("tip_chord", 0.1)
+        strakes.setdefault("fin_span", 0.3)
+        strakes.setdefault("fin_position", 0.0)
+
+        colS1, colS2, colS3 = st.columns(3)
+        with colS1:
+            strakes["no_fins"] = int(st.number_input(
+                "Strake count", value=int(strakes["no_fins"]), min_value=1, step=1,
+                key="flight_strakes_count"
+            ))
+            strakes["root_chord"] = float(st.number_input(
+                "Root chord [m]", value=float(strakes["root_chord"]),
+                key="flight_strakes_root"
+            ))
+        with colS2:
+            strakes["tip_chord"] = float(st.number_input(
+                "Tip chord [m]", value=float(strakes["tip_chord"]),
+                key="flight_strakes_tip"
+            ))
+            strakes["fin_span"] = float(st.number_input(
+                "Strake span [m]", value=float(strakes["fin_span"]),
+                key="flight_strakes_span"
+            ))
+        with colS3:
+            strakes["fin_position"] = float(st.number_input(
+                "Strake position [m]", value=float(strakes["fin_position"]),
+                key="flight_strakes_pos"
+            ))
+
+        rocket["strakes"] = strakes
         working["rocket"] = rocket
 
     with st.expander("Tanks", expanded=False):

@@ -510,6 +510,7 @@ class RocketConfig(BaseModel):
     rocket_length: Optional[float] = Field(default=None, gt=0, description="Total rocket length from tail to nose tip [m]. Used for MoI estimation.")
     motor_position: float = Field(default=0.0, description="Nozzle exit position from rocket tail (z=0 at tail, positive toward nose) [m]")
     fins: Optional[FinsConfig] = Field(default=None, description="Fins configuration")
+    strakes: Optional[FinsConfig] = Field(default=None, description="Strakes configuration (modeled as an additional trapezoidal fin set)",)
     
     # LEGACY fields - kept for backward compatibility
     mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Airframe mass. Use airframe_mass instead.")

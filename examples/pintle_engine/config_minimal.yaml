@@ -263,7 +263,7 @@ lox_tank:
   lox_h: 1.14
   lox_radius: 0.06985
   ox_tank_pos: 0.8
-  mass: 22.0  # LOX propellant mass [kg] (not tank structure mass)
+  mass: 18.0  # LOX propellant mass [kg] (not tank structure mass)
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
@@ -293,6 +293,7 @@ press_tank:
 rocket:
   # NEW mass model - matches CAD assemblies
   airframe_mass: 78.72      # Airframe only (fuselage, fins, nosecone, avionics) [kg]
+  cm_wo_motor: 3.861725449  # Airframe center of mass without motor, from tail [m]
   
   # Propulsion breakdown (for accurate CM calculation)
   engine_mass: 8.0                 # Engine + plumbing [kg]
@@ -322,7 +323,13 @@ rocket:
     root_chord: 0.626872
     tip_chord: 0.20066
     fin_span: 0.20066
-    fin_position: 0.4826
+    fin_position: 1.054535
+  strakes:
+    no_fins: 4
+    root_chord: 0.305
+    tip_chord: 0.152
+    fin_span: 0.152
+    fin_position: 3.58
 environment:
   date:
   - 2025
