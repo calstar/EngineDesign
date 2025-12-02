@@ -42,6 +42,9 @@ def detect_tank_underfill_time(mdot, m_initial, burn_time, n_samples=5000):
     if isinstance(mdot, Function):
         # It's a RocketPy Function - evaluate at each time
         mdot_values = np.array([mdot(t) for t in times])
+    elif callable(mdot):
+        # It's a callable function (e.g., scipy.interpolate.interp1d) - evaluate at each time
+        mdot_values = np.array([float(mdot(t)) for t in times])
     else:
         # It's a constant float
         mdot_values = np.full_like(times, float(mdot))
@@ -143,8 +146,8 @@ def truncate_thrust_curve(thrust_curve, cutoff_time):
     truncated_curve : list of (t, F) tuples
         Thrust curve with thrust=0 after cutoff_time
     """
-    if isinstance(thrust_curve, Function):
-        # Convert Function to list of tuples by sampling with high resolution
+    if isinstance(thrust_curve, Function) or callable(thrust_curve):
+        # Convert Function or callable (e.g., interp1d) to list of tuples by sampling with high resolution
         # Use at least 500 samples per second for accurate representation
         n_samples = max(int(cutoff_time * 500) + 1, 500)
         times = np.linspace(0, cutoff_time, n_samples)
@@ -216,7 +219,7 @@ def truncate_mdot_function(mdot_func, cutoff_time, burn_time):
     # Use higher resolution sampling (500 points per second minimum)
     n_samples = max(int(burn_time * 500) + 1, 1000)
     
-    if isinstance(mdot_func, Function):
+    if isinstance(mdot_func, Function) or callable(mdot_func):
         # Create base time samples with higher resolution
         times_base = np.linspace(0, burn_time, n_samples)
         

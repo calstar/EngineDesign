@@ -93,28 +93,100 @@ def run_flight_simulation(
     pressure_curves: Dict[str, np.ndarray],
     burn_time: float,
 ) -> Dict[str, Any]:
-    """Run flight simulation on the optimized engine."""
+    """Run flight simulation on the optimized engine.
+    
+    Uses the existing setup_flight function from flight_sim.py.
+    
+    Args:
+        config: Engine configuration (will be updated with burn_time)
+        pressure_curves: Dict with 'time', 'thrust', 'mdot_O', 'mdot_F' arrays
+        burn_time: Actual burn time to use (may be truncated from original)
+    
+    Returns:
+        Dict with flight simulation results
+    """
     try:
         from examples.pintle_engine.flight_sim import setup_flight
         from scipy.interpolate import interp1d
+        import copy
         
-        time_array = pressure_curves["time"]
-        thrust_array = pressure_curves["thrust"]
-        mdot_O_array = pressure_curves["mdot_O"]
-        mdot_F_array = pressure_curves["mdot_F"]
+        # Create a copy to avoid modifying the original config
+        config_copy = copy.deepcopy(config)
         
+        # CRITICAL: Update config's burn_time to match the actual (possibly truncated) burn_time
+        # This ensures setup_flight uses the correct burn_time for tank discretization
+        # Ensure burn_time is a float, not an interp1d or other object
+        burn_time_float = float(burn_time)
+        if hasattr(config_copy, 'thrust') and hasattr(config_copy.thrust, 'burn_time'):
+            config_copy.thrust.burn_time = burn_time_float
+        
+        # Extract arrays and ensure they're numpy arrays (not interp1d objects)
+        time_array = np.asarray(pressure_curves["time"], dtype=float)
+        thrust_array = np.asarray(pressure_curves["thrust"], dtype=float)
+        mdot_O_array = np.asarray(pressure_curves["mdot_O"], dtype=float)
+        mdot_F_array = np.asarray(pressure_curves["mdot_F"], dtype=float)
+        
+        # Ensure arrays are 1D and same length
+        time_array = time_array.flatten()
+        thrust_array = thrust_array.flatten()
+        mdot_O_array = mdot_O_array.flatten()
+        mdot_F_array = mdot_F_array.flatten()
+        
+        # Ensure all arrays have the same length
+        min_len = min(len(time_array), len(thrust_array), len(mdot_O_array), len(mdot_F_array))
+        if min_len == 0:
+            raise ValueError("Pressure curves arrays are empty")
+        
+        time_array = time_array[:min_len]
+        thrust_array = thrust_array[:min_len]
+        mdot_O_array = mdot_O_array[:min_len]
+        mdot_F_array = mdot_F_array[:min_len]
+        
+        # Convert arrays to interpolation functions for setup_flight
+        # setup_flight expects Functions or callables, not arrays
         thrust_func = interp1d(time_array, thrust_array, kind='linear', fill_value=0, bounds_error=False)
         mdot_O_func = interp1d(time_array, mdot_O_array, kind='linear', fill_value=0, bounds_error=False)
         mdot_F_func = interp1d(time_array, mdot_F_array, kind='linear', fill_value=0, bounds_error=False)
         
-        result = setup_flight(config, thrust_func, mdot_O_func, mdot_F_func, plot_results=False)
+        # Call the existing setup_flight function from flight_sim.py
+        # This reuses all the smart logic: tank underfill detection, truncation, etc.
+        result = setup_flight(config_copy, thrust_func, mdot_O_func, mdot_F_func, plot_results=False)
+        
+        apogee = result.get("apogee", 0)
+        max_velocity = result.get("max_velocity", 0)
+        
+        # Validate results - if apogee is suspiciously low, something went wrong
+        if apogee < 10.0:
+            # Check if thrust curve is valid
+            max_thrust = np.max(thrust_array) if len(thrust_array) > 0 else 0
+            initial_thrust = thrust_array[0] if len(thrust_array) > 0 else 0
+            
+            # Check masses
+            lox_mass = getattr(config_copy.lox_tank, 'mass', 0) if hasattr(config_copy, 'lox_tank') else 0
+            fuel_mass = getattr(config_copy.fuel_tank, 'mass', 0) if hasattr(config_copy, 'fuel_tank') else 0
+            
+            error_msg = (
+                f"Apogee is suspiciously low ({apogee:.1f}m). "
+                f"Diagnostics: max_thrust={max_thrust:.1f}N, initial_thrust={initial_thrust:.1f}N, "
+                f"lox_mass={lox_mass:.2f}kg, fuel_mass={fuel_mass:.2f}kg, burn_time={burn_time:.2f}s"
+            )
+            
+            return {
+                "success": False,
+                "error": error_msg,
+                "apogee": apogee,
+                "max_velocity": max_velocity,
+                "flight_time": result.get("flight_time", 0),
+                "flight_obj": result.get("flight", None),
+            }
         
         return {
             "success": True,
-            "apogee": result.get("apogee", 0),
-            "max_velocity": result.get("max_velocity", 0),
+            "apogee": apogee,
+            "max_velocity": max_velocity,
             "flight_time": result.get("flight_time", 0),
             "flight_obj": result.get("flight", None),
+            "truncation_info": result.get("truncation_info", {}),  # Pass through truncation info
         }
     except Exception as e:
         return {

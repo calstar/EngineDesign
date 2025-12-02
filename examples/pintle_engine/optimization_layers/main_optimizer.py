@@ -2362,166 +2362,62 @@ def run_full_engine_optimization_with_flight_sim(
     # ==========================================================================
     # ==========================================================================
     # LAYER 4: FLIGHT SIMULATION AND VALIDATION
-    # Run flight simulation with propellant truncation to validate trajectory
-    # performance. Once Layer 3 passes, run flight sim with backward iteration.
-    # Automatically detects tank empty conditions and truncates thrust.
-    # Iterates backward if apogee goals not met (reduce propellant, rerun).
+    # Validate trajectory performance and adjust tank fills (propellant masses)
+    # to hit apogee targets. Flight sim handles truncation when tanks run out.
     # ==========================================================================
     # ==========================================================================
-    flight_sim_result = {"success": False, "apogee": 0, "max_velocity": 0, "layer": 4}
-    flight_candidate_valid = False
-    
-    # CRITICAL FIX: Layer 4 should run if Layer 1 passed and we have pressure curves
-    # Layer 4 can work with Layer 1 results even if Layer 2/3 have issues
-    # This allows the full pipeline to execute and provide useful results
+    flight_sim_result: Dict[str, Any] = {
+        "success": False,
+        "apogee": 0.0,
+        "max_velocity": 0.0,
+        "layer": 4,
+        "flight_candidate_valid": False,
+    }
+
+    # Determine if we should run flight sim
+    # CRITICAL FIX: Layer 4 should run if Layer 1 passed and we have pressure curves.
+    # Allow execution even when downstream layers struggle so we can still deliver trajectory insights.
     should_run_flight = (
-        pressure_candidate_valid and  # Layer 1 must pass
-        pressure_curves is not None   # Must have pressure curves
+        pressure_candidate_valid  # Layer 1 must pass
+        and pressure_curves is not None  # Need pressure curves available
     )
-    
+
     if should_run_flight:
-        update_progress("Layer 4: Flight Candidate", 0.75, "Running flight simulation with backward iteration...")
-        
+        update_progress(
+            "Layer 4: Flight Candidate",
+            0.75,
+            "Running flight simulation with tank-fill iteration...",
+        )
+
         try:
-            # Layer 4: Iterative backward truncation to meet apogee goals
-            # Start from t_burn_time - epsilon, truncate, subtract remaining propellant, rerun
-            epsilon = 0.01  # Small time step for backward iteration
-            max_iterations_flight = 20  # Prevent infinite loops
-            flight_iteration = 0
-            current_burn_time = target_burn_time
-            flight_candidate_valid = False
-            
-            # Get initial propellant masses
-            config_for_flight = copy.deepcopy(optimized_config)
-            initial_lox_mass = config_for_flight.lox_tank.mass if hasattr(config_for_flight, 'lox_tank') else 0
-            initial_fuel_mass = config_for_flight.fuel_tank.mass if hasattr(config_for_flight, 'fuel_tank') else 0
-            
-            # Get propellant densities for mass calculation
-            rho_lox = config_for_flight.fluids['oxidizer'].density if hasattr(config_for_flight, 'fluids') else 1140.0
-            rho_fuel = config_for_flight.fluids['fuel'].density if hasattr(config_for_flight, 'fluids') else 800.0
-            
-            while flight_iteration < max_iterations_flight and not flight_candidate_valid:
-                flight_iteration += 1
-                progress = 0.75 + 0.10 * min(flight_iteration / max_iterations_flight, 1.0)
-                
-                # Truncate thrust curve at current_burn_time - epsilon
-                cutoff_time = max(0.1, current_burn_time - epsilon)
-                update_progress("Layer 4: Flight Candidate", progress, 
-                    f"Iteration {flight_iteration}: Testing burn time {cutoff_time:.2f}s (target: {target_apogee:.0f}m)")
-                
-                # Create truncated pressure curves
-                time_array_trunc = time_array[time_array <= cutoff_time]
-                if len(time_array_trunc) == 0:
-                    time_array_trunc = np.array([0.0, cutoff_time])
-                
-                # Truncate all arrays
-                mask = time_array <= cutoff_time
-                pressure_curves_trunc = {
-                    "time": time_array_trunc,
-                    "P_tank_O": P_tank_O_array[mask][:len(time_array_trunc)],
-                    "P_tank_F": P_tank_F_array[mask][:len(time_array_trunc)],
-                    "thrust": pressure_curves["thrust"][mask][:len(time_array_trunc)],
-                    "Isp": pressure_curves["Isp"][mask][:len(time_array_trunc)],
-                    "Pc": pressure_curves["Pc"][mask][:len(time_array_trunc)],
-                    "mdot_O": pressure_curves["mdot_O"][mask][:len(time_array_trunc)],
-                    "mdot_F": pressure_curves["mdot_F"][mask][:len(time_array_trunc)],
-                }
-                
-                # Calculate remaining propellant mass (integrate mdot from cutoff_time to target_burn_time)
-                if cutoff_time < target_burn_time:
-                    # Integrate mdot from cutoff_time to target_burn_time
-                    remaining_time = target_burn_time - cutoff_time
-                    # Use average mdot at cutoff point as estimate
-                    mdot_O_cutoff = pressure_curves["mdot_O"][mask][-1] if len(pressure_curves["mdot_O"][mask]) > 0 else 0
-                    mdot_F_cutoff = pressure_curves["mdot_F"][mask][-1] if len(pressure_curves["mdot_F"][mask]) > 0 else 0
-                    remaining_lox_mass = mdot_O_cutoff * remaining_time
-                    remaining_fuel_mass = mdot_F_cutoff * remaining_time
-                else:
-                    remaining_lox_mass = 0
-                    remaining_fuel_mass = 0
-                
-                # Subtract remaining propellant from initial masses
-                adjusted_lox_mass = max(0.1, initial_lox_mass - remaining_lox_mass)
-                adjusted_fuel_mass = max(0.1, initial_fuel_mass - remaining_fuel_mass)
-                
-                # Update config with adjusted masses
-                config_for_flight.lox_tank.mass = adjusted_lox_mass
-                config_for_flight.fuel_tank.mass = adjusted_fuel_mass
-                
-                # Run flight simulation with truncated thrust and adjusted masses
-                flight_sim_result = run_flight_simulation(
-                    config_for_flight,
-                    pressure_curves_trunc,
-                    cutoff_time,
-                )
-                
-                if flight_sim_result.get("success", False):
-                    apogee = flight_sim_result.get("apogee", 0)
-                    apogee_error = abs(apogee - target_apogee) / target_apogee if target_apogee > 0 else 1.0
-                    
-                    # Check if apogee goal is met
-                    if apogee_error < apogee_tol:
-                        flight_candidate_valid = True
-                        update_progress(
-                            "Layer 4: Flight Candidate",
-                            0.85,
-                            f"✓ VALID - Apogee {apogee:.0f}m within {apogee_error*100:.1f}% of target {target_apogee:.0f}m (burn: {cutoff_time:.2f}s)",
-                        )
-                        log_status(
-                            "Layer 4",
-                            f"VALID | Apogee {apogee:.0f}m (error {apogee_error*100:.1f}%), burn {cutoff_time:.2f}s",
-                        )
-                        flight_sim_result["actual_burn_time"] = cutoff_time
-                        flight_sim_result["adjusted_lox_mass"] = adjusted_lox_mass
-                        flight_sim_result["adjusted_fuel_mass"] = adjusted_fuel_mass
-                        flight_sim_result["iterations"] = flight_iteration
-                        break
-                    else:
-                        # Apogee not met - continue backward iteration
-                        if apogee < target_apogee:
-                            # Apogee too low - need to reduce burn time further (less propellant)
-                            current_burn_time = cutoff_time
-                            update_progress("Layer 4: Flight Candidate", progress, 
-                                f"Apogee {apogee:.0f}m < target {target_apogee:.0f}m, reducing burn time to {current_burn_time:.2f}s")
-                        else:
-                            # Apogee too high - we've gone too far back, use this as best
-                            flight_candidate_valid = True  # Accept as best we can do
-                            update_progress(
-                                "Layer 4: Flight Candidate",
-                                0.85,
-                                f"✓ Best match - Apogee {apogee:.0f}m (target: {target_apogee:.0f}m, error: {apogee_error*100:.1f}%, burn: {cutoff_time:.2f}s)",
-                            )
-                            log_status(
-                                "Layer 4",
-                                f"ACCEPTED | Apogee {apogee:.0f}m (error {apogee_error*100:.1f}%), burn {cutoff_time:.2f}s after {flight_iteration} iterations",
-                            )
-                            flight_sim_result["actual_burn_time"] = cutoff_time
-                            flight_sim_result["adjusted_lox_mass"] = adjusted_lox_mass
-                            flight_sim_result["adjusted_fuel_mass"] = adjusted_fuel_mass
-                            flight_sim_result["iterations"] = flight_iteration
-                            break
-                else:
-                    # Flight sim failed - try next iteration
-                    current_burn_time = cutoff_time
-                    if flight_iteration >= max_iterations_flight:
-                        update_progress("Layer 4: Flight Candidate", 0.85, 
-                            f"⚠️ Flight sim failed after {flight_iteration} iterations: {flight_sim_result.get('error', 'Unknown error')}")
-                        break
-                
-                # Prevent going too far back
-                if current_burn_time < 0.5:  # Minimum 0.5s burn time
-                    update_progress("Layer 4: Flight Candidate", 0.85, 
-                        f"⚠️ Reached minimum burn time (0.5s), stopping iteration")
-                    break
-            
-            if not flight_candidate_valid and flight_iteration >= max_iterations_flight:
-                update_progress("Layer 4: Flight Candidate", 0.85, 
-                    f"⚠️ Max iterations reached, using last result")
-                flight_candidate_valid = False  # Mark as invalid if we didn't converge
-                
+            # Delegate the actual tank-fill iteration to the Layer 4 helper
+            flight_sim_result = run_layer4_flight_simulation(
+                optimized_config=optimized_config,
+                pressure_curves=pressure_curves,
+                time_array=time_array,
+                P_tank_O_array=P_tank_O_array,
+                P_tank_F_array=P_tank_F_array,
+                target_burn_time=target_burn_time,
+                target_apogee=target_apogee,
+                apogee_tol=apogee_tol,
+                update_progress=update_progress,
+                log_status=log_status,
+                run_flight_simulation_func=run_flight_simulation,
+            )
         except Exception as e:
-            flight_sim_result = {"success": False, "error": str(e), "apogee": 0, "max_velocity": 0}
-            update_progress("Layer 4: Flight Candidate", 0.85, f"⚠️ Flight sim error: {e}")
+            flight_sim_result = {
+                "success": False,
+                "error": str(e),
+                "apogee": 0.0,
+                "max_velocity": 0.0,
+                "layer": 4,
+                "flight_candidate_valid": False,
+            }
+            update_progress(
+                "Layer 4: Flight Candidate",
+                0.85,
+                f"Flight sim error: {e}",
+            )
     else:
         # Determine reason for skipping flight sim
         if not layer1_acceptable:
@@ -2532,12 +2428,26 @@ def run_full_engine_optimization_with_flight_sim(
             reason = "burn candidate invalid"
         else:
             reason = "unknown"
-        update_progress("Layer 4: Flight Candidate", 0.75, f"Skipping flight sim ({reason})")
+        update_progress(
+            "Layer 4: Flight Candidate",
+            0.75,
+            f"Skipping flight sim ({reason})",
+        )
         log_status("Layer 4", f"Skipped | Reason: {reason}")
-        flight_sim_result = {"success": False, "skipped": True, "reason": reason, "apogee": 0, "max_velocity": 0}
-    
-    flight_sim_result["flight_candidate_valid"] = flight_candidate_valid
-    final_performance["flight_candidate_valid"] = flight_candidate_valid
+        flight_sim_result = {
+            "success": False,
+            "skipped": True,
+            "reason": reason,
+            "apogee": 0.0,
+            "max_velocity": 0.0,
+            "layer": 4,
+            "flight_candidate_valid": False,
+        }
+
+    # Mirror flight-candidate status into the performance dict
+    final_performance["flight_candidate_valid"] = flight_sim_result.get(
+        "flight_candidate_valid", False
+    )
     
     update_progress("Finalization", 0.90, "Assembling results...")
     
@@ -2582,11 +2492,11 @@ def run_full_engine_optimization_with_flight_sim(
         "layer_1_pressure_candidate": pressure_candidate_valid,
         "layer_2_burn_candidate": burn_candidate_valid if use_time_varying else None,
         "layer_3_thermal_protection": final_performance.get("thermal_protection_valid", None),
-        "layer_4_flight_candidate": flight_candidate_valid,
+        "layer_4_flight_candidate": final_performance.get("flight_candidate_valid", False),
         "all_layers_passed": (
             pressure_candidate_valid and 
             (burn_candidate_valid or not use_time_varying) and 
-            flight_candidate_valid
+            final_performance.get("flight_candidate_valid", False)
         ),
     }
     layer_summary = coupled_results["layer_status"]

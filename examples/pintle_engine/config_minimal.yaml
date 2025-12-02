@@ -263,12 +263,12 @@ lox_tank:
   lox_h: 1.14
   lox_radius: 0.06985
   ox_tank_pos: 0.8
-  mass: 4.035  # LOX propellant mass [kg] (not tank structure mass)
+  mass: 22.0  # LOX propellant mass [kg] (not tank structure mass)
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
   fuel_tank_pos: 3
-  mass: 8.762  # RP-1 propellant mass [kg] (not tank structure mass)
+  mass: 7.0  # RP-1 propellant mass [kg] (not tank structure mass)
 press_tank:
   press_h: 0.457
   press_radius: 0.0762

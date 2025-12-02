@@ -2085,118 +2085,12 @@ def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
         return config_obj
     
-    # Check for Layer 3 results (prerequisite)
-    layer3_results = st.session_state.get("layer3_results") or st.session_state.get("optimization_results")
-    layer3_config = st.session_state.get("optimized_config", config_obj)
-    
-    if not layer3_results:
-        st.warning("⚠️ Layer 3 must be run first. Please run Layer 3 optimization before running Layer 4.")
-        return config_obj
-    
     st.markdown("---")
-    st.markdown("### Run Layer 4 Individually")
-    
-    if st.button("🚀 Run Layer 4 Optimization", type="primary", key="run_layer4"):
-        try:
-            target_burn_time = requirements.get("target_burn_time", 10.0)
-            target_apogee = requirements.get("target_apogee", 3048.0)
-            apogee_tol = requirements.get("apogee_tolerance", 0.15)
-            
-            # Get pressure curves and time arrays from Layer 1
-            layer1_results = st.session_state.get("layer1_results") or st.session_state.get("optimization_results")
-            lox_segments = layer1_results.get("optimized_pressure_curves", {}).get("lox_segments", [])
-            fuel_segments = layer1_results.get("optimized_pressure_curves", {}).get("fuel_segments", [])
-            
-            if not lox_segments or not fuel_segments:
-                st.error("❌ Layer 1 results missing. Please re-run Layer 1.")
-                return config_obj
-            
-            # Generate 200-point pressure curves
-            n_time_points = 200
-            psi_to_Pa = 6894.76
-            time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
-            _, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
-            P_tank_O_array = lox_pressure_psi * psi_to_Pa
-            P_tank_F_array = fuel_pressure_psi * psi_to_Pa
-            
-            # Get time-varying performance data
-            layer3_results_data = st.session_state.get("layer3_results", {})
-            if isinstance(layer3_results_data, dict) and "updated_time_results" in layer3_results_data:
-                time_results = layer3_results_data["updated_time_results"]
-            else:
-                # Re-run time series if not available
-                runner_temp = PintleEngineRunner(layer3_config)
-                time_results = runner_temp.evaluate_arrays_with_time(
-                    time_array,
-                    P_tank_O_array,
-                    P_tank_F_array,
-                    track_ablative_geometry=True,
-                    use_coupled_solver=True,
-                )
-            
-            # Build pressure curves dict
-            pressure_curves = {
-                "time": time_array,
-                "P_tank_O": P_tank_O_array,
-                "P_tank_F": P_tank_F_array,
-                "thrust": time_results.get("F", np.zeros(n_time_points)),
-                "Isp": time_results.get("Isp", np.zeros(n_time_points)),
-                "Pc": time_results.get("Pc", np.zeros(n_time_points)),
-                "mdot_O": time_results.get("mdot_O", np.zeros(n_time_points)),
-                "mdot_F": time_results.get("mdot_F", np.zeros(n_time_points)),
-            }
-            
-            progress_bar = st.progress(0, text="Running Layer 4 flight simulation...")
-            status_text = st.empty()
-            
-            def update_progress(stage: str, progress: float, message: str):
-                progress_bar.progress(progress, text=f"{stage}\n{message}")
-                status_text.text(f"{stage} | {message}")
-            
-            def log_status(stage: str, message: str):
-                pass
-            
-            # Create flight simulation wrapper
-            def run_flight_sim_wrapper(config, pressure_curves_trunc, cutoff_time):
-                return run_flight_simulation(
-                    config,
-                    pressure_curves_trunc,
-                    cutoff_time,
-                )
-            
-            # Run Layer 4
-            flight_sim_result = run_layer4_flight_simulation(
-                layer3_config,
-                pressure_curves,
-                time_array,
-                P_tank_O_array,
-                P_tank_F_array,
-                target_burn_time,
-                target_apogee,
-                apogee_tol,
-                update_progress,
-                log_status,
-                run_flight_sim_wrapper,
-            )
-            
-            progress_bar.empty()
-            status_text.empty()
-            
-            # Store results
-            st.session_state["layer4_results"] = flight_sim_result
-            
-            if flight_sim_result.get("flight_candidate_valid", False):
-                st.success("✅ Layer 4 optimization complete! Flight candidate is VALID.")
-            else:
-                st.warning("⚠️ Layer 4 optimization complete, but flight candidate may not be fully valid.")
-            
-            st.rerun()
-            
-        except Exception as e:
-            st.error(f"Layer 4 optimization failed: {e}")
-            import traceback
-            st.code(traceback.format_exc())
-    
+    st.info(
+        "Layer 4 flight simulation runs automatically as part of the full engine "
+        "optimization pipeline. Run the main optimizer (Layers 0‑4) to execute this "
+        "step with real data."
+    )
     st.markdown("---")
     st.markdown("### Layer 4 Status")
     
@@ -2214,6 +2108,50 @@ def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             st.success("✅ Layer 4: Flight Candidate VALID")
         else:
             st.error("❌ Layer 4: Flight Candidate INVALID")
+        
+        # Show iteration table if available (show regardless of success/failure)
+        if "iteration_data" in flight_sim_result and len(flight_sim_result["iteration_data"]) > 0:
+            st.markdown("#### Iteration History")
+            import pandas as pd
+            
+            # Get the best iteration number if available
+            best_iteration = flight_sim_result.get("best_iteration", None)
+            
+            # Create DataFrame from iteration data
+            df_data = []
+            for iter_record in flight_sim_result["iteration_data"]:
+                iter_num = iter_record.get("iteration", 0)
+                is_best = (best_iteration is not None and iter_num == best_iteration)
+                iter_label = f"⭐ {iter_num}" if is_best else str(iter_num)
+                
+                df_data.append({
+                    "Iteration": iter_label,
+                    "Burn Time (s)": f"{iter_record.get('burn_time', 0):.2f}",
+                    "Apogee (m)": f"{iter_record.get('apogee', 0):.1f}",
+                    "Apogee Error (%)": f"{iter_record.get('apogee_error_pct', 100):.1f}",
+                    "Max Velocity (m/s)": f"{iter_record.get('max_velocity', 0):.1f}" if iter_record.get('max_velocity') else "N/A",
+                    "Success": "✅" if iter_record.get("success", False) else "❌",
+                    "Max Thrust (N)": f"{iter_record.get('max_thrust', 0):.0f}",
+                    "Initial Thrust (N)": f"{iter_record.get('initial_thrust', 0):.0f}",
+                    "Avg Thrust (N)": f"{iter_record.get('avg_thrust', 0):.0f}",
+                    "Total Impulse (N·s)": f"{iter_record.get('total_impulse', 0):.0f}",
+                    "LOX Mass (kg)": f"{iter_record.get('adjusted_lox_mass', 0):.2f}",
+                    "Fuel Mass (kg)": f"{iter_record.get('adjusted_fuel_mass', 0):.2f}",
+                    "Error": iter_record.get("error", "")[:80] if iter_record.get("error") else "",
+                })
+            
+            df = pd.DataFrame(df_data)
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            
+            if best_iteration is not None:
+                st.info(f"⭐ **Best iteration: {best_iteration}** (lowest apogee error: {flight_sim_result.get('best_apogee_error', 0)*100:.1f}%)")
+            
+            # Show error details if any iteration failed
+            failed_iterations = [r for r in flight_sim_result["iteration_data"] if not r.get("success", False) and r.get("error")]
+            if failed_iterations:
+                with st.expander("❌ Error Details"):
+                    for iter_record in failed_iterations:
+                        st.error(f"Iteration {iter_record.get('iteration', 0)}: {iter_record.get('error', 'Unknown error')}")
         
         # Show flight simulation results
         if flight_sim_result.get("success", False):
@@ -2247,7 +2185,7 @@ def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         else:
             st.error(f"❌ Flight simulation failed: {flight_sim_result.get('error', 'Unknown error')}")
     else:
-        st.info("💡 Layer 4 has not been run yet. Click 'Run Layer 4 Optimization' above or use the Full Engine Optimizer.")
+        st.info("💡 Layer 4 has not been run yet. Click 'Run Layer 4 with Fake Data' above to test with generated pressure curves.")
     
     return config_obj
 
