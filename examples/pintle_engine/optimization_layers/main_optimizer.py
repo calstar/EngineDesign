@@ -38,6 +38,9 @@ from .layer1_static_optimization import (
 from .layer2_pressure import (
     run_layer2_pressure,
 )
+from .layer2_burn_candidate import (
+    run_layer2_burn_candidate,
+)
 from .layer3_thermal_protection import (
     run_layer3_thermal_protection,
 )
@@ -87,7 +90,17 @@ def run_full_engine_optimization_with_flight_sim(
     
     # Get objective tolerance for early stopping
     # CRITICAL: More stringent convergence criteria
-    obj_tolerance = requirements.get("objective_tolerance", 0.02)  # Tighter: 0.05 (was 0.1)
+    # CRITICAL: Adjusted tolerance for new objective function structure
+    # New objective uses squared errors with heavy weights:
+    # - Thrust: (error^2) * 200.0
+    # - O/F: (error^2) * 300.0
+    # - Stability: 50.0 * penalty
+    # For good solution (5% thrust, 5% O/F, good stability):
+    #   obj ≈ (0.05^2)*200 + (0.05^2)*300 = 0.5 + 0.75 = 1.25
+    # For acceptable solution (10% thrust, 15% O/F):
+    #   obj ≈ (0.10^2)*200 + (0.15^2)*300 = 2.0 + 6.75 = 8.75
+    # Set tolerance to 2.0 to allow acceptable solutions while still encouraging improvement
+    obj_tolerance = requirements.get("objective_tolerance", 2.0)  # Adjusted for new objective structure (was 0.02)
     
     # Optimization state for progress tracking
     opt_state: Dict[str, Any] = {
@@ -732,17 +745,12 @@ def run_full_engine_optimization_with_flight_sim(
         - Evaluates static performance (thrust, O/F, stability)
         - Returns weighted error/penalty score for optimizer
         """
-        opt_state["iteration"] += 1
-        iteration = opt_state["iteration"]
+        # CRITICAL FIX: Use nonlocal to access outer scope opt_state
+        # This prevents Python from thinking opt_state is a local variable
+        nonlocal opt_state
         
-        # CRITICAL FIX: Ensure opt_state is a dict and has required keys
-        if opt_state is None:
-            opt_state = {}
-        if not isinstance(opt_state, dict):
-            opt_state = {}
-        
-        # CRITICAL FIX: Early termination if too many consecutive failures
-        # Track consecutive failures to detect if optimizer is stuck
+        # CRITICAL FIX: Initialize required keys BEFORE accessing opt_state
+        # This must happen before any opt_state access to prevent UnboundLocalError
         if 'consecutive_failures' not in opt_state:
             opt_state['consecutive_failures'] = 0
         if 'last_valid_obj' not in opt_state:
@@ -755,6 +763,10 @@ def run_full_engine_optimization_with_flight_sim(
             opt_state['best_objective'] = float('inf')
         if 'best_x' not in opt_state:
             opt_state['best_x'] = None
+        
+        # Now safe to access opt_state
+        opt_state["iteration"] += 1
+        iteration = opt_state["iteration"]
         
         # Progress update (optimization is ~10% to 50% of total)
         progress = 0.10 + 0.40 * min(iteration / max_iterations, 1.0)
@@ -1568,7 +1580,7 @@ def run_full_engine_optimization_with_flight_sim(
                 options={
                     'maxiter': max_iterations,
                     'maxfun': maxfun_capped,  # Cap function evaluations
-                    'ftol': obj_tolerance,  # Stop when obj < tolerance
+                    'ftol': obj_tolerance * 0.1,  # Stop when obj improves by < 10% of tolerance (relative convergence)
                     'gtol': 1e-5,
                     'maxls': 20,
                     'disp': False,
@@ -2002,291 +2014,87 @@ def run_full_engine_optimization_with_flight_sim(
     
     if use_time_varying and layer1_acceptable:
         try:
-            update_progress("Layer 2: Burn Candidate Optimization", 0.60, "Optimizing initial thermal protection guesses...")
+            # ==========================================================================
+            # LAYER 2a: PRESSURE CURVE OPTIMIZATION
+            # Optimize pressure curves for the full burn (impulse, capacity, stability, O/F)
+            # This runs BEFORE burn candidate optimization to get optimal pressure profiles
+            # ==========================================================================
+            # Extract initial pressures from Layer 1 results
+            P_O_start_pa = P_tank_O_array[0] if len(P_tank_O_array) > 0 else max_lox_P_psi * psi_to_Pa * 0.8
+            P_F_start_pa = P_tank_F_array[0] if len(P_tank_F_array) > 0 else max_fuel_P_psi * psi_to_Pa * 0.8
             
-            # Layer 2: Optimize initial ablative/graphite thickness guesses
-            # These are starting guesses that will be refined in Layer 3
-            from scipy.optimize import minimize as scipy_minimize
+            # Get rocket mass and tank capacity from config (if available)
+            # These are needed for impulse and capacity calculations in layer2_pressure
+            rocket_dry_mass_kg = getattr(config_obj.rocket, 'dry_mass_kg', None) if hasattr(config_obj, 'rocket') else None
+            max_lox_tank_capacity_kg = getattr(config_obj.rocket, 'lox_tank_capacity_kg', None) if hasattr(config_obj, 'rocket') else None
+            max_fuel_tank_capacity_kg = getattr(config_obj.rocket, 'fuel_tank_capacity_kg', None) if hasattr(config_obj, 'rocket') else None
             
-            # Get current ablative/graphite config
-            ablative_cfg = optimized_config.ablative_cooling if hasattr(optimized_config, 'ablative_cooling') else None
-            graphite_cfg = optimized_config.graphite_insert if hasattr(optimized_config, 'graphite_insert') else None
+            # Fallback estimates if not available
+            if rocket_dry_mass_kg is None:
+                # Estimate: engine + tanks + COPV + airframe
+                rocket_dry_mass_kg = 50.0  # Conservative default
+            if max_lox_tank_capacity_kg is None:
+                # Estimate based on propellant mass needed for burn
+                max_lox_tank_capacity_kg = 20.0  # Conservative default
+            if max_fuel_tank_capacity_kg is None:
+                max_fuel_tank_capacity_kg = 10.0  # Conservative default
             
-            # CRITICAL FIX: Layer 2 MUST optimize pressure curves to maintain thrust/O/F!
-            # Optimization variables for Layer 2: [lox_pressure_scale, fuel_pressure_scale, ablative_initial_guess, graphite_initial_guess]
-            layer2_bounds = []
-            layer2_x0 = []
-            
-            # Add pressure scaling variables FIRST (so they're optimized first)
-            # Scale factors for entire pressure curves (0.7-1.1x to allow adjustment)
-            layer2_bounds.append((0.7, 1.1))  # LOX pressure scale
-            layer2_bounds.append((0.7, 1.1))  # Fuel pressure scale
-            layer2_x0.append(1.0)  # Start at 1.0 (no change from Layer 1)
-            layer2_x0.append(1.0)  # Start at 1.0 (no change from Layer 1)
-            
-            if ablative_cfg and ablative_cfg.enabled:
-                layer2_bounds.append((0.003, 0.020))  # 3-20mm
-                layer2_x0.append(ablative_cfg.initial_thickness)
-            if graphite_cfg and graphite_cfg.enabled:
-                layer2_bounds.append((0.003, 0.015))  # 3-15mm
-                layer2_x0.append(graphite_cfg.initial_thickness)
-            
-            if len(layer2_x0) > 0:
-                layer2_x0 = np.array(layer2_x0)
-
-                # Track Layer 2 optimization progress for UI
-                layer2_state = {
-                    "iter": 0,
-                    "max_iter": 20,
-                }
-                def layer2_callback(xk):
-                    layer2_state["iter"] += 1
-                    frac = min(layer2_state["iter"] / max(layer2_state["max_iter"], 1), 1.0)
-                    # Map Layer 2 progress into 0.60–0.64 range of overall bar
-                    progress = 0.60 + 0.04 * frac
-                    update_progress(
-                        "Layer 2: Burn Candidate Optimization",
-                        progress,
-                        f"Layer 2 optimization {layer2_state['iter']}/{layer2_state['max_iter']}",
-                    )
-                
-                def layer2_objective(x_layer2):
-                    """Optimize pressure curves AND thermal protection to maintain thrust/O/F."""
-                    try:
-                        # Update config with current guesses
-                        config_layer2 = copy.deepcopy(optimized_config)
-                        idx = 0
-                        
-                        # CRITICAL: Apply pressure scaling FIRST
-                        lox_scale = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                        idx += 1
-                        fuel_scale = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                        idx += 1
-                        # Scale entire pressure curves
-                        P_O_array_scaled = P_tank_O_array * lox_scale
-                        P_F_array_scaled = P_tank_F_array * fuel_scale
-                        
-                        if ablative_cfg and ablative_cfg.enabled:
-                            config_layer2.ablative_cooling.initial_thickness = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                            idx += 1
-                        if graphite_cfg and graphite_cfg.enabled:
-                            config_layer2.graphite_insert.initial_thickness = float(np.clip(x_layer2[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                        
-                        # Run time series
-                        runner_layer2 = PintleEngineRunner(config_layer2)
-                        # CRITICAL: Use fully-coupled solver for accurate time-varying analysis
-                        try:
-                            results_layer2 = runner_layer2.evaluate_arrays_with_time(
-                                time_array,
-                                P_O_array_scaled,  # Use scaled pressures!
-                                P_F_array_scaled,  # Use scaled pressures!
-                                track_ablative_geometry=True,
-                                use_coupled_solver=True,  # Use fully-coupled solver for Layer 2
-                            )
-                        except Exception as e:
-                            # If coupled solver fails, try without it as fallback
-                            log_status("Layer 2 Objective", f"Coupled solver failed, using fallback: {repr(e)[:100]}")
-                            results_layer2 = runner_layer2.evaluate_arrays_with_time(
-                                time_array,
-                                P_tank_O_array,
-                                P_tank_F_array,
-                                track_ablative_geometry=True,
-                                use_coupled_solver=False,
-                            )
-                        
-                        # Objective: minimize recession while meeting stability/thrust goals
-                        recession_chamber = float(np.max(results_layer2.get("recession_chamber", [0.0])))
-                        recession_throat = float(np.max(results_layer2.get("recession_throat", [0.0])))
-                        
-                        # CRITICAL FIX: Robust stability extraction - handle NaN/inf values
-                        stability_scores = results_layer2.get("stability_score", None)
-                        if stability_scores is not None:
-                            # Filter out NaN/inf values
-                            valid_scores = [s for s in np.atleast_1d(stability_scores) if np.isfinite(s)]
-                            if len(valid_scores) > 0:
-                                min_stability = float(np.min(valid_scores))
-                            else:
-                                min_stability = 0.5  # Default to marginal if all invalid
-                        else:
-                            # Fallback: try to get from individual margins
-                            try:
-                                chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
-                                chugging_valid = [c for c in np.atleast_1d(chugging) if np.isfinite(c)]
-                                if len(chugging_valid) > 0:
-                                    min_stability = max(0.0, min(1.0, (float(np.min(chugging_valid)) - 0.3) * 1.5))
-                                else:
-                                    min_stability = 0.5  # Default to marginal
-                            except Exception:
-                                min_stability = 0.5  # Safe default
-                        
-                        # Check thrust – be robust to shorter-than-expected histories
-                        thrust_hist = np.atleast_1d(
-                            results_layer2.get("F", np.full(n_time_points, target_thrust))
-                        )
-                        available_n = min(thrust_hist.shape[0], n_time_points)
-                        # CRITICAL FIX: Always initialize avg_thrust_err to prevent UnboundLocalError
-                        avg_thrust_err = 1.0  # Default to bad error
-                        
-                        if available_n >= 2:
-                            check_indices = np.arange(available_n - 1)  # Exclude last point
-                            thrust_hist = thrust_hist[:available_n]
-                            thrust_errors = (
-                                np.abs(thrust_hist[check_indices] - target_thrust) / target_thrust
-                            )
-                            max_thrust_err = float(np.max(thrust_errors))
-                            avg_thrust_err = float(np.mean(thrust_errors))  # CRITICAL: Calculate average!
-                        elif available_n == 1:
-                            # Only one valid point – use it as an approximate error
-                            max_thrust_err = float(
-                                abs(thrust_hist[0] - target_thrust) / max(target_thrust, 1e-9)
-                            )
-                            avg_thrust_err = max_thrust_err
-                        else:
-                            # No valid points – treat as very bad candidate
-                            max_thrust_err = 1.0
-                            avg_thrust_err = 1.0
-                        
-                        # CRITICAL: Also check O/F errors (if available)
-                        MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(n_time_points, optimal_of)))
-                        max_MR_err = 0.0  # Initialize
-                        if len(MR_hist) > 0:
-                            MR_errors = np.abs(MR_hist - optimal_of) / max(optimal_of, 1e-9)
-                            max_MR_err = float(np.max(MR_errors))
-                        else:
-                            max_MR_err = 1.0
-                        
-                        # CRITICAL FIX: MUCH stronger penalties - thrust/O/F are PRIMARY!
-                        stability_penalty = max(0, 0.3 - min_stability) * 5.0  # Reduced penalty (stability is secondary)
-                        # Thrust penalty: MUCH stronger - 54.7% error is unacceptable!
-                        thrust_penalty = (max_thrust_err ** 2) * 500.0  # Squared error, heavy penalty
-                        # O/F penalty: MUCH stronger - 66.7% error is catastrophic!
-                        MR_penalty = (max_MR_err ** 2) * 1000.0  # Squared error, very heavy penalty
-                        # Also penalize average errors to encourage consistent performance
-                        if available_n >= 2:
-                            avg_thrust_penalty = (avg_thrust_err ** 2) * 200.0
-                        else:
-                            avg_thrust_penalty = 0.0
-                        
-                        # Objective: PRIMARY = thrust/O/F accuracy, SECONDARY = recession, TERTIARY = stability
-                        obj = (
-                            thrust_penalty +           # PRIMARY: Thrust accuracy (heavily weighted)
-                            MR_penalty +                # PRIMARY: O/F accuracy (heavily weighted)
-                            avg_thrust_penalty +        # PRIMARY: Consistent thrust
-                            recession_chamber * 100 +   # SECONDARY: Recession (reduced weight)
-                            recession_throat * 100 +    # SECONDARY: Recession (reduced weight)
-                            stability_penalty           # TERTIARY: Stability (lowest weight)
-                        )
-                        return obj
-                    except Exception as e:
-                        # Detailed logging to debug time-varying solver issues inside Layer 2
-                        import traceback
-                        log_status(
-                            "Layer 2 Objective Error",
-                            (
-                                f"Exception in layer2_objective: {repr(e)} | "
-                                f"x_layer2={np.array(x_layer2).tolist()} | "
-                                f"time_len={len(time_array)}, "
-                                f"P_O_len={len(P_tank_O_array)}, P_F_len={len(P_tank_F_array)} | "
-                                f"traceback={traceback.format_exc(limit=3).replace(chr(10), ' | ')}"
-                            ),
-                        )
-                        return 1e6
-                
-                # Optimize Layer 2
-                try:
-                    layer2_state["max_iter"] = 50  # Increased iterations for pressure optimization
-                    result_layer2 = scipy_minimize(
-                        layer2_objective,
-                        layer2_x0,
-                        method='L-BFGS-B',
-                        bounds=layer2_bounds,
-                        options={'maxiter': layer2_state["max_iter"], 'ftol': 1e-4},
-                        callback=layer2_callback,
-                    )
-                    
-                    # Update config with optimized values
-                    idx = 0
-                    # CRITICAL: Apply optimized pressure scales
-                    optimized_lox_scale = float(np.clip(result_layer2.x[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                    idx += 1
-                    optimized_fuel_scale = float(np.clip(result_layer2.x[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                    idx += 1
-                    # Scale pressure arrays for final evaluation
-                    P_tank_O_array = P_tank_O_array * optimized_lox_scale
-                    P_tank_F_array = P_tank_F_array * optimized_fuel_scale
-                    log_status("Layer 2", f"Optimized pressure scales: LOX {optimized_lox_scale:.3f}x, Fuel {optimized_fuel_scale:.3f}x")
-                    
-                    if ablative_cfg and ablative_cfg.enabled:
-                        optimized_config.ablative_cooling.initial_thickness = float(np.clip(result_layer2.x[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                        update_progress("Layer 2: Burn Candidate Optimization", 0.62, 
-                            f"Optimized ablative initial guess: {optimized_config.ablative_cooling.initial_thickness*1000:.2f}mm")
-                        idx += 1
-                    if graphite_cfg and graphite_cfg.enabled:
-                        optimized_config.graphite_insert.initial_thickness = float(np.clip(result_layer2.x[idx], layer2_bounds[idx][0], layer2_bounds[idx][1]))
-                        update_progress("Layer 2: Burn Candidate Optimization", 0.62, 
-                            f"Optimized graphite initial guess: {optimized_config.graphite_insert.initial_thickness*1000:.2f}mm")
-                except Exception as e:
-                    update_progress("Layer 2: Burn Candidate Optimization", 0.62, f"⚠️ Layer 2 optimization failed: {e}, using current values")
-            
-            # Now run time series with optimized initial guesses
-            update_progress("Layer 2: Burn Candidate", 0.64, "Running time series analysis with optimized guesses...")
-            optimized_runner = PintleEngineRunner(optimized_config)  # Recreate with updated config
-            # CRITICAL: Use fully-coupled solver for accurate time-varying analysis
-            # This provides accurate geometry evolution, reaction chemistry, and stability
+            # Run Layer 2a: Pressure curve optimization
+            update_progress("Layer 2a: Pressure Curve Optimization", 0.60, "Optimizing pressure curves for full burn...")
             try:
-                full_time_results = optimized_runner.evaluate_arrays_with_time(
-                    time_array,
-                    P_tank_O_array,
-                    P_tank_F_array,
-                    track_ablative_geometry=True,
-                    use_coupled_solver=True,  # Use fully-coupled solver for accurate results
+                optimized_config, time_array_2a, P_tank_O_optimized, P_tank_F_optimized, pressure_summary, pressure_success = run_layer2_pressure(
+                    optimized_config=optimized_config,
+                    initial_lox_pressure_pa=P_O_start_pa,
+                    initial_fuel_pressure_pa=P_F_start_pa,
+                    peak_thrust=target_thrust,
+                    target_apogee_m=target_apogee,
+                    rocket_dry_mass_kg=rocket_dry_mass_kg,
+                    max_lox_tank_capacity_kg=max_lox_tank_capacity_kg,
+                    max_fuel_tank_capacity_kg=max_fuel_tank_capacity_kg,
+                    target_burn_time=target_burn_time,
+                    n_time_points=n_time_points,
+                    update_progress=update_progress,
+                    log_status=log_status,
+                    min_pressure_pa=1e6,  # 1 MPa minimum
+                    optimal_of_ratio=optimal_of,
+                    min_stability_margin=min_stability,
                 )
-            except Exception as e1:
-                # If coupled solver fails, try without it as fallback
-                log_status("Layer 2 BurnCandidate", f"Coupled solver failed, trying fallback: {repr(e1)[:150]}")
-                try:
-                    full_time_results = optimized_runner.evaluate_arrays_with_time(
-                        time_array,
-                        P_tank_O_array,
-                        P_tank_F_array,
-                        track_ablative_geometry=True,
-                        use_coupled_solver=False,
-                    )
-                except Exception as e2:
-                    import traceback
-                    # Log detailed context
-                    log_status(
-                        "Layer 2 BurnCandidate Error",
-                        (
-                            f"Both solvers failed. Coupled: {repr(e1)[:100]} | Fallback: {repr(e2)[:100]} | "
-                            f"time_len={len(time_array)}, P_O_len={len(P_tank_O_array)}, "
-                            f"P_F_len={len(P_tank_F_array)}"
-                        ),
-                    )
-                    # Mark time-varying analysis as failed
-                    use_time_varying = False
-                    burn_candidate_valid = pressure_candidate_valid
-                    full_time_results = {}
+                
+                # Use optimized pressure curves for Layer 2b
+                if pressure_success and P_tank_O_optimized is not None and P_tank_F_optimized is not None:
+                    P_tank_O_array = P_tank_O_optimized
+                    P_tank_F_array = P_tank_F_optimized
+                    time_array = time_array_2a
+                    log_status("Layer 2a", f"✓ Pressure curves optimized successfully")
+                else:
+                    log_status("Layer 2a", f"⚠ Pressure optimization failed, using Layer 1 curves")
             except Exception as e:
-                import traceback
-                # Log detailed context so we can see exactly what failed inside the time-varying solver
-                log_status(
-                    "Layer 2 BurnCandidate Error",
-                    (
-                        f"Exception in burn-candidate time series: {repr(e)} | "
-                        f"time_len={len(time_array)}, P_O_len={len(P_tank_O_array)}, "
-                        f"P_F_len={len(P_tank_F_array)} | "
-                        f"ablative_thickness={getattr(getattr(optimized_config, 'ablative_cooling', None), 'initial_thickness', None)} | "
-                        f"graphite_thickness={getattr(getattr(optimized_config, 'graphite_insert', None), 'initial_thickness', None)} | "
-                        f"traceback={traceback.format_exc(limit=4).replace(chr(10), ' | ')}"
-                    ),
-                )
-                # Mark time-varying analysis as failed and fall back to sample-based behavior
-                use_time_varying = False
-                burn_candidate_valid = pressure_candidate_valid
-                full_time_results = {}
+                log_status("Layer 2a Error", f"Pressure optimization failed: {repr(e)[:200]}, using Layer 1 curves")
+            
+            # ==========================================================================
+            # LAYER 2b: BURN CANDIDATE OPTIMIZATION
+            # Optimize thermal protection (ablative/graphite) using optimized pressure curves
+            # ==========================================================================
+            # CRITICAL: Use the separate Layer 2 burn candidate function
+            # This ensures we're using the properly tested and maintained Layer 2 implementation
+            optimized_config, full_time_results, time_varying_summary, burn_candidate_valid = run_layer2_burn_candidate(
+                optimized_config=optimized_config,
+                time_array=time_array,
+                P_tank_O_array=P_tank_O_array,
+                P_tank_F_array=P_tank_F_array,
+                target_thrust=target_thrust,
+                thrust_tol=thrust_tol,
+                optimal_of=optimal_of,
+                n_time_points=n_time_points,
+                update_progress=update_progress,
+                log_status=log_status,
+                max_lox_P_psi=max_lox_P_psi,
+                max_fuel_P_psi=max_fuel_P_psi,
+            )
             
             # Use time-varying results for pressure curves
+            # Note: run_layer2_burn_candidate already returns time_varying_summary, but we rebuild it here
+            # to ensure consistency with the rest of the code that expects specific fields
             pressure_curves = {
                 "time": time_array,
                 "P_tank_O": P_tank_O_array,
@@ -2686,6 +2494,8 @@ def run_full_engine_optimization_with_flight_sim(
                 
                 # Re-run time series with optimized thermal protection to verify
                 update_progress("Layer 3: Burn Analysis", 0.74, "Re-running time series with optimized thermal protection...")
+                # CRITICAL: Initialize full_time_results_updated to original results as fallback
+                full_time_results_updated = full_time_results if 'full_time_results' in locals() else {}
                 try:
                     optimized_runner_updated = PintleEngineRunner(optimized_config)
                     full_time_results_updated = optimized_runner_updated.evaluate_arrays_with_time(
@@ -2706,17 +2516,20 @@ def run_full_engine_optimization_with_flight_sim(
                     pressure_curves["mdot_F"] = full_time_results_updated.get("mdot_F", pressure_curves["mdot_F"])
                 except Exception as e:
                     update_progress("Layer 3: Burn Analysis", 0.74, f"⚠️ Re-evaluation failed: {e}, using original results")
+                    # full_time_results_updated already set to fallback above
                 
                 # CRITICAL FIX: Relaxed validation - allow recession up to 95% of thickness
                 # Only fail if recession exceeds thickness (burn-through)
                 ablative_ok = True
                 graphite_ok = True
                 if ablative_cfg and ablative_cfg.enabled:
+                    # Use updated results (already initialized above)
                     max_recession_chamber = float(np.max(full_time_results_updated.get("recession_chamber", [0.0])))
                     thickness = optimized_config.ablative_cooling.initial_thickness
                     # Allow up to 95% recession (was 80%)
                     ablative_ok = max_recession_chamber <= thickness * 0.95
                 if graphite_cfg and graphite_cfg.enabled:
+                    # Use updated results (already initialized above)
                     max_recession_throat = float(np.max(full_time_results_updated.get("recession_throat", [0.0])))
                     thickness = optimized_config.graphite_insert.initial_thickness
                     # Allow up to 95% recession (was 80%)
@@ -2849,10 +2662,10 @@ def run_full_engine_optimization_with_flight_sim(
     # UI tab from unexpectedly triggering Layer 4 work.
     # CRITICAL FIX: Run Layer 4 if we have pressure curves, even if Layer 2/3 failed
     # This allows flight sim to run with Layer 1 results when time_varying is False
+    # Simplified condition: just need valid Layer 1 and pressure curves
     should_run_flight = (
         pressure_candidate_valid  # Layer 1 must pass
         and pressure_curves is not None  # Need pressure curves available
-        and (use_time_varying or not use_time_varying)  # Always allow if Layer 1 passed
     )
 
     if should_run_flight:
