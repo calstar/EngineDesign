@@ -9,9 +9,22 @@ from __future__ import annotations
 from typing import Dict, Any, Optional, Tuple, Callable
 import numpy as np
 import copy
+import sys
+from pathlib import Path
 
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_models.runner import PintleEngineRunner
+
+# Import chamber geometry functions for proper calculations
+_project_root = Path(__file__).resolve().parents[3]
+_chamber_path = _project_root / "chamber"
+if str(_chamber_path) not in sys.path:
+    sys.path.insert(0, str(_chamber_path))
+
+from chamber_geometry import (
+    chamber_length_calc,
+    contraction_length_horizontal_calc,
+)
 
 # Import from optimization_layers modules
 from .helpers import (

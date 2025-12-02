@@ -203,6 +203,70 @@ def _plot_segmented_pressure_preview(
         st.metric("Fuel End", f"{fuel_pressure[-1]:.0f} psi")
 
 
+def _display_optimized_parameters(
+    opt_results: Dict[str, Any],
+    opt_config: PintleEngineConfig
+) -> None:
+    """Display optimized parameters from optimization results."""
+    # Extract all parameters
+    params = extract_all_parameters(opt_config)
+    
+    # Display in columns
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("#### 🔧 Injector Parameters")
+        if "d_pintle_tip" in params:
+            st.caption(f"Pintle Tip Ø: {params['d_pintle_tip'] * 1000:.2f} mm")
+        if "h_gap" in params:
+            st.caption(f"Gap Height: {params['h_gap'] * 1000:.2f} mm")
+        if "n_orifices" in params:
+            st.caption(f"Orifices: {int(params['n_orifices'])}")
+        if "d_orifice" in params:
+            st.caption(f"Orifice Ø: {params['d_orifice'] * 1000:.2f} mm")
+        if "theta_orifice" in params:
+            st.caption(f"Orifice Angle: {params['theta_orifice']:.1f}°")
+    
+    with col2:
+        st.markdown("#### 🔥 Chamber Parameters")
+        if "A_throat" in params:
+            D_throat = np.sqrt(4 * params['A_throat'] / np.pi) * 1000
+            st.caption(f"Throat Ø: {D_throat:.2f} mm")
+        if "Lstar" in params:
+            st.caption(f"L*: {params['Lstar'] * 1000:.1f} mm")
+        if "chamber_diameter" in params:
+            st.caption(f"Diameter: {params['chamber_diameter'] * 1000:.1f} mm")
+        if "volume" in params:
+            st.caption(f"Volume: {params['volume'] * 1e6:.1f} cm³")
+    
+    with col3:
+        st.markdown("#### 🔺 Nozzle Parameters")
+        if "expansion_ratio" in params:
+            st.caption(f"Expansion Ratio: {params['expansion_ratio']:.2f}")
+        if "A_exit" in params:
+            D_exit = np.sqrt(4 * params['A_exit'] / np.pi) * 1000
+            st.caption(f"Exit Ø: {D_exit:.1f} mm")
+    
+    # Display performance metrics if available
+    performance = opt_results.get("performance", {})
+    if performance:
+        st.markdown("---")
+        st.markdown("#### 📊 Performance Metrics")
+        perf_col1, perf_col2, perf_col3, perf_col4 = st.columns(4)
+        with perf_col1:
+            if "thrust" in performance:
+                st.metric("Thrust", f"{performance['thrust']:.0f} N")
+        with perf_col2:
+            if "Isp" in performance:
+                st.metric("Isp", f"{performance['Isp']:.1f} s")
+        with perf_col3:
+            if "Pc" in performance:
+                st.metric("Chamber Pressure", f"{performance['Pc']/1e6:.2f} MPa")
+        with perf_col4:
+            if "MR" in performance:
+                st.metric("Mixture Ratio", f"{performance['MR']:.2f}")
+
+
 # =============================================================================
 # =============================================================================
 # MAIN UI FUNCTIONS
