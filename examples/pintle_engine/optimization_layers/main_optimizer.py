@@ -84,6 +84,9 @@ def run_full_engine_optimization_with_flight_sim(
     from pathlib import Path
     from datetime import datetime
     
+    # Get objective tolerance for early stopping
+    obj_tolerance = requirements.get("objective_tolerance", 0.1)
+    
     # Optimization state for progress tracking
     opt_state: Dict[str, Any] = {
         "iteration": 0,
@@ -91,6 +94,11 @@ def run_full_engine_optimization_with_flight_sim(
         "best_config": None,
         "history": [],
         "converged": False,
+        "objective_satisfied": False,  # Track if objective is below tolerance
+        "satisfied_obj": float('inf'),  # Best objective that satisfied tolerance
+        "satisfied_logged": False,  # Track if we've logged satisfaction
+        "stop_optimization": False,  # Flag to stop optimization immediately
+        "satisfied_eval_count": 0,  # Count of satisfied evaluations
     }
     log_flags: Dict[str, bool] = {
         "promoted_state_logged": False,
@@ -320,7 +328,9 @@ def run_full_engine_optimization_with_flight_sim(
     P_F_start_init = max_fuel_P_psi * 0.80
     
     # Initial guess: start with default_n_segments segments per tank
-    outer_diameter_init = np.clip(max_chamber_od * 0.9, min_outer_diameter, max_chamber_od)
+    # CRITICAL: Use 70% of max diameter for thinner, longer chambers
+    # Thinner chambers = longer chambers for same volume = better mixing and aesthetics
+    outer_diameter_init = np.clip(max_chamber_od * 0.70, min_outer_diameter, max_chamber_od)
     x0 = [
         A_throat_init,          # [0] A_throat (guaranteed > injector areas)
         (min_Lstar + max_Lstar) / 2,  # [1] Lstar
@@ -709,6 +719,24 @@ def run_full_engine_optimization_with_flight_sim(
                 progress, 
                 f"Iter {iteration}/{max_iterations} | Curr obj: {curr_obj_str} | Best obj: {best_obj_str}"
             )
+        
+        # CRITICAL: If already satisfied, return immediately without evaluation
+        # This makes the optimizer see no change and stop immediately
+        if opt_state.get('objective_satisfied', False):
+            satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', 0.0))
+            # Track how many times we've returned satisfied (to force stop after a few)
+            satisfied_count = opt_state.get('satisfied_eval_count', 0) + 1
+            opt_state['satisfied_eval_count'] = satisfied_count
+            
+            # After 3 satisfied evaluations, the optimizer should have converged
+            # If it hasn't, something is wrong - return a value that forces stop
+            if satisfied_count > 3:
+                # Force convergence by returning exactly the same value
+                # This should trigger ftol convergence
+                return satisfied_obj
+            
+            # Return the satisfied objective - optimizer will see no change and stop
+            return satisfied_obj
         
         config, curr_lox_end_ratio, curr_fuel_end_ratio = apply_x_to_config(x, config_base)
         
@@ -1118,6 +1146,35 @@ def run_full_engine_optimization_with_flight_sim(
             if not np.isfinite(obj):
                 obj = 1e6
             
+            # FIXED: Check if solution is actually valid for early stopping
+            # Don't stop just because objective is low - check actual errors
+            # Validation requires: thrust_error < 15%, of_error < 20%, stability acceptable
+            thrust_tol_validation = thrust_tol * 1.5  # 15% for validation
+            of_tol_validation = 0.20  # 20% for validation
+            
+            # Check if errors are actually acceptable (not just objective is low)
+            errors_acceptable = (
+                thrust_error < thrust_tol_validation and
+                of_error < of_tol_validation and
+                stability_score >= 0.5  # At least marginal stability
+            )
+            
+            # Only stop early if BOTH objective is low AND errors are acceptable
+            if np.isfinite(obj) and obj < obj_tolerance and errors_acceptable:
+                opt_state['objective_satisfied'] = True
+                opt_state['satisfied_obj'] = min(opt_state.get('satisfied_obj', float('inf')), obj)
+                # Log when we first achieve satisfaction
+                if not opt_state.get('satisfied_logged', False):
+                    log_status("Layer 1", f"✓ Solution valid! Obj={obj:.6e} < {obj_tolerance:.3f}, Thrust err: {thrust_error*100:.2f}% < {thrust_tol_validation*100:.0f}%, O/F err: {of_error*100:.2f}% < {of_tol_validation*100:.0f}% - STOPPING")
+                    opt_state['satisfied_logged'] = True
+                # CRITICAL: Set flag to stop optimization immediately
+                opt_state['stop_optimization'] = True
+                opt_state['force_maxfun_1'] = True
+            elif np.isfinite(obj) and obj < obj_tolerance and not errors_acceptable:
+                # Objective is low but errors aren't acceptable - keep optimizing
+                if opt_state.get("function_evaluations", 0) % 100 == 0:
+                    log_status("Layer 1", f"Objective low ({obj:.6e}) but errors not acceptable (thrust: {thrust_error*100:.1f}%, O/F: {of_error*100:.1f}%) - continuing optimization")
+            
             # CRITICAL FIX: Track valid evaluations for early termination
             if np.isfinite(obj) and obj < 1e3:  # Valid evaluation (not a penalty)
                 opt_state['consecutive_failures'] = 0
@@ -1279,6 +1336,13 @@ def run_full_engine_optimization_with_flight_sim(
     
     # Run optimization using L-BFGS-B (supports bounds natively, much better for high-dim)
     # This is far more efficient than Nelder-Mead for 19 dimensions
+    
+    # CRITICAL: If already satisfied, set maxfun=1 to stop immediately
+    maxfun_capped = max_iterations * 5
+    if opt_state.get('objective_satisfied', False) or opt_state.get('force_maxfun_1', False):
+        maxfun_capped = 1  # Force immediate stop
+        log_status("Layer 1", f"Objective satisfied - setting maxfun=1 to stop immediately")
+    
     result = minimize(
         objective,
         x0,
@@ -1286,16 +1350,18 @@ def run_full_engine_optimization_with_flight_sim(
         bounds=bounds,
         options={
             'maxiter': max_iterations,
-            'maxfun': max_iterations * 5,
-            'ftol': 1e-4,  # CRITICAL FIX: Relaxed from 1e-6 to 1e-4 for better convergence
-            'gtol': 1e-4,  # CRITICAL FIX: Relaxed from 1e-5 to 1e-4 for better convergence
+            'maxfun': maxfun_capped,
+            'ftol': obj_tolerance,  # FIXED: Use tolerance directly - stops when obj < tolerance
+            'gtol': 1e-5,
+            'maxls': 20,
             'disp': False,
         }
     )
     
-    # CRITICAL FIX: If optimizer didn't find a good solution, try multi-start approach
-    # This helps escape local minima and invalid regions
-    if opt_state["best_objective"] > 1.0:  # Still not converged (relaxed from 0.5 to 1.0)
+    # DISABLED: Multi-start restarts were causing instability and vertical jumps in plots
+    # The main optimization (L-BFGS-B) should be sufficient
+    # If we need more exploration, increase max_iterations instead
+    if False and opt_state["best_objective"] > 1.0:  # Disabled: was causing instability
         update_progress("Stage: Optimization Refinement", 0.48, "Trying multi-start optimization...")
         
         # Try 3 random restarts with perturbed initial guesses
