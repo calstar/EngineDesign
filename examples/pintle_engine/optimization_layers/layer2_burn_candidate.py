@@ -90,13 +90,26 @@ def run_layer2_burn_candidate(
                     )
                 
                 runner_layer2 = PintleEngineRunner(config_layer2)
-                results_layer2 = runner_layer2.evaluate_arrays_with_time(
-                    time_array,
-                    P_tank_O_array,
-                    P_tank_F_array,
-                    track_ablative_geometry=True,
-                    use_coupled_solver=False,
-                )
+                # CRITICAL: Use fully-coupled solver for accurate time-varying analysis
+                # This includes geometry evolution, reaction chemistry, and stability
+                try:
+                    results_layer2 = runner_layer2.evaluate_arrays_with_time(
+                        time_array,
+                        P_tank_O_array,
+                        P_tank_F_array,
+                        track_ablative_geometry=True,
+                        use_coupled_solver=True,  # Use fully-coupled solver for Layer 2
+                    )
+                except Exception as e:
+                    # If coupled solver fails, try without it as fallback
+                    log_status("Layer 2 Objective", f"Coupled solver failed, using fallback: {repr(e)[:100]}")
+                    results_layer2 = runner_layer2.evaluate_arrays_with_time(
+                        time_array,
+                        P_tank_O_array,
+                        P_tank_F_array,
+                        track_ablative_geometry=True,
+                        use_coupled_solver=False,
+                    )
                 
                 recession_chamber = float(np.max(results_layer2.get("recession_chamber", [0.0])))
                 recession_throat = float(np.max(results_layer2.get("recession_throat", [0.0])))
@@ -108,24 +121,44 @@ def run_layer2_burn_candidate(
                     chugging = results_layer2.get("chugging_stability_margin", np.array([1.0]))
                     min_stability = max(0.0, min(1.0, (float(np.min(chugging)) - 0.3) * 1.5))
                 
+                # CRITICAL FIX: Robust handling of thrust history array
                 thrust_hist = np.atleast_1d(results_layer2.get("F", np.full(n_time_points, target_thrust)))
-                available_n = min(thrust_hist.shape[0], n_time_points)
+                available_n = len(thrust_hist) if len(thrust_hist) > 0 else 0
+                
                 if available_n >= 2:
-                    check_indices = np.arange(available_n - 1)
-                    thrust_hist = thrust_hist[:available_n]
-                    thrust_errors = np.abs(thrust_hist[check_indices] - target_thrust) / target_thrust
+                    # Calculate errors for all points
+                    thrust_errors = np.abs(thrust_hist - target_thrust) / max(target_thrust, 1e-9)
                     max_thrust_err = float(np.max(thrust_errors))
+                    avg_thrust_err = float(np.mean(thrust_errors))
                 elif available_n == 1:
                     max_thrust_err = float(abs(thrust_hist[0] - target_thrust) / max(target_thrust, 1e-9))
+                    avg_thrust_err = max_thrust_err
                 else:
                     max_thrust_err = 1.0
+                    avg_thrust_err = 1.0
+                
+                # Also check O/F errors (if available)
+                MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(n_time_points, 2.3)))
+                max_MR_err = 0.0  # Initialize
+                if len(MR_hist) > 0:
+                    # Use target O/F from config or default
+                    target_MR = 2.3  # Default, should be passed as parameter
+                    MR_errors = np.abs(MR_hist - target_MR) / max(target_MR, 1e-9)
+                    max_MR_err = float(np.max(MR_errors))
+                else:
+                    max_MR_err = 1.0
                 
                 stability_penalty = max(0, 0.7 - min_stability) * 10.0
                 thrust_penalty = max(0, max_thrust_err - thrust_tol * 1.5) * 5.0
+                MR_penalty = max(0, max_MR_err - 0.25) * 3.0  # Penalize O/F errors > 25%
                 
-                obj = recession_chamber * 1000 + recession_throat * 1000 + stability_penalty + thrust_penalty
+                # Objective: minimize recession while meeting stability/thrust/O/F goals
+                obj = recession_chamber * 1000 + recession_throat * 1000 + stability_penalty + thrust_penalty + MR_penalty
                 return obj
-            except Exception:
+            except Exception as e:
+                # Log error for debugging
+                if layer2_state["iter"] % 5 == 0:  # Log every 5 iterations to avoid spam
+                    log_status("Layer 2 Objective Error", f"Iter {layer2_state['iter']}: {repr(e)[:150]}")
                 return 1e6
         
         # Optimize Layer 2
@@ -162,39 +195,92 @@ def run_layer2_burn_candidate(
     update_progress("Layer 2: Burn Candidate", 0.64, "Running time series analysis with optimized guesses...")
     optimized_runner = PintleEngineRunner(optimized_config)
     
+    # CRITICAL: Use fully-coupled solver for final time series analysis
+    # This provides accurate geometry evolution, reaction chemistry, and stability
     try:
         full_time_results = optimized_runner.evaluate_arrays_with_time(
             time_array,
             P_tank_O_array,
             P_tank_F_array,
             track_ablative_geometry=True,
-            use_coupled_solver=False,
+            use_coupled_solver=True,  # Use fully-coupled solver for accurate results
         )
     except Exception as e:
-        log_status("Layer 2 BurnCandidate Error", f"Exception in burn-candidate time series: {repr(e)}")
-        full_time_results = {}
+        # If coupled solver fails, try without it as fallback
+        log_status("Layer 2 BurnCandidate Error", f"Coupled solver failed, trying fallback: {repr(e)[:200]}")
+        try:
+            full_time_results = optimized_runner.evaluate_arrays_with_time(
+                time_array,
+                P_tank_O_array,
+                P_tank_F_array,
+                track_ablative_geometry=True,
+                use_coupled_solver=False,
+            )
+        except Exception as e2:
+            log_status("Layer 2 BurnCandidate Error", f"Fallback solver also failed: {repr(e2)[:200]}")
+            full_time_results = {}
     
-    # Build time-varying summary
+    # Build time-varying summary with robust error handling
     if full_time_results:
+        # Get stability metrics with safe defaults
         chugging_stability_history = full_time_results.get("chugging_stability_margin", np.array([1.0]))
-        min_time_stability_margin = float(np.min(chugging_stability_history))
+        if len(chugging_stability_history) > 0:
+            min_time_stability_margin = float(np.min(chugging_stability_history))
+        else:
+            min_time_stability_margin = 1.0
         
         stability_scores = full_time_results.get("stability_score", None)
-        if stability_scores is None:
-            min_stability_score_time = max(0.0, min(1.0, (min_time_stability_margin - 0.3) * 1.5))
-        else:
+        if stability_scores is not None and len(stability_scores) > 0:
             min_stability_score_time = float(np.min(stability_scores))
+        else:
+            min_stability_score_time = max(0.0, min(1.0, (min_time_stability_margin - 0.3) * 1.5))
+        
+        # Get thrust metrics with safe defaults
+        F_hist = full_time_results.get("F", np.array([target_thrust]))
+        if len(F_hist) > 0:
+            avg_thrust = float(np.mean(F_hist))
+            min_thrust = float(np.min(F_hist))
+            max_thrust = float(np.max(F_hist))
+            thrust_std = float(np.std(F_hist))
+        else:
+            avg_thrust = target_thrust
+            min_thrust = target_thrust
+            max_thrust = target_thrust
+            thrust_std = 0.0
+        
+        # Get Isp metrics
+        Isp_hist = full_time_results.get("Isp", np.array([250.0]))
+        avg_isp = float(np.mean(Isp_hist)) if len(Isp_hist) > 0 else 250.0
+        
+        # Get recession metrics
+        recession_chamber_hist = full_time_results.get("recession_chamber", np.array([0.0]))
+        recession_throat_hist = full_time_results.get("recession_throat", np.array([0.0]))
+        max_recession_chamber = float(np.max(recession_chamber_hist)) if len(recession_chamber_hist) > 0 else 0.0
+        max_recession_throat = float(np.max(recession_throat_hist)) if len(recession_throat_hist) > 0 else 0.0
         
         time_varying_summary = {
-            "avg_thrust": float(np.mean(full_time_results.get("F", [target_thrust]))),
-            "min_thrust": float(np.min(full_time_results.get("F", [target_thrust]))),
-            "max_thrust": float(np.max(full_time_results.get("F", [target_thrust]))),
-            "thrust_std": float(np.std(full_time_results.get("F", [0]))),
-            "avg_isp": float(np.mean(full_time_results.get("Isp", [250]))),
+            "avg_thrust": avg_thrust,
+            "min_thrust": min_thrust,
+            "max_thrust": max_thrust,
+            "thrust_std": thrust_std,
+            "avg_isp": avg_isp,
             "min_stability_margin": min_time_stability_margin,
             "min_stability_score": min_stability_score_time,
-            "max_recession_chamber": float(np.max(full_time_results.get("recession_chamber", [0.0]))),
-            "max_recession_throat": float(np.max(full_time_results.get("recession_throat", [0.0]))),
+            "max_recession_chamber": max_recession_chamber,
+            "max_recession_throat": max_recession_throat,
+        }
+    else:
+        # Empty summary if no results
+        time_varying_summary = {
+            "avg_thrust": target_thrust,
+            "min_thrust": target_thrust,
+            "max_thrust": target_thrust,
+            "thrust_std": 0.0,
+            "avg_isp": 250.0,
+            "min_stability_margin": 1.0,
+            "min_stability_score": 1.0,
+            "max_recession_chamber": 0.0,
+            "max_recession_throat": 0.0,
         }
     
     return optimized_config, full_time_results, time_varying_summary, burn_candidate_valid

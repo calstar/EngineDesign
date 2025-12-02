@@ -63,20 +63,25 @@ def create_layer1_apply_x_to_config(
         ablative_thickness = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
         graphite_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
         
+        # CRITICAL: Extract initial pressures (absolute values in psi)
+        P_O_start_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
+        P_F_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
+        
         # Extract segment counts
-        n_segments_lox = int(round(np.clip(x[9], bounds[9][0], bounds[9][1])))
-        n_segments_fuel = int(round(np.clip(x[10], bounds[10][0], bounds[10][1])))
+        n_segments_lox = int(round(np.clip(x[11], bounds[11][0], bounds[11][1])))
+        n_segments_fuel = int(round(np.clip(x[12], bounds[12][0], bounds[12][1])))
         
         # Extract segment parameters for LOX
         vars_per_segment = 5
-        idx_base_lox = 11
+        idx_base_lox = 13  # Updated index after initial pressures
         max_lox_idx = min(idx_base_lox + max_segments_per_tank * vars_per_segment, len(x))
         x_lox_segments = x[idx_base_lox:max_lox_idx]
         n_segments_lox = min(n_segments_lox, len(x_lox_segments) // vars_per_segment)
         if n_segments_lox < 1:
             n_segments_lox = 1
+        # CRITICAL: For regulation, segments use ratios relative to INITIAL pressure, not max
         lox_segments = segments_from_optimizer_vars(
-            x_lox_segments, n_segments_lox, max_lox_P_psi, target_burn_time
+            x_lox_segments, n_segments_lox, P_O_start_psi, target_burn_time, use_initial_as_base=True
         )
         
         # Extract segment parameters for Fuel
@@ -86,8 +91,9 @@ def create_layer1_apply_x_to_config(
         n_segments_fuel = min(n_segments_fuel, len(x_fuel_segments) // vars_per_segment)
         if n_segments_fuel < 1:
             n_segments_fuel = 1
+        # CRITICAL: For regulation, segments use ratios relative to INITIAL pressure, not max
         fuel_segments = segments_from_optimizer_vars(
-            x_fuel_segments, n_segments_fuel, max_fuel_P_psi, target_burn_time
+            x_fuel_segments, n_segments_fuel, P_F_start_psi, target_burn_time, use_initial_as_base=True
         )
         
         # Calculate end ratios

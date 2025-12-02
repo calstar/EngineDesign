@@ -14,6 +14,12 @@ import copy
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_models.runner import PintleEngineRunner
 
+# Import chamber geometry visualizer
+from pintle_pipeline.chamber_geometry_visualizer import (
+    calculate_chamber_geometry_clear,
+    plot_chamber_geometry_clear,
+)
+
 # Import from optimization_layers
 from .. import (
     extract_all_parameters,

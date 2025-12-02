@@ -84,8 +84,9 @@ def generate_segmented_pressure_curve(
 def segments_from_optimizer_vars(
     x_segments: np.ndarray,
     n_segments: int,
-    max_pressure_psi: float,
+    base_pressure_psi: float,
     target_burn_time: float,
+    use_initial_as_base: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Convert optimizer variables to segment list.
@@ -93,15 +94,17 @@ def segments_from_optimizer_vars(
     For each segment, optimizer provides:
     - type (0=linear, 1=blowdown) - rounded to int
     - duration_ratio (0-1, fraction of total burn time)
-    - start_pressure_ratio (0.3-1.0, ratio of max pressure)
-    - end_pressure_ratio (0.3-1.0, ratio of max pressure)
+    - start_pressure_ratio (0.7-1.0 for regulation, 0.3-1.0 for blowdown, ratio of base pressure)
+    - end_pressure_ratio (0.7-1.0 for regulation, 0.3-1.0 for blowdown, ratio of base pressure)
     - decay_tau_ratio (0-1, fraction of segment duration, only for blowdown)
     
     Args:
         x_segments: Array of optimizer variables for segments
         n_segments: Number of segments (1-20)
-        max_pressure_psi: Maximum pressure [psi]
+        base_pressure_psi: Base pressure [psi] - either max (blowdown) or initial (regulation)
         target_burn_time: Total burn time [s]
+        use_initial_as_base: If True, base_pressure_psi is initial pressure (for regulation)
+                           If False, base_pressure_psi is max pressure (for blowdown)
     
     Returns:
         List of segment dicts
@@ -139,17 +142,34 @@ def segments_from_optimizer_vars(
         seg_type = "blowdown" if seg_type_val >= 0.5 else "linear"
         duration = duration_ratios[i] * target_burn_time if i < len(duration_ratios) else target_burn_time / n_segments
         
-        # Ensure end_ratio <= start_ratio (physically valid blowdown)
-        start_ratio = float(np.clip(x_segments[idx_base + 2], 0.1, 1.0))
-        end_ratio_raw = float(np.clip(x_segments[idx_base + 3], 0.1, 1.0))
-        end_ratio = min(end_ratio_raw, start_ratio)  # Enforce end <= start
+        # CRITICAL: For regulation, pressure ratios are relative to INITIAL pressure
+        # For regulation, we want start_ratio ≈ end_ratio ≈ 1.0 (flat profile)
+        # For blowdown, we allow end_ratio < start_ratio
+        if use_initial_as_base:
+            # Regulation mode: ratios relative to initial pressure (0.7-1.0)
+            start_ratio = float(np.clip(x_segments[idx_base + 2], 0.7, 1.0))
+            end_ratio_raw = float(np.clip(x_segments[idx_base + 3], 0.7, 1.0))
+            # For regulation, allow slight drop but prefer flat (end ≈ start)
+            # Don't enforce end <= start strictly - optimizer can explore
+            end_ratio = end_ratio_raw  # Allow end to be slightly higher for flexibility
+        else:
+            # Blowdown mode: ratios relative to max pressure (0.1-1.0)
+            start_ratio = float(np.clip(x_segments[idx_base + 2], 0.1, 1.0))
+            end_ratio_raw = float(np.clip(x_segments[idx_base + 3], 0.1, 1.0))
+            # Ensure end <= start for blowdown (physically valid)
+            end_ratio = min(end_ratio_raw, start_ratio)
+        
         tau_ratio = float(np.clip(x_segments[idx_base + 4], 0.1, 1.0))
+        
+        # Convert ratios to absolute pressures using base pressure
+        start_pressure_psi = start_ratio * base_pressure_psi
+        end_pressure_psi = end_ratio * base_pressure_psi
         
         seg = {
             "type": seg_type,
             "duration": duration,
-            "start_pressure_psi": max_pressure_psi * start_ratio,
-            "end_pressure_psi": max_pressure_psi * end_ratio,
+            "start_pressure_psi": start_pressure_psi,
+            "end_pressure_psi": end_pressure_psi,
         }
         
         if seg_type == "blowdown":
