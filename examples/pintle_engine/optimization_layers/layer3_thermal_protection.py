@@ -185,6 +185,10 @@ def run_layer3_thermal_protection(
                     return 1e6
 
                 config_layer3 = copy.deepcopy(optimized_config)
+                # CRITICAL: Always enable turbulence coupling for consistent physics
+                if hasattr(config_layer3, 'combustion') and hasattr(config_layer3.combustion, 'efficiency'):
+                    config_layer3.combustion.efficiency.use_turbulence_coupling = True
+                
                 idx_param = 0
                 chosen_thicknesses: list[float] = []
 
@@ -208,6 +212,25 @@ def run_layer3_thermal_protection(
                     config_layer3.graphite_insert.initial_thickness = t_gra
                     chosen_thicknesses.append(t_gra)
 
+                # Verify config was updated correctly before creating runner
+                if ablative_cfg and ablative_cfg.enabled:
+                    if abs(config_layer3.ablative_cooling.initial_thickness - chosen_thicknesses[0]) > 1e-9:
+                        layer3_logger.warning(
+                            "Eval %03d: Config ablative thickness mismatch! Expected %.6f, got %.6f",
+                            eval_idx,
+                            chosen_thicknesses[0],
+                            config_layer3.ablative_cooling.initial_thickness,
+                        )
+                if graphite_cfg and graphite_cfg.enabled:
+                    gra_idx = 0 if not ablative_cfg or not ablative_cfg.enabled else 1
+                    if abs(config_layer3.graphite_insert.initial_thickness - chosen_thicknesses[gra_idx]) > 1e-9:
+                        layer3_logger.warning(
+                            "Eval %03d: Config graphite thickness mismatch! Expected %.6f, got %.6f",
+                            eval_idx,
+                            chosen_thicknesses[gra_idx],
+                            config_layer3.graphite_insert.initial_thickness,
+                        )
+
                 # Check cache before running the expensive time solver.
                 cache_key = tuple(chosen_thicknesses)
                 if cache_key in _objective_cache:
@@ -222,13 +245,38 @@ def run_layer3_thermal_protection(
                     )
                     return obj_cached
 
+                # CRITICAL: Create a fresh PintleEngineRunner with the updated config for each evaluation
+                # This ensures the runner's internal state (solver, geometry, etc.) reflects the new thicknesses
                 runner_layer3 = PintleEngineRunner(config_layer3)
+                
+                # Verify runner is using the correct config thicknesses
+                if ablative_cfg and ablative_cfg.enabled:
+                    runner_abl_thick = runner_layer3.config.ablative_cooling.initial_thickness
+                    if abs(runner_abl_thick - chosen_thicknesses[0]) > 1e-9:
+                        layer3_logger.error(
+                            "Eval %03d: Runner config ablative thickness mismatch! Expected %.6f, got %.6f",
+                            eval_idx,
+                            chosen_thicknesses[0],
+                            runner_abl_thick,
+                        )
+                if graphite_cfg and graphite_cfg.enabled:
+                    gra_idx = 0 if not ablative_cfg or not ablative_cfg.enabled else 1
+                    runner_gra_thick = runner_layer3.config.graphite_insert.initial_thickness
+                    if abs(runner_gra_thick - chosen_thicknesses[gra_idx]) > 1e-9:
+                        layer3_logger.error(
+                            "Eval %03d: Runner config graphite thickness mismatch! Expected %.6f, got %.6f",
+                            eval_idx,
+                            chosen_thicknesses[gra_idx],
+                            runner_gra_thick,
+                        )
+                # CRITICAL: Use same solver settings as ui_app.py for consistency
+                # During optimization, we use fully-coupled solver to match final results
                 results_layer3 = runner_layer3.evaluate_arrays_with_time(
                     time_array,
                     P_tank_O_array,
                     P_tank_F_array,
-                    track_ablative_geometry=True,
-                    use_coupled_solver=False,
+                    track_ablative_geometry=True,  # Enable ablative geometry tracking
+                    use_coupled_solver=True,  # Use fully-coupled solver (matches ui_app.py and final analysis)
                 )
 
                 recession_chamber = float(np.max(np.atleast_1d(results_layer3.get("recession_chamber", [0.0]))))
@@ -488,13 +536,50 @@ def run_layer3_thermal_protection(
         # Re-run time series with optimized thermal protection to verify
         update_progress("Layer 3: Burn Analysis", 0.74, "Re-running time series with optimized thermal protection...")
         try:
+            # CRITICAL: Ensure ablative and graphite tracking are enabled in config for complete time series
+            if ablative_cfg and ablative_cfg.enabled:
+                optimized_config.ablative_cooling.track_geometry_evolution = True
+            if graphite_cfg and graphite_cfg.enabled:
+                # Ensure graphite insert is properly configured for tracking
+                if hasattr(optimized_config.graphite_insert, 'enabled'):
+                    optimized_config.graphite_insert.enabled = True
+            
+            # CRITICAL: Always enable turbulence coupling for consistent physics
+            if hasattr(optimized_config, 'combustion') and hasattr(optimized_config.combustion, 'efficiency'):
+                optimized_config.combustion.efficiency.use_turbulence_coupling = True
+            
+            # CRITICAL: Create a fresh PintleEngineRunner with the optimized config
+            # This ensures the runner uses the final optimized thicknesses, not any cached values
             optimized_runner_updated = PintleEngineRunner(optimized_config)
+            
+            # Verify runner has correct optimized thicknesses
+            if ablative_cfg and ablative_cfg.enabled:
+                runner_abl = optimized_runner_updated.config.ablative_cooling.initial_thickness
+                config_abl = optimized_config.ablative_cooling.initial_thickness
+                if abs(runner_abl - config_abl) > 1e-9:
+                    layer3_logger.error(
+                        "Post-opt runner ablative thickness mismatch! Config: %.6f, Runner: %.6f",
+                        config_abl,
+                        runner_abl,
+                    )
+            if graphite_cfg and graphite_cfg.enabled:
+                runner_gra = optimized_runner_updated.config.graphite_insert.initial_thickness
+                config_gra = optimized_config.graphite_insert.initial_thickness
+                if abs(runner_gra - config_gra) > 1e-9:
+                    layer3_logger.error(
+                        "Post-opt runner graphite thickness mismatch! Config: %.6f, Runner: %.6f",
+                        config_gra,
+                        runner_gra,
+                    )
+            
+            # CRITICAL: Re-run with all tracking features enabled for complete time series analysis
+            # This ensures we get recession rates, cumulative recession, L*, throat area evolution, etc.
             full_time_results_updated = optimized_runner_updated.evaluate_arrays_with_time(
                 time_array,
                 P_tank_O_array,
                 P_tank_F_array,
-                track_ablative_geometry=True,
-                use_coupled_solver=True,
+                track_ablative_geometry=True,  # Enable ablative geometry tracking (L*, volume, recession)
+                use_coupled_solver=True,  # Use fully-coupled solver for accurate results
             )
             updated_time_results = full_time_results_updated
             thermal_results["max_recession_chamber"] = float(
@@ -558,6 +643,24 @@ def run_layer3_thermal_protection(
             )
         )
         log_status("Layer 3", status_msg)
+
+    # CRITICAL: Final verification - ensure optimized_config has the optimized thicknesses
+    # This is the authoritative source that will be returned and saved to session state
+    if ablative_cfg and ablative_cfg.enabled:
+        if "optimized_ablative_thickness" in thermal_results:
+            optimized_config.ablative_cooling.initial_thickness = thermal_results["optimized_ablative_thickness"]
+            layer3_logger.info(
+                "Final optimized ablative thickness in config: %.3f mm",
+                optimized_config.ablative_cooling.initial_thickness * 1000.0,
+            )
+    
+    if graphite_cfg and graphite_cfg.enabled:
+        if "optimized_graphite_thickness" in thermal_results:
+            optimized_config.graphite_insert.initial_thickness = thermal_results["optimized_graphite_thickness"]
+            layer3_logger.info(
+                "Final optimized graphite thickness in config: %.3f mm",
+                optimized_config.graphite_insert.initial_thickness * 1000.0,
+            )
 
     layer3_logger.info("Layer 3 optimization complete. Log saved to: %s", log_file_path)
     # Clean up handlers so repeated calls don't leak file descriptors

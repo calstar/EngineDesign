@@ -211,6 +211,11 @@ def run_full_engine_optimization_with_flight_sim(
         if hasattr(config_base.injector.geometry, 'lox'):
             config_base.injector.geometry.lox.theta_orifice = 90.0
     
+    # CRITICAL: Always enable turbulence coupling in optimizer for consistent physics
+    # This ensures all optimization layers use the same coupling settings
+    if hasattr(config_base, 'combustion') and hasattr(config_base.combustion, 'efficiency'):
+        config_base.combustion.efficiency.use_turbulence_coupling = True
+    
     # ==========================================================================
     # ==========================================================================
     # MAIN OPTIMIZATION SETUP

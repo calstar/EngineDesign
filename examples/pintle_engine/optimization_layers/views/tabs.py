@@ -2860,6 +2860,10 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 "thermal_results": thermal_results,
             }
             
+            # CRITICAL: Save as the "final" optimized config (Layer 3 is the final thermal protection step)
+            st.session_state["final_optimized_config"] = optimized_config
+            st.session_state["final_chamber_config"] = optimized_config.model_dump(exclude_none=False)
+            
             # Update config_dict
             config_dict_updated = optimized_config.model_dump(exclude_none=False)
             st.session_state["config_dict"] = config_dict_updated
@@ -2942,7 +2946,27 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             pass
         
         # Show final thermal protection thicknesses
+        # Get thermal_results first (most authoritative source for Layer 3 optimized values)
+        thermal_results_data = None
+        if isinstance(layer3_results, dict):
+            thermal_results_data = layer3_results.get("thermal_results", None)
+        
+        # CRITICAL: Get optimized config and ensure it has Layer 3 optimized thicknesses
         opt_config = st.session_state.get("optimized_config", config_obj)
+        
+        # Update opt_config with optimized thicknesses from thermal_results if available
+        if opt_config and thermal_results_data:
+            import copy as copy_module
+            opt_config = copy_module.deepcopy(opt_config)  # Work with a copy to avoid side effects
+            
+            if "optimized_ablative_thickness" in thermal_results_data:
+                if opt_config.ablative_cooling and opt_config.ablative_cooling.enabled:
+                    opt_config.ablative_cooling.initial_thickness = thermal_results_data["optimized_ablative_thickness"]
+            
+            if "optimized_graphite_thickness" in thermal_results_data:
+                if opt_config.graphite_insert and opt_config.graphite_insert.enabled:
+                    opt_config.graphite_insert.initial_thickness = thermal_results_data["optimized_graphite_thickness"]
+        
         if opt_config:
             ablative_cfg = opt_config.ablative_cooling if hasattr(opt_config, 'ablative_cooling') else None
             graphite_cfg = opt_config.graphite_insert if hasattr(opt_config, 'graphite_insert') else None
@@ -2951,16 +2975,21 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             col1, col2 = st.columns(2)
             with col1:
                 if ablative_cfg and ablative_cfg.enabled:
-                    st.metric("Ablative Thickness", f"{ablative_cfg.initial_thickness * 1000:.2f} mm")
+                    # Use optimized thickness from thermal_results (already updated in opt_config above)
+                    thickness = ablative_cfg.initial_thickness
+                    st.metric("Ablative Thickness", f"{thickness * 1000:.2f} mm")
                     st.caption("20% margin over max recession")
             with col2:
                 if graphite_cfg and graphite_cfg.enabled:
-                    st.metric("Graphite Thickness", f"{graphite_cfg.initial_thickness * 1000:.2f} mm")
+                    # Use optimized thickness from thermal_results (already updated in opt_config above)
+                    thickness = graphite_cfg.initial_thickness
+                    st.metric("Graphite Thickness", f"{thickness * 1000:.2f} mm")
                     st.caption("20% margin over max recession")
             
             # Show recession data
-            # Prefer time-varying results from the main optimization_results dict,
-            # but fall back to any cached layer3_results if available.
+            # Get recession values from thermal_results (primary source) or time_varying (fallback)
+            # Note: thermal_results_data was already retrieved above for thickness display
+            
             time_varying = None
             if optimization_results:
                 time_varying = optimization_results.get("time_varying_results", None)
@@ -2968,21 +2997,298 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 if isinstance(layer3_results, dict):
                     # layer3_results may either be the full result dict or just
                     # the time-varying portion; handle both cases.
-                    time_varying = layer3_results.get("time_varying_results", None) or layer3_results
+                    time_varying = layer3_results.get("time_varying_results", None) or layer3_results.get("updated_time_results", None)
                 else:
                     time_varying = layer3_results
-            if time_varying:
+            
+            # Display recession analysis if we have the data
+            if thermal_results_data or time_varying:
                 st.markdown("#### Recession Analysis")
-                if "max_recession_chamber" in time_varying and ablative_cfg:
-                    max_recess = time_varying['max_recession_chamber']
-                    thickness = ablative_cfg.initial_thickness
-                    margin_pct = ((thickness - max_recess) / thickness * 100) if thickness > 0 else 0
-                    st.caption(f"Max Chamber Recession: {max_recess * 1000:.2f} mm | Margin: {margin_pct:.1f}%")
-                if "max_recession_throat" in time_varying and graphite_cfg:
-                    max_recess = time_varying['max_recession_throat']
-                    thickness = graphite_cfg.initial_thickness
-                    margin_pct = ((thickness - max_recess) / thickness * 100) if thickness > 0 else 0
-                    st.caption(f"Max Throat Recession: {max_recess * 1000:.2f} mm | Margin: {margin_pct:.1f}%")
+                # Prefer thermal_results for recession values (they're the authoritative source from Layer 3)
+                if ablative_cfg:
+                    max_recess = None
+                    if thermal_results_data and "max_recession_chamber" in thermal_results_data:
+                        max_recess = thermal_results_data['max_recession_chamber']
+                    elif time_varying and "max_recession_chamber" in time_varying:
+                        max_recess = time_varying['max_recession_chamber']
+                    
+                    if max_recess is not None:
+                        # Use optimized thickness (already updated in opt_config)
+                        thickness = ablative_cfg.initial_thickness
+                        margin_pct = ((thickness - max_recess) / thickness * 100) if thickness > 0 else 0
+                        st.caption(f"Max Chamber Recession: {max_recess * 1000:.2f} mm | Margin: {margin_pct:.1f}%")
+                
+                if graphite_cfg:
+                    max_recess = None
+                    if thermal_results_data and "max_recession_throat" in thermal_results_data:
+                        max_recess = thermal_results_data['max_recession_throat']
+                    elif time_varying and "max_recession_throat" in time_varying:
+                        max_recess = time_varying['max_recession_throat']
+                    
+                    if max_recess is not None:
+                        # Use optimized thickness (already updated in opt_config)
+                        thickness = graphite_cfg.initial_thickness
+                        margin_pct = ((thickness - max_recess) / thickness * 100) if thickness > 0 else 0
+                        st.caption(f"Max Throat Recession: {max_recess * 1000:.2f} mm | Margin: {margin_pct:.1f}%")
+            
+            # Display final chamber geometry visualization with optimized thermal protection
+            # This is the "final" chamber design after Layer 3 optimization
+            st.markdown("#### Final Chamber Geometry (Layer 3 Result)")
+            try:
+                from .helpers import _display_chamber_geometry_plot
+                
+                # CRITICAL: Use opt_config which already has optimized thicknesses updated above
+                # No need to update again - opt_config was already updated with thermal_results values
+                final_config_for_viz = opt_config
+                
+                # Create a mock optimization_results dict for the visualizer
+                # It needs performance data for Cf calculation
+                mock_opt_results = {}
+                if optimization_results:
+                    mock_opt_results = optimization_results.copy()
+                elif layer3_results and isinstance(layer3_results, dict):
+                    # Try to extract performance from time-varying results
+                    time_varying = layer3_results.get("updated_time_results", {})
+                    if time_varying:
+                        # Calculate average thrust for Cf
+                        thrust_array = time_varying.get("F", np.array([0.0]))
+                        Pc_array = time_varying.get("Pc", np.array([2e6]))
+                        if isinstance(thrust_array, np.ndarray) and len(thrust_array) > 0:
+                            avg_thrust = float(np.mean(thrust_array))
+                            avg_Pc = float(np.mean(Pc_array))
+                            mock_opt_results["performance"] = {
+                                "F": avg_thrust,
+                                "Pc": avg_Pc,
+                            }
+                
+                # Use the config with optimized thicknesses (already updated above)
+                _display_chamber_geometry_plot(final_config_for_viz, mock_opt_results)
+                
+                # CRITICAL: Save the final optimized config to session state as the "final" chamber
+                # This ensures other tabs can access the Layer 3 optimized design
+                # opt_config already has the optimized thicknesses from thermal_results
+                st.session_state["final_optimized_config"] = opt_config
+                st.session_state["final_chamber_config"] = opt_config.model_dump(exclude_none=False)
+                
+                # Also update the main optimized_config in session state to ensure consistency
+                st.session_state["optimized_config"] = opt_config
+                st.session_state["config_dict"] = opt_config.model_dump(exclude_none=False)
+                
+                st.info("✅ Final chamber geometry with Layer 3 optimized thicknesses saved to session state")
+            except Exception as e:
+                st.warning(f"Could not render final chamber geometry visualization: {e}")
+                import traceback
+                st.code(traceback.format_exc())
+            
+            # Display time series analysis plots from Layer 3 final run
+            if layer3_results and isinstance(layer3_results, dict):
+                time_varying_final = layer3_results.get("updated_time_results", {})
+                if time_varying_final and len(time_varying_final) > 0:
+                    st.markdown("#### Time Series Analysis (Layer 3 Final Configuration)")
+                    
+                    # Extract time array
+                    time_array = None
+                    if "time" in time_varying_final:
+                        time_array = np.asarray(time_varying_final["time"])
+                    elif isinstance(time_varying_final, dict) and any(isinstance(v, np.ndarray) for v in time_varying_final.values()):
+                        # Try to infer time from array length
+                        for key, val in time_varying_final.items():
+                            if isinstance(val, np.ndarray) and len(val) > 0:
+                                time_array = np.linspace(0, 10.0, len(val))  # Default burn time
+                                break
+                    
+                    if time_array is not None and len(time_array) > 0:
+                        # Extract data arrays
+                        thrust = np.asarray(time_varying_final.get("F", []))
+                        Pc = np.asarray(time_varying_final.get("Pc", []))
+                        Lstar = np.asarray(time_varying_final.get("Lstar", []))
+                        A_throat = np.asarray(time_varying_final.get("A_throat", []))
+                        recession_chamber = np.asarray(time_varying_final.get("recession_chamber", []))
+                        recession_throat = np.asarray(time_varying_final.get("recession_throat", []))
+                        
+                        # Extract recession rates from diagnostics if available
+                        diagnostics_list = time_varying_final.get("diagnostics", [])
+                        ablative_recession_rate = []
+                        graphite_recession_rate_thermal = []
+                        graphite_recession_rate_oxidation = []
+                        
+                        for diag in diagnostics_list if isinstance(diagnostics_list, list) else []:
+                            if isinstance(diag, dict):
+                                cooling = diag.get("cooling", {})
+                                ablative = cooling.get("ablative", {}) if isinstance(cooling, dict) else {}
+                                if ablative and isinstance(ablative, dict):
+                                    rate = ablative.get("recession_rate", 0.0)
+                                    ablative_recession_rate.append(rate * 1e6 if rate else 0.0)  # Convert to µm/s
+                                else:
+                                    ablative_recession_rate.append(0.0)
+                                
+                                # Graphite recession rates
+                                graphite = cooling.get("graphite", {}) if isinstance(cooling, dict) else {}
+                                if graphite and isinstance(graphite, dict):
+                                    thermal_rate = graphite.get("recession_rate_thermal", 0.0)
+                                    oxidation_rate = graphite.get("oxidation_rate", 0.0)
+                                    graphite_recession_rate_thermal.append(thermal_rate * 1e6 if thermal_rate else 0.0)
+                                    graphite_recession_rate_oxidation.append(oxidation_rate * 1e6 if oxidation_rate else 0.0)
+                                else:
+                                    graphite_recession_rate_thermal.append(0.0)
+                                    graphite_recession_rate_oxidation.append(0.0)
+                            else:
+                                ablative_recession_rate.append(0.0)
+                                graphite_recession_rate_thermal.append(0.0)
+                                graphite_recession_rate_oxidation.append(0.0)
+                        
+                        # Ensure arrays are same length
+                        n_points = len(time_array)
+                        if len(ablative_recession_rate) == 0:
+                            ablative_recession_rate = np.zeros(n_points)
+                        else:
+                            ablative_recession_rate = np.asarray(ablative_recession_rate[:n_points])
+                        
+                        if len(graphite_recession_rate_thermal) == 0:
+                            graphite_recession_rate_thermal = np.zeros(n_points)
+                            graphite_recession_rate_oxidation = np.zeros(n_points)
+                        else:
+                            graphite_recession_rate_thermal = np.asarray(graphite_recession_rate_thermal[:n_points])
+                            graphite_recession_rate_oxidation = np.asarray(graphite_recession_rate_oxidation[:n_points])
+                        
+                        # Create plots
+                        import plotly.graph_objects as go
+                        from plotly.subplots import make_subplots
+                        
+                        # Convert Pa to psi (1 psi = 6894.76 Pa)
+                        PA_TO_PSI = 1.0 / 6894.76
+                        Pc_psi = Pc * PA_TO_PSI
+                        
+                        # Calculate cumulative throat recession from thermal ablation and oxidation
+                        # Integrate rates over time to get cumulative values
+                        dt = np.diff(time_array, prepend=time_array[0] if len(time_array) > 0 else 0.0)
+                        # Convert rates from µm/s to m/s, then integrate
+                        cumulative_throat_thermal = np.cumsum(graphite_recession_rate_thermal * 1e-6 * dt)  # Convert µm/s to m/s, then integrate
+                        cumulative_throat_oxidation = np.cumsum(graphite_recession_rate_oxidation * 1e-6 * dt)  # Convert µm/s to m/s, then integrate
+                        
+                        # Plot 1: Thrust (own graph)
+                        fig1 = go.Figure()
+                        fig1.add_trace(go.Scatter(
+                            x=time_array, y=thrust/1000, mode="lines", name="Thrust",
+                            line=dict(color="blue", width=2)
+                        ))
+                        fig1.update_layout(
+                            title="Thrust vs Time",
+                            xaxis_title="Time [s]",
+                            yaxis_title="Thrust [kN]",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig1, use_container_width=True, key="layer3_thrust")
+                        
+                        # Plot 2: Chamber Pressure (own graph, in psi)
+                        fig2 = go.Figure()
+                        fig2.add_trace(go.Scatter(
+                            x=time_array, y=Pc_psi, mode="lines", name="Chamber Pressure",
+                            line=dict(color="red", width=2)
+                        ))
+                        fig2.update_layout(
+                            title="Chamber Pressure vs Time",
+                            xaxis_title="Time [s]",
+                            yaxis_title="Chamber Pressure [psi]",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig2, use_container_width=True, key="layer3_pc")
+                        
+                        # Plot 3: L* and Throat Area (together)
+                        fig3 = make_subplots(specs=[[{"secondary_y": True}]])
+                        fig3.add_trace(
+                            go.Scatter(x=time_array, y=Lstar*1000, mode="lines", name="L*", line=dict(color="green", width=2)),
+                            secondary_y=False,
+                        )
+                        fig3.add_trace(
+                            go.Scatter(x=time_array, y=A_throat*1e6, mode="lines", name="Throat Area", line=dict(color="orange", width=2)),
+                            secondary_y=True,
+                        )
+                        fig3.update_xaxes(title_text="Time [s]")
+                        fig3.update_yaxes(title_text="L* [mm]", secondary_y=False)
+                        fig3.update_yaxes(title_text="Throat Area [mm²]", secondary_y=True)
+                        fig3.update_layout(
+                            title="L* and Throat Area Evolution",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig3, use_container_width=True, key="layer3_lstar_throat")
+                        
+                        # Plot 4: Ablative Recession Rate (own graph)
+                        fig4 = go.Figure()
+                        fig4.add_trace(go.Scatter(
+                            x=time_array, y=ablative_recession_rate, mode="lines", name="Ablative Recession Rate",
+                            line=dict(color="purple", width=2)
+                        ))
+                        fig4.update_layout(
+                            title="Ablative Recession Rate vs Time",
+                            xaxis_title="Time [s]",
+                            yaxis_title="Recession Rate [µm/s]",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig4, use_container_width=True, key="layer3_ablative_recession_rate")
+                        
+                        # Plot 5: Graphite Thermal Ablation AND Oxidation (together)
+                        fig5 = go.Figure()
+                        fig5.add_trace(go.Scatter(
+                            x=time_array, y=graphite_recession_rate_thermal, mode="lines", name="Graphite Thermal Ablation",
+                            line=dict(color="red", width=2, dash="dash")
+                        ))
+                        fig5.add_trace(go.Scatter(
+                            x=time_array, y=graphite_recession_rate_oxidation, mode="lines", name="Graphite Oxidation",
+                            line=dict(color="orange", width=2, dash="dot")
+                        ))
+                        fig5.update_layout(
+                            title="Graphite Recession Rates vs Time",
+                            xaxis_title="Time [s]",
+                            yaxis_title="Recession Rate [µm/s]",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig5, use_container_width=True, key="layer3_graphite_recession_rates")
+                        
+                        # Plot 6: Cumulative Chamber Recession (own graph)
+                        fig6 = go.Figure()
+                        fig6.add_trace(go.Scatter(
+                            x=time_array, y=recession_chamber*1000, mode="lines", name="Cumulative Chamber Recession",
+                            line=dict(color="purple", width=2)
+                        ))
+                        fig6.update_layout(
+                            title="Cumulative Chamber Recession vs Time",
+                            xaxis_title="Time [s]",
+                            yaxis_title="Cumulative Recession [mm]",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig6, use_container_width=True, key="layer3_cumulative_chamber_recession")
+                        
+                        # Plot 7: Cumulative Throat Recession (own graph with total, thermal, and oxidation)
+                        fig7 = go.Figure()
+                        fig7.add_trace(go.Scatter(
+                            x=time_array, y=recession_throat*1000, mode="lines", name="Cumulative Throat Recession (Total)",
+                            line=dict(color="red", width=2)
+                        ))
+                        fig7.add_trace(go.Scatter(
+                            x=time_array, y=cumulative_throat_thermal*1000, mode="lines", name="Cumulative Throat Recession (Thermal)",
+                            line=dict(color="darkred", width=2, dash="dash")
+                        ))
+                        fig7.add_trace(go.Scatter(
+                            x=time_array, y=cumulative_throat_oxidation*1000, mode="lines", name="Cumulative Throat Recession (Oxidation)",
+                            line=dict(color="orange", width=2, dash="dot")
+                        ))
+                        fig7.update_layout(
+                            title="Cumulative Throat Recession vs Time",
+                            xaxis_title="Time [s]",
+                            yaxis_title="Cumulative Recession [mm]",
+                            height=300,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig7, use_container_width=True, key="layer3_cumulative_throat_recession")
+                    else:
+                        st.info("Time series data not available for plotting.")
     elif layer3_valid is None:
         st.info("💡 Layer 3 was skipped (time-varying analysis disabled or Layer 2 invalid).")
     else:

@@ -594,7 +594,14 @@ class PintleEngineRunner:
                             pressure=Pc,
                         )
                         
-                        recession_rate_throat = graphite_results.get("recession_rate", 0.0)
+                        # CRITICAL FIX: For cumulative recession tracking (diagnostics), use recession_rate_calculated
+                        # even though recession_rate is 0 (which prevents throat area from changing).
+                        # The recession_rate = 0 is only to keep throat area constant, but we still want to
+                        # track cumulative recession for diagnostics and display.
+                        recession_rate_throat = graphite_results.get("recession_rate_calculated", 0.0)
+                        if recession_rate_throat == 0.0:
+                            # Fallback to recession_rate if calculated is not available
+                            recession_rate_throat = graphite_results.get("recession_rate", 0.0)
                         
                         # Apply graphite coverage fraction
                         recession_rate_throat *= graphite_cfg.coverage_fraction
