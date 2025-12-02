@@ -28,7 +28,10 @@ sys.path.insert(0, str(_project_root))
 
 from pintle_pipeline.io import load_config
 from pintle_pipeline.config_schemas import PintleEngineConfig
-from optimization_layers.layer2_pressure import run_layer2_pressure
+from optimization_layers.layer2_pressure import (
+    run_layer2a_minimum_pressures,
+    run_layer2_pressure,
+)
 
 
 def progress_callback(title: str, progress: float, message: str, logger: logging.Logger):
@@ -228,6 +231,12 @@ Examples:
         action='store_true',
         help='Save evaluation plots (overwrites layer2_evaluation_plot_*.png with each evaluation)'
     )
+
+    parser.add_argument(
+        '--skip-layer2a',
+        action='store_true',
+        help='Skip Layer 2a minimum-pressure search and use legacy shared minimum clamp only'
+    )
     
     parser.add_argument(
         '--log-file',
@@ -342,7 +351,47 @@ Examples:
     if args.min_stability_margin is not None:
         logger.info(f"Min Stability Margin: {args.min_stability_margin:.3f}")
     
-    # Run Layer 2 optimization
+    # Optional Layer 2a: find minimum allowable flat tank pressures
+    if not args.skip_layer2a:
+        logger.info("")
+        logger.info("="*60)
+        logger.info("Running Layer 2a Minimum Tank Pressure Search...")
+        logger.info("="*60)
+
+        def progress_wrapper_2a(title: str, progress: float, message: str):
+            progress_callback(title, progress, message, logger)
+
+        def log_wrapper_2a(title: str, message: str):
+            log_callback(title, message, logger)
+
+        min_lox_floor_pa, min_fuel_floor_pa, layer2a_summary, layer2a_success = run_layer2a_minimum_pressures(
+            optimized_config=config,
+            initial_lox_pressure_pa=initial_lox_pressure_pa,
+            initial_fuel_pressure_pa=initial_fuel_pressure_pa,
+            peak_thrust=peak_thrust,
+            target_apogee_m=args.target_apogee,
+            rocket_dry_mass_kg=rocket_dry_mass_kg,
+            max_lox_tank_capacity_kg=max_lox_tank_capacity_kg,
+            max_fuel_tank_capacity_kg=max_fuel_tank_capacity_kg,
+            target_burn_time=target_burn_time,
+            n_time_points=max(80, min(args.n_time_points, 150)),
+            update_progress=progress_wrapper_2a,
+            log_status=log_wrapper_2a,
+            min_pressure_pa=min_pressure_pa,
+            optimal_of_ratio=args.target_of_ratio,
+            min_stability_margin=args.min_stability_margin,
+        )
+
+        logger.info("")
+        logger.info("Layer 2a Results:")
+        logger.info(f"  Success: {layer2a_success}")
+        logger.info(f"  Min LOX Pressure: {min_lox_floor_pa/6894.76:.1f} psi ({min_lox_floor_pa/1e6:.2f} MPa)")
+        logger.info(f"  Min Fuel Pressure: {min_fuel_floor_pa/6894.76:.1f} psi ({min_fuel_floor_pa/1e6:.2f} MPa)")
+    else:
+        min_lox_floor_pa = min_pressure_pa
+        min_fuel_floor_pa = min_pressure_pa
+
+    # Run Layer 2 optimization (pressure curve shapes)
     logger.info("")
     logger.info("="*60)
     logger.info("Running Layer 2 Pressure Curve Optimization...")
@@ -370,6 +419,8 @@ Examples:
             update_progress=progress_wrapper,
             log_status=log_wrapper,
             min_pressure_pa=min_pressure_pa,
+            min_lox_pressure_floor_pa=min_lox_floor_pa,
+            min_fuel_pressure_floor_pa=min_fuel_floor_pa,
             optimal_of_ratio=args.target_of_ratio,
             min_stability_margin=args.min_stability_margin,
             save_evaluation_plots=args.save_plots,

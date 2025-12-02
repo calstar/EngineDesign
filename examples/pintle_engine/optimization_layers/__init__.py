@@ -47,6 +47,7 @@ from .layer1_static_optimization import (
 
 # Layer 2: Pressure curve optimization
 from .layer2_pressure import (
+    run_layer2a_minimum_pressures,
     run_layer2_pressure,
 )
 
@@ -93,6 +94,7 @@ __all__ = [
     # Layer 1
     'create_layer1_apply_x_to_config',
     # Layer 2
+    'run_layer2a_minimum_pressures',
     'run_layer2_pressure',
     # Layer 3
     'run_layer3_thermal_protection',
