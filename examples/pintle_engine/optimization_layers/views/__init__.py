@@ -8,20 +8,18 @@ This package contains:
 from .tabs import (
     _design_requirements_tab,
     _full_engine_optimization_tab,
-    _injector_optimization_tab,
-    _chamber_optimization_tab,
-    _stability_analysis_tab,
-    _flight_performance_tab,
-    _results_export_tab,
+    _layer1_tab,
+    _layer2_tab,
+    _layer3_tab,
+    _layer4_tab,
 )
 
 __all__ = [
     '_design_requirements_tab',
     '_full_engine_optimization_tab',
-    '_injector_optimization_tab',
-    '_chamber_optimization_tab',
-    '_stability_analysis_tab',
-    '_flight_performance_tab',
-    '_results_export_tab',
+    '_layer1_tab',
+    '_layer2_tab',
+    '_layer3_tab',
+    '_layer4_tab',
 ]
 

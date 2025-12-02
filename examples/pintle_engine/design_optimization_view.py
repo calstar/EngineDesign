@@ -88,11 +88,10 @@ from optimization_layers import (
 from optimization_layers.views import (
     _design_requirements_tab,
     _full_engine_optimization_tab,
-    _injector_optimization_tab,
-    _chamber_optimization_tab,
-    _stability_analysis_tab,
-    _flight_performance_tab,
-    _results_export_tab,
+    _layer1_tab,
+    _layer2_tab,
+    _layer3_tab,
+    _layer4_tab,
 )
 
 # Alias for backward compatibility with internal function names
@@ -294,14 +293,13 @@ def design_optimization_view(config_obj: PintleEngineConfig, runner: Optional[Pi
     """)
     
     # Create tabs for different optimization stages
-    tab_design, tab_full_engine, tab_injector, tab_chamber, tab_stability, tab_performance, tab_results = st.tabs([
+    tab_design, tab_full_engine, tab_layer1, tab_layer2, tab_layer3, tab_layer4 = st.tabs([
         "📋 Design Requirements",
         "🚀 Full Engine Optimizer",
-        "🔧 Injector Optimization",
-        "🔥 Chamber Optimization", 
-        "⚖️ Stability Analysis",
-        "✈️ Flight Performance",
-        "📊 Results & Export"
+        "🔧 Layer 1: Static Optimization",
+        "⏱️ Layer 2: Burn Candidate",
+        "🔥 Layer 3: Thermal Protection",
+        "✈️ Layer 4: Flight Simulation"
     ])
     
     with tab_design:
@@ -310,160 +308,17 @@ def design_optimization_view(config_obj: PintleEngineConfig, runner: Optional[Pi
     with tab_full_engine:
         config_obj = _full_engine_optimization_tab(config_obj, runner)
     
-    with tab_injector:
-        config_obj = _injector_optimization_tab(config_obj, runner)
+    with tab_layer1:
+        config_obj = _layer1_tab(config_obj, runner)
     
-    with tab_chamber:
-        config_obj = _chamber_optimization_tab(config_obj, runner)
-        
-        # Show optimized results if available
-        if "optimization_results" in st.session_state:
-            st.markdown("---")
-            st.markdown("## 📊 Optimization Results")
-            opt_results = st.session_state["optimization_results"]
-            opt_config = st.session_state.get("optimized_config", config_obj)
-            _display_optimized_parameters(opt_results, opt_config)
-            
-            # Show time-varying plot if available
-            if "time_varying_results" in opt_results:
-                plot_time_varying_results(opt_results["time_varying_results"])
-        
-        # Show comprehensive geometry plot
-        if runner and config_obj:
-            st.markdown("### Complete Geometry Visualization")
-            sizing_results = None  # Initialize for scope
-            try:
-                from pintle_pipeline.comprehensive_geometry_sizing import size_complete_geometry, plot_complete_geometry
-                
-                # Get current conditions
-                P_tank_O = 3e6  # Default
-                P_tank_F = 3e6
-                
-                # Use optimized config if available
-                current_config = st.session_state.get("optimized_config", config_obj)
-                current_runner = PintleEngineRunner(current_config) if current_config != config_obj else runner
-                
-                results = current_runner.evaluate(P_tank_O, P_tank_F)
-                
-                Pc = results.get("Pc", 2e6)
-                MR = results.get("MR", 2.5)
-                Tc = results.get("Tc", 3500.0)
-                gamma = results.get("gamma", 1.2)
-                R = results.get("R", 300.0)
-                burn_time = st.session_state.get("design_requirements", {}).get("target_burn_time", 10.0)
-                
-                # Estimate heat flux from actual results if available
-                heat_flux_chamber = 2e6  # W/m² - default estimate
-                if "heat_flux_chamber" in results:
-                    heat_flux_chamber = results["heat_flux_chamber"]
-                elif "diagnostics" in results:
-                    cooling = results["diagnostics"].get("cooling", {})
-                    ablative = cooling.get("ablative", {})
-                    if ablative:
-                        heat_flux_chamber = ablative.get("incident_heat_flux", heat_flux_chamber)
-                
-                # Validate config has required attributes
-                if not hasattr(current_config, "chamber") or not hasattr(current_config.chamber, "volume"):
-                    st.warning("⚠️ Chamber configuration incomplete. Cannot generate geometry plot.")
-                elif current_config.chamber.volume <= 0 or current_config.chamber.A_throat <= 0:
-                    st.warning("⚠️ Invalid chamber geometry (volume or throat area is zero). Cannot generate geometry plot.")
-                else:
-                    # Size complete geometry
-                    sizing_results = size_complete_geometry(
-                        config=current_config,
-                        Pc=Pc,
-                        MR=MR,
-                        Tc=Tc,
-                        gamma=gamma,
-                        R=R,
-                        burn_time=burn_time,
-                        chamber_heat_flux=heat_flux_chamber,
-                    )
-                    
-                    # Plot complete geometry
-                    fig, _ = plot_complete_geometry(
-                        sizing_results,
-                        current_config,
-                        use_plotly=True,
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key="geometry_sizing_plot")
-                    
-                    # Display sizing summary (only if sizing succeeded)
-                    if sizing_results:
-                        st.markdown("#### Sizing Summary")
-                        col_a, col_b, col_c = st.columns(3)
-                        with col_a:
-                            st.metric("Ablative Thickness", f"{sizing_results.get('optimal', {}).get('ablative_thickness', 0) * 1000:.2f} mm")
-                        with col_b:
-                            st.metric("Graphite Thickness", f"{sizing_results.get('optimal', {}).get('graphite_thickness', 0) * 1000:.2f} mm")
-                        with col_c:
-                            st.metric("Total Mass", f"{sizing_results.get('optimal', {}).get('total_mass', 0):.3f} kg")
-                    
-                    # Show impingement zones
-                    st.markdown("#### Fuel Impingement Zones")
-                    try:
-                        from pintle_pipeline.localized_ablation import calculate_impingement_zones
-                        
-                        # Get chamber dimensions from config
-                        if hasattr(current_config, "chamber"):
-                            chamber_length = current_config.chamber.length if current_config.chamber.length else 0.2
-                            if hasattr(current_config.chamber, "chamber_inner_diameter"):
-                                chamber_diameter = current_config.chamber.chamber_inner_diameter
-                            else:
-                                # Calculate from volume and length
-                                V_chamber = current_config.chamber.volume
-                                L_chamber = chamber_length
-                                if L_chamber > 0 and V_chamber > 0:
-                                    chamber_diameter = np.sqrt(4.0 * V_chamber / (np.pi * L_chamber))
-                                else:
-                                    chamber_diameter = 0.1  # Default
-                        else:
-                            chamber_length = 0.2
-                            chamber_diameter = 0.1
-                        
-                        impingement_data = calculate_impingement_zones(
-                            current_config, chamber_length, chamber_diameter, n_points=50
-                        )
-                        
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            st.metric("Impingement Center", f"{impingement_data['impingement_center'] * 1000:.1f} mm")
-                            st.metric("Max Heat Flux Multiplier", f"{np.max(impingement_data['impingement_heat_flux_multiplier']):.2f}x")
-                        with col_b:
-                            st.metric("Impingement Width", f"{impingement_data['impingement_width'] * 1000:.1f} mm")
-                            st.info("⚠️ Enhanced ablation occurs at impingement zones (red markers in plot)")
-                    except Exception as e:
-                        st.warning(f"Could not calculate impingement zones: {e}")
-                
-                # Recession animation option
-                st.markdown("#### Recession Animation")
-                if st.checkbox("Generate Recession Animation", value=False):
-                    st.info("Animation will show ablation over time with impingement effects. Run time-series analysis first.")
-                
-                # Validation status (only if sizing succeeded)
-                if sizing_results:
-                    validation = sizing_results.get("validation", {})
-                    if validation.get("all_valid", False):
-                        st.success("✅ All sizing requirements met!")
-                    else:
-                        warnings = validation.get("warnings", [])
-                        if warnings:
-                            for warning in warnings:
-                                st.warning(f"⚠️ {warning}")
-                
-            except Exception as e:
-                st.warning(f"Could not generate comprehensive geometry plot: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+    with tab_layer2:
+        config_obj = _layer2_tab(config_obj, runner)
     
-    with tab_stability:
-        _stability_analysis_tab(config_obj, runner)
+    with tab_layer3:
+        config_obj = _layer3_tab(config_obj, runner)
     
-    with tab_performance:
-        _flight_performance_tab(config_obj, runner)
-    
-    with tab_results:
-        _results_export_tab(config_obj, runner)
+    with tab_layer4:
+        config_obj = _layer4_tab(config_obj, runner)
     
     return config_obj
 

@@ -26,7 +26,12 @@ from .. import (
     plot_copv_pressure,
     plot_flight_trajectory,
     plot_time_varying_results,
+    generate_segmented_pressure_curve,
 )
+from ..layer2_burn_candidate import run_layer2_burn_candidate
+from ..layer3_thermal_protection import run_layer3_thermal_protection
+from ..layer4_flight_simulation import run_layer4_flight_simulation
+from ..copv_flight_helpers import run_flight_simulation
 
 # Import helper functions from views.helpers
 from .helpers import (
@@ -1544,6 +1549,707 @@ def _results_export_tab(config_obj: PintleEngineConfig, runner: Optional[PintleE
                 st.error(f"Export failed: {e}")
     else:
         st.info("No optimized configuration available. Run optimization in Injector or Chamber tabs.")
+
+
+def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> PintleEngineConfig:
+    """Layer 1: Static Optimization tab."""
+    st.subheader("Layer 1: Static Optimization")
+    st.markdown("""
+    **Layer 1** jointly optimizes:
+    - **Engine geometry**: throat area, L*, expansion ratio, pintle parameters
+    - **Pressure curves**: segmented LOX and fuel pressure profiles
+    - **Initial thermal protection guesses**: ablative and graphite thicknesses
+    
+    This layer evaluates at t=0 (static) to find optimal geometry and pressure curve shapes.
+    """)
+    
+    if runner is None:
+        st.warning("⚠️ Runner not available. Please load configuration first.")
+        return config_obj
+    
+    requirements = st.session_state.get("design_requirements", {})
+    if not requirements:
+        st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
+        return config_obj
+    
+    # Check for optimization results
+    optimization_results = st.session_state.get("optimization_results", None)
+    layer_status = optimization_results.get("layer_status", {}) if optimization_results else {}
+    layer1_valid = layer_status.get("layer_1_pressure_candidate", False)
+    
+    st.markdown("---")
+    st.markdown("### Run Layer 1 Individually")
+    
+    col_run1, col_run2 = st.columns([1, 1])
+    with col_run1:
+        max_iterations = st.number_input(
+            "Max Iterations",
+            min_value=20,
+            max_value=200,
+            value=80,
+            step=10,
+            key="layer1_max_iter",
+            help="Maximum optimization iterations for Layer 1"
+        )
+    with col_run2:
+        thrust_tolerance = st.number_input(
+            "Thrust Tolerance [%]",
+            min_value=1.0,
+            max_value=20.0,
+            value=10.0,
+            step=1.0,
+            key="layer1_thrust_tol",
+            help="Acceptable deviation from target thrust"
+        ) / 100.0
+    
+    if st.button("🚀 Run Layer 1 Optimization", type="primary", key="run_layer1"):
+        try:
+            target_burn_time = requirements.get("target_burn_time", 10.0)
+            max_lox_pressure_psi = float(requirements.get("max_lox_tank_pressure_psi", 700))
+            max_fuel_pressure_psi = float(requirements.get("max_fuel_tank_pressure_psi", 850))
+            
+            pressure_config = {
+                "mode": "optimizer_controlled",
+                "max_lox_pressure_psi": max_lox_pressure_psi,
+                "max_fuel_pressure_psi": max_fuel_pressure_psi,
+                "target_burn_time": target_burn_time,
+                "n_segments": 3,
+            }
+            
+            tolerances = {
+                "thrust": thrust_tolerance,
+                "apogee": 0.15,  # Not used for Layer 1
+            }
+            
+            progress_bar = st.progress(0, text="Initializing Layer 1 optimization...")
+            status_text = st.empty()
+            
+            def progress_callback(stage: str, progress: float, message: str):
+                progress_bar.progress(progress, text=f"{stage}\n{message}")
+                status_text.text(f"{stage} | {message}")
+            
+            # Run Layer 1 only (time_varying=False)
+            optimized_config, optimization_results = run_full_engine_optimization_with_flight_sim(
+                config_obj,
+                runner,
+                requirements,
+                target_burn_time,
+                max_iterations,
+                tolerances,
+                pressure_config,
+                progress_callback=progress_callback,
+                use_time_varying=False,  # Layer 1 only
+            )
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Store results
+            config_obj = optimized_config
+            st.session_state["optimized_config"] = optimized_config
+            st.session_state["optimization_results"] = optimization_results
+            st.session_state["layer1_results"] = optimization_results
+            
+            # Update config_dict
+            config_dict_updated = optimized_config.model_dump(exclude_none=False)
+            st.session_state["config_dict"] = config_dict_updated
+            
+            st.success("✅ Layer 1 optimization complete!")
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Layer 1 optimization failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    st.markdown("---")
+    st.markdown("### Layer 1 Status")
+    if optimization_results and layer1_valid is not None:
+        if layer1_valid:
+            st.success("✅ Layer 1: Pressure Candidate VALID")
+        else:
+            st.error("❌ Layer 1: Pressure Candidate INVALID")
+        
+        # Show Layer 1 performance metrics
+        performance = optimization_results.get("performance", {})
+        if performance:
+            st.markdown("#### Performance at t=0")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                if "thrust" in performance:
+                    st.metric("Thrust", f"{performance['thrust']:.0f} N")
+            with col2:
+                if "Isp" in performance:
+                    st.metric("Isp", f"{performance['Isp']:.1f} s")
+            with col3:
+                if "MR" in performance:
+                    st.metric("O/F Ratio", f"{performance['MR']:.2f}")
+            with col4:
+                if "Pc" in performance:
+                    st.metric("Chamber Pressure", f"{performance['Pc']/1e6:.2f} MPa")
+        
+        # Show optimized parameters
+        opt_params = optimization_results.get("optimized_parameters", {})
+        if opt_params:
+            st.markdown("#### Optimized Parameters")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**Geometry**")
+                if "A_throat" in opt_params:
+                    D_throat = np.sqrt(4 * opt_params['A_throat'] / np.pi) * 1000
+                    st.caption(f"Throat Diameter: {D_throat:.2f} mm")
+                if "Lstar" in opt_params:
+                    st.caption(f"L*: {opt_params['Lstar'] * 1000:.1f} mm")
+                if "expansion_ratio" in opt_params:
+                    st.caption(f"Expansion Ratio: {opt_params['expansion_ratio']:.2f}")
+            with col2:
+                st.markdown("**Injector**")
+                if "d_pintle_tip" in opt_params:
+                    st.caption(f"Pintle Tip: {opt_params['d_pintle_tip'] * 1000:.2f} mm")
+                if "n_orifices" in opt_params:
+                    st.caption(f"Orifices: {int(opt_params['n_orifices'])}")
+                if "d_orifice" in opt_params:
+                    st.caption(f"Orifice Diameter: {opt_params['d_orifice'] * 1000:.2f} mm")
+        
+        # Show pressure curves if available
+        if "optimized_pressure_curves" in optimization_results:
+            st.markdown("#### Pressure Curves")
+            plot_pressure_curves(optimization_results["optimized_pressure_curves"])
+    else:
+        st.info("💡 Layer 1 has not been run yet. Click 'Run Layer 1 Optimization' above or use the Full Engine Optimizer.")
+    
+    return config_obj
+
+
+def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> PintleEngineConfig:
+    """Layer 2: Burn Candidate Optimization tab."""
+    st.subheader("Layer 2: Burn Candidate Optimization")
+    st.markdown("""
+    **Layer 2** refines initial thermal protection thicknesses based on full-burn time-series analysis.
+    
+    This layer:
+    - Runs time-varying analysis over the full burn duration
+    - Tracks ablative recession (chamber) and graphite recession (throat)
+    - Optimizes initial thermal protection thickness guesses
+    - Validates that the design can survive the burn
+    """)
+    
+    if runner is None:
+        st.warning("⚠️ Runner not available. Please load configuration first.")
+        return config_obj
+    
+    requirements = st.session_state.get("design_requirements", {})
+    if not requirements:
+        st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
+        return config_obj
+    
+    # Check for Layer 1 results (prerequisite)
+    layer1_results = st.session_state.get("layer1_results") or st.session_state.get("optimization_results")
+    layer1_config = st.session_state.get("optimized_config", config_obj)
+    
+    if not layer1_results:
+        st.warning("⚠️ Layer 1 must be run first. Please run Layer 1 optimization before running Layer 2.")
+        return config_obj
+    
+    st.markdown("---")
+    st.markdown("### Run Layer 2 Individually")
+    
+    if st.button("🚀 Run Layer 2 Optimization", type="primary", key="run_layer2"):
+        try:
+            target_burn_time = requirements.get("target_burn_time", 10.0)
+            target_thrust = requirements.get("target_thrust", 7000.0)
+            thrust_tol = requirements.get("thrust_tolerance", 0.10)
+            
+            # Get pressure curves from Layer 1
+            lox_segments = layer1_results.get("optimized_pressure_curves", {}).get("lox_segments", [])
+            fuel_segments = layer1_results.get("optimized_pressure_curves", {}).get("fuel_segments", [])
+            
+            if not lox_segments or not fuel_segments:
+                st.error("❌ Layer 1 results missing pressure curve segments. Please re-run Layer 1.")
+                return config_obj
+            
+            # Generate 200-point pressure curves
+            n_time_points = 200
+            psi_to_Pa = 6894.76
+            time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
+            _, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
+            P_tank_O_array = lox_pressure_psi * psi_to_Pa
+            P_tank_F_array = fuel_pressure_psi * psi_to_Pa
+            
+            progress_bar = st.progress(0, text="Running Layer 2 optimization...")
+            status_text = st.empty()
+            
+            def update_progress(stage: str, progress: float, message: str):
+                progress_bar.progress(progress, text=f"{stage}\n{message}")
+                status_text.text(f"{stage} | {message}")
+            
+            def log_status(stage: str, message: str):
+                pass  # Can add logging if needed
+            
+            # Run Layer 2
+            optimized_config, full_time_results, time_varying_summary, burn_candidate_valid = run_layer2_burn_candidate(
+                layer1_config,
+                time_array,
+                P_tank_O_array,
+                P_tank_F_array,
+                target_thrust,
+                thrust_tol,
+                n_time_points,
+                update_progress,
+                log_status,
+            )
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Store results
+            config_obj = optimized_config
+            st.session_state["optimized_config"] = optimized_config
+            st.session_state["layer2_results"] = {
+                "full_time_results": full_time_results,
+                "time_varying_summary": time_varying_summary,
+                "burn_candidate_valid": burn_candidate_valid,
+            }
+            
+            # Update config_dict
+            config_dict_updated = optimized_config.model_dump(exclude_none=False)
+            st.session_state["config_dict"] = config_dict_updated
+            
+            if burn_candidate_valid:
+                st.success("✅ Layer 2 optimization complete! Burn candidate is VALID.")
+            else:
+                st.warning("⚠️ Layer 2 optimization complete, but burn candidate may not be fully valid.")
+            
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Layer 2 optimization failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    st.markdown("---")
+    st.markdown("### Layer 2 Status")
+    
+    # Check for optimization results
+    optimization_results = st.session_state.get("optimization_results", None)
+    layer_status = optimization_results.get("layer_status", {}) if optimization_results else {}
+    layer2_valid = layer_status.get("layer_2_burn_candidate", None)
+    layer2_results = st.session_state.get("layer2_results", None)
+    
+    if (optimization_results and layer2_valid is not None) or layer2_results:
+        # Check validity from either source
+        is_valid = layer2_valid if layer2_valid is not None else (layer2_results.get("burn_candidate_valid", False) if layer2_results else False)
+        
+        if is_valid:
+            st.success("✅ Layer 2: Burn Candidate VALID")
+        else:
+            st.error("❌ Layer 2: Burn Candidate INVALID")
+        
+        # Show time-varying results if available
+        time_varying = None
+        if layer2_results and isinstance(layer2_results, dict):
+            time_varying = layer2_results.get("time_varying_summary", {})
+            if "max_recession_chamber" not in time_varying and "full_time_results" in layer2_results:
+                # Extract from full_time_results
+                full_results = layer2_results["full_time_results"]
+                if isinstance(full_results, dict):
+                    time_varying = {
+                        "max_recession_chamber": float(np.max(full_results.get("recession_chamber", [0.0]))),
+                        "max_recession_throat": float(np.max(full_results.get("recession_throat", [0.0]))),
+                    }
+        elif optimization_results:
+            time_varying = optimization_results.get("time_varying_results", None)
+        
+        if time_varying:
+            st.markdown("#### Time-Varying Analysis Results")
+            if "max_recession_chamber" in time_varying:
+                st.metric("Max Chamber Recession", f"{time_varying['max_recession_chamber'] * 1000:.2f} mm")
+            if "max_recession_throat" in time_varying:
+                st.metric("Max Throat Recession", f"{time_varying['max_recession_throat'] * 1000:.2f} mm")
+            
+            # Show thermal protection
+            opt_config = st.session_state.get("optimized_config", config_obj)
+            if opt_config:
+                ablative_cfg = opt_config.ablative_cooling if hasattr(opt_config, 'ablative_cooling') else None
+                graphite_cfg = opt_config.graphite_insert if hasattr(opt_config, 'graphite_insert') else None
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if ablative_cfg and ablative_cfg.enabled:
+                        st.metric("Ablative Thickness", f"{ablative_cfg.initial_thickness * 1000:.2f} mm")
+                        st.caption("Initial guess (will be refined in Layer 3)")
+                with col2:
+                    if graphite_cfg and graphite_cfg.enabled:
+                        st.metric("Graphite Thickness", f"{graphite_cfg.initial_thickness * 1000:.2f} mm")
+                        st.caption("Initial guess (will be refined in Layer 3)")
+    elif layer2_valid is None:
+        st.info("💡 Layer 2 was skipped (time-varying analysis disabled or Layer 1 invalid).")
+    else:
+        st.info("💡 Layer 2 has not been run yet. Click 'Run Layer 2 Optimization' above or use the Full Engine Optimizer.")
+    
+    return config_obj
+
+
+def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> PintleEngineConfig:
+    """Layer 3: Thermal Protection Optimization tab."""
+    st.subheader("Layer 3: Thermal Protection Optimization")
+    st.markdown("""
+    **Layer 3** right-sizes thermal protection thicknesses to minimize mass while ensuring survival.
+    
+    This layer:
+    - Uses max recession from Layer 2
+    - Optimizes to `max_recession × 1.2` (20% margin)
+    - Minimizes thermal protection mass
+    - Verifies recession stays below 80% of thickness
+    """)
+    
+    if runner is None:
+        st.warning("⚠️ Runner not available. Please load configuration first.")
+        return config_obj
+    
+    requirements = st.session_state.get("design_requirements", {})
+    if not requirements:
+        st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
+        return config_obj
+    
+    # Check for Layer 2 results (prerequisite)
+    layer2_results = st.session_state.get("layer2_results") or (
+        st.session_state.get("optimization_results", {}).get("time_varying_results")
+    )
+    layer2_config = st.session_state.get("optimized_config", config_obj)
+    
+    if not layer2_results:
+        st.warning("⚠️ Layer 2 must be run first. Please run Layer 2 optimization before running Layer 3.")
+        return config_obj
+    
+    st.markdown("---")
+    st.markdown("### Run Layer 3 Individually")
+    
+    if st.button("🚀 Run Layer 3 Optimization", type="primary", key="run_layer3"):
+        try:
+            target_burn_time = requirements.get("target_burn_time", 10.0)
+            
+            # Get pressure curves and time arrays from Layer 1
+            layer1_results = st.session_state.get("layer1_results") or st.session_state.get("optimization_results")
+            lox_segments = layer1_results.get("optimized_pressure_curves", {}).get("lox_segments", [])
+            fuel_segments = layer1_results.get("optimized_pressure_curves", {}).get("fuel_segments", [])
+            
+            if not lox_segments or not fuel_segments:
+                st.error("❌ Layer 1 results missing. Please re-run Layer 1.")
+                return config_obj
+            
+            # Generate 200-point pressure curves
+            n_time_points = 200
+            psi_to_Pa = 6894.76
+            time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
+            _, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
+            P_tank_O_array = lox_pressure_psi * psi_to_Pa
+            P_tank_F_array = fuel_pressure_psi * psi_to_Pa
+            
+            # Get full time results from Layer 2
+            if isinstance(layer2_results, dict) and "full_time_results" in layer2_results:
+                full_time_results = layer2_results["full_time_results"]
+            else:
+                # Re-run time series if not available
+                runner_temp = PintleEngineRunner(layer2_config)
+                full_time_results = runner_temp.evaluate_arrays_with_time(
+                    time_array,
+                    P_tank_O_array,
+                    P_tank_F_array,
+                    track_ablative_geometry=True,
+                    use_coupled_solver=False,
+                )
+            
+            progress_bar = st.progress(0, text="Running Layer 3 optimization...")
+            status_text = st.empty()
+            
+            def update_progress(stage: str, progress: float, message: str):
+                progress_bar.progress(progress, text=f"{stage}\n{message}")
+                status_text.text(f"{stage} | {message}")
+            
+            def log_status(stage: str, message: str):
+                pass
+            
+            # Run Layer 3
+            optimized_config, updated_time_results, thermal_results = run_layer3_thermal_protection(
+                layer2_config,
+                time_array,
+                P_tank_O_array,
+                P_tank_F_array,
+                full_time_results,
+                n_time_points,
+                update_progress,
+                log_status,
+            )
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Store results
+            config_obj = optimized_config
+            st.session_state["optimized_config"] = optimized_config
+            st.session_state["layer3_results"] = {
+                "updated_time_results": updated_time_results,
+                "thermal_results": thermal_results,
+            }
+            
+            # Update config_dict
+            config_dict_updated = optimized_config.model_dump(exclude_none=False)
+            st.session_state["config_dict"] = config_dict_updated
+            
+            if thermal_results.get("thermal_protection_valid", False):
+                st.success("✅ Layer 3 optimization complete! Thermal protection is VALID.")
+            else:
+                st.warning("⚠️ Layer 3 optimization complete, but thermal protection may not be fully valid.")
+            
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Layer 3 optimization failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    st.markdown("---")
+    st.markdown("### Layer 3 Status")
+    
+    # Check for optimization results
+    optimization_results = st.session_state.get("optimization_results", None)
+    layer_status = optimization_results.get("layer_status", {}) if optimization_results else {}
+    layer3_valid = layer_status.get("layer_3_thermal_protection", None)
+    layer3_results = st.session_state.get("layer3_results", None)
+    
+    if (optimization_results and layer3_valid is not None) or layer3_results:
+        if layer3_valid:
+            st.success("✅ Layer 3: Thermal Protection VALID")
+        else:
+            st.error("❌ Layer 3: Thermal Protection INVALID")
+        
+        # Show final thermal protection thicknesses
+        opt_config = st.session_state.get("optimized_config", config_obj)
+        if opt_config:
+            ablative_cfg = opt_config.ablative_cooling if hasattr(opt_config, 'ablative_cooling') else None
+            graphite_cfg = opt_config.graphite_insert if hasattr(opt_config, 'graphite_insert') else None
+            
+            st.markdown("#### Final Thermal Protection Thicknesses")
+            col1, col2 = st.columns(2)
+            with col1:
+                if ablative_cfg and ablative_cfg.enabled:
+                    st.metric("Ablative Thickness", f"{ablative_cfg.initial_thickness * 1000:.2f} mm")
+                    st.caption("20% margin over max recession")
+            with col2:
+                if graphite_cfg and graphite_cfg.enabled:
+                    st.metric("Graphite Thickness", f"{graphite_cfg.initial_thickness * 1000:.2f} mm")
+                    st.caption("20% margin over max recession")
+            
+            # Show recession data
+            time_varying = optimization_results.get("time_varying_results", None)
+            if time_varying:
+                st.markdown("#### Recession Analysis")
+                if "max_recession_chamber" in time_varying and ablative_cfg:
+                    max_recess = time_varying['max_recession_chamber']
+                    thickness = ablative_cfg.initial_thickness
+                    margin_pct = ((thickness - max_recess) / thickness * 100) if thickness > 0 else 0
+                    st.caption(f"Max Chamber Recession: {max_recess * 1000:.2f} mm | Margin: {margin_pct:.1f}%")
+                if "max_recession_throat" in time_varying and graphite_cfg:
+                    max_recess = time_varying['max_recession_throat']
+                    thickness = graphite_cfg.initial_thickness
+                    margin_pct = ((thickness - max_recess) / thickness * 100) if thickness > 0 else 0
+                    st.caption(f"Max Throat Recession: {max_recess * 1000:.2f} mm | Margin: {margin_pct:.1f}%")
+    elif layer3_valid is None:
+        st.info("💡 Layer 3 was skipped (time-varying analysis disabled or Layer 2 invalid).")
+    else:
+        st.info("💡 Layer 3 has not been run yet. Click 'Run Layer 3 Optimization' above or use the Full Engine Optimizer.")
+    
+    return config_obj
+
+
+def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> PintleEngineConfig:
+    """Layer 4: Flight Simulation tab."""
+    st.subheader("Layer 4: Flight Simulation")
+    st.markdown("""
+    **Layer 4** validates trajectory performance and optimizes propellant mass to hit apogee targets.
+    
+    This layer:
+    - Runs flight simulation with the optimized engine
+    - Uses backward iteration to find optimal propellant mass
+    - Iteratively reduces burn time until apogee matches target
+    - Validates system-level performance
+    """)
+    
+    if runner is None:
+        st.warning("⚠️ Runner not available. Please load configuration first.")
+        return config_obj
+    
+    requirements = st.session_state.get("design_requirements", {})
+    if not requirements:
+        st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
+        return config_obj
+    
+    # Check for Layer 3 results (prerequisite)
+    layer3_results = st.session_state.get("layer3_results") or st.session_state.get("optimization_results")
+    layer3_config = st.session_state.get("optimized_config", config_obj)
+    
+    if not layer3_results:
+        st.warning("⚠️ Layer 3 must be run first. Please run Layer 3 optimization before running Layer 4.")
+        return config_obj
+    
+    st.markdown("---")
+    st.markdown("### Run Layer 4 Individually")
+    
+    if st.button("🚀 Run Layer 4 Optimization", type="primary", key="run_layer4"):
+        try:
+            target_burn_time = requirements.get("target_burn_time", 10.0)
+            target_apogee = requirements.get("target_apogee", 3048.0)
+            apogee_tol = requirements.get("apogee_tolerance", 0.15)
+            
+            # Get pressure curves and time arrays from Layer 1
+            layer1_results = st.session_state.get("layer1_results") or st.session_state.get("optimization_results")
+            lox_segments = layer1_results.get("optimized_pressure_curves", {}).get("lox_segments", [])
+            fuel_segments = layer1_results.get("optimized_pressure_curves", {}).get("fuel_segments", [])
+            
+            if not lox_segments or not fuel_segments:
+                st.error("❌ Layer 1 results missing. Please re-run Layer 1.")
+                return config_obj
+            
+            # Generate 200-point pressure curves
+            n_time_points = 200
+            psi_to_Pa = 6894.76
+            time_array, lox_pressure_psi = generate_segmented_pressure_curve(lox_segments, n_time_points)
+            _, fuel_pressure_psi = generate_segmented_pressure_curve(fuel_segments, n_time_points)
+            P_tank_O_array = lox_pressure_psi * psi_to_Pa
+            P_tank_F_array = fuel_pressure_psi * psi_to_Pa
+            
+            # Get time-varying performance data
+            layer3_results_data = st.session_state.get("layer3_results", {})
+            if isinstance(layer3_results_data, dict) and "updated_time_results" in layer3_results_data:
+                time_results = layer3_results_data["updated_time_results"]
+            else:
+                # Re-run time series if not available
+                runner_temp = PintleEngineRunner(layer3_config)
+                time_results = runner_temp.evaluate_arrays_with_time(
+                    time_array,
+                    P_tank_O_array,
+                    P_tank_F_array,
+                    track_ablative_geometry=True,
+                    use_coupled_solver=True,
+                )
+            
+            # Build pressure curves dict
+            pressure_curves = {
+                "time": time_array,
+                "P_tank_O": P_tank_O_array,
+                "P_tank_F": P_tank_F_array,
+                "thrust": time_results.get("F", np.zeros(n_time_points)),
+                "Isp": time_results.get("Isp", np.zeros(n_time_points)),
+                "Pc": time_results.get("Pc", np.zeros(n_time_points)),
+                "mdot_O": time_results.get("mdot_O", np.zeros(n_time_points)),
+                "mdot_F": time_results.get("mdot_F", np.zeros(n_time_points)),
+            }
+            
+            progress_bar = st.progress(0, text="Running Layer 4 flight simulation...")
+            status_text = st.empty()
+            
+            def update_progress(stage: str, progress: float, message: str):
+                progress_bar.progress(progress, text=f"{stage}\n{message}")
+                status_text.text(f"{stage} | {message}")
+            
+            def log_status(stage: str, message: str):
+                pass
+            
+            # Create flight simulation wrapper
+            def run_flight_sim_wrapper(config, pressure_curves_trunc, cutoff_time):
+                return run_flight_simulation(
+                    config,
+                    pressure_curves_trunc,
+                    cutoff_time,
+                )
+            
+            # Run Layer 4
+            flight_sim_result = run_layer4_flight_simulation(
+                layer3_config,
+                pressure_curves,
+                time_array,
+                P_tank_O_array,
+                P_tank_F_array,
+                target_burn_time,
+                target_apogee,
+                apogee_tol,
+                update_progress,
+                log_status,
+                run_flight_sim_wrapper,
+            )
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Store results
+            st.session_state["layer4_results"] = flight_sim_result
+            
+            if flight_sim_result.get("flight_candidate_valid", False):
+                st.success("✅ Layer 4 optimization complete! Flight candidate is VALID.")
+            else:
+                st.warning("⚠️ Layer 4 optimization complete, but flight candidate may not be fully valid.")
+            
+            st.rerun()
+            
+        except Exception as e:
+            st.error(f"Layer 4 optimization failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    
+    st.markdown("---")
+    st.markdown("### Layer 4 Status")
+    
+    # Check for optimization results
+    optimization_results = st.session_state.get("optimization_results", None)
+    layer_status = optimization_results.get("layer_status", {}) if optimization_results else {}
+    layer4_valid = layer_status.get("layer_4_flight_candidate", False)
+    flight_sim_result = optimization_results.get("flight_sim_result", {}) if optimization_results else {}
+    layer4_results = st.session_state.get("layer4_results", None)
+    
+    if (optimization_results and flight_sim_result) or layer4_results:
+        if layer4_results:
+            flight_sim_result = layer4_results
+        if layer4_valid:
+            st.success("✅ Layer 4: Flight Candidate VALID")
+        else:
+            st.error("❌ Layer 4: Flight Candidate INVALID")
+        
+        # Show flight simulation results
+        if flight_sim_result.get("success", False):
+            st.markdown("#### Flight Simulation Results")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                apogee = flight_sim_result.get("apogee", 0)
+                target_apogee = requirements.get("target_apogee", 3048.0)
+                apogee_error = abs(apogee - target_apogee) / target_apogee * 100 if target_apogee > 0 else 100.0
+                st.metric("Apogee", f"{apogee:.0f} m", delta=f"Target: {target_apogee:.0f} m")
+                st.caption(f"Error: {apogee_error:.1f}%")
+            with col2:
+                max_velocity = flight_sim_result.get("max_velocity", 0)
+                st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
+            with col3:
+                actual_burn_time = flight_sim_result.get("actual_burn_time", requirements.get("target_burn_time", 10.0))
+                st.metric("Actual Burn Time", f"{actual_burn_time:.2f} s")
+            
+            # Show propellant adjustments
+            if "adjusted_lox_mass" in flight_sim_result or "adjusted_fuel_mass" in flight_sim_result:
+                st.markdown("#### Propellant Mass Adjustments")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if "adjusted_lox_mass" in flight_sim_result:
+                        st.metric("LOX Mass", f"{flight_sim_result['adjusted_lox_mass']:.2f} kg")
+                with col2:
+                    if "adjusted_fuel_mass" in flight_sim_result:
+                        st.metric("Fuel Mass", f"{flight_sim_result['adjusted_fuel_mass']:.2f} kg")
+        elif flight_sim_result.get("skipped", False):
+            st.warning(f"⚠️ Flight simulation was skipped: {flight_sim_result.get('reason', 'Unknown reason')}")
+        else:
+            st.error(f"❌ Flight simulation failed: {flight_sim_result.get('error', 'Unknown error')}")
+    else:
+        st.info("💡 Layer 4 has not been run yet. Click 'Run Layer 4 Optimization' above or use the Full Engine Optimizer.")
+    
+    return config_obj
 
 
 
