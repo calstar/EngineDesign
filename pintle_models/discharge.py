@@ -43,7 +43,8 @@ def cd_from_re(
         return config.Cd_min
     
     # Base Reynolds-dependent formula
-    Cd = config.Cd_inf - config.a_Re / np.sqrt(Re)
+    # FIXED: Ensure sqrt input is positive
+    Cd = config.Cd_inf - config.a_Re / np.sqrt(max(Re, 1e-6))
     
     # Pressure correction (compressibility effects)
     # At high pressures, compressibility reduces effective flow area

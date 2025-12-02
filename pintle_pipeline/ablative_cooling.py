@@ -232,8 +232,11 @@ def compute_ablative_response(
         else:
             # Mass flux: ṁ'' = q_effective / H_ablation
             mass_flux = effective_heat_flux / max(energy_per_mass, EPSILON_SMALL)
-            # Recession rate: ṙ = ṁ'' / ρ
-            recession_rate = mass_flux / ablative_config.material_density
+            # Recession rate: ṙ = ṁ'' / ρ (safe division)
+            if ablative_config.material_density > 0:
+                recession_rate = mass_flux / ablative_config.material_density
+            else:
+                recession_rate = 0.0  # Invalid density
             # Cooling power: P = q_effective × A [W]
             cooling_power = effective_heat_flux * surface_area
 

@@ -241,7 +241,8 @@ def delta_p_regen_channels(
     if Re_channel_entrance <= 0:
         Cd_entrance_dynamic = config.Cd_entrance_min
     else:
-        Cd_entrance_dynamic = config.Cd_entrance_inf - config.a_Re_entrance / np.sqrt(Re_channel_entrance)
+        # FIXED: Ensure sqrt input is positive
+        Cd_entrance_dynamic = config.Cd_entrance_inf - config.a_Re_entrance / np.sqrt(max(Re_channel_entrance, 1e-6))
         Cd_entrance_dynamic = np.clip(Cd_entrance_dynamic, config.Cd_entrance_min, config.Cd_entrance_inf)
     
     # Effective area reduction: A_eff = Cd_entrance × A_channel
@@ -272,7 +273,8 @@ def delta_p_regen_channels(
     if Re_channel <= 0:
         Cd_exit_dynamic = config.Cd_exit_min
     else:
-        Cd_exit_dynamic = config.Cd_exit_inf - config.a_Re_exit / np.sqrt(Re_channel)
+        # FIXED: Ensure sqrt input is positive
+        Cd_exit_dynamic = config.Cd_exit_inf - config.a_Re_exit / np.sqrt(max(Re_channel, 1e-6))
         Cd_exit_dynamic = np.clip(Cd_exit_dynamic, config.Cd_exit_min, config.Cd_exit_inf)
     
     K_exit_channel = (1.0 - Cd_exit_dynamic ** 2)
@@ -447,7 +449,8 @@ def compute_regen_heat_transfer(
         Nu_g = NU_LAMINAR_ND
     else:
         Nu_g = NU_TURBULENT_COEFFICIENT_ND * (Re_g ** NU_TURBULENT_RE_EXPONENT_ND) * (Pr_g ** NU_TURBULENT_PR_EXPONENT_ND)
-    turbulence_boost_g = (1.0 + config.gas_turbulence_intensity) ** 0.8
+    # CRITICAL FIX: Remove arbitrary 0.8 exponent - use linear scaling
+    turbulence_boost_g = 1.0 + config.gas_turbulence_intensity  # Remove arbitrary 0.8 exponent
     h_g_base = Nu_g * k_g / chamber_d_inner * turbulence_boost_g
 
     # Calculate adiabatic wall temperature using recovery factor
@@ -474,7 +477,8 @@ def compute_regen_heat_transfer(
             Nu_c = (f_c / 8.0 * (Re_c - 1000.0) * Pr_c) / (1.0 + 12.7 * np.sqrt(f_c / 8.0) * (Pr_c ** (2.0 / 3.0) - 1.0))
             if Nu_c <= 0:
                 Nu_c = NU_LAMINAR_ND
-        turbulence_boost_c = (1.0 + config.coolant_turbulence_intensity) ** 0.8
+        # CRITICAL FIX: Remove arbitrary 0.8 exponent - use linear scaling
+        turbulence_boost_c = 1.0 + config.coolant_turbulence_intensity  # Remove arbitrary 0.8 exponent
         h_c = Nu_c * k_c / d_hyd_channel * turbulence_boost_c
 
         h_g = h_g_base

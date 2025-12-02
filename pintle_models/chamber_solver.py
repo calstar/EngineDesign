@@ -474,7 +474,8 @@ class ChamberSolver:
         MR = mdot_O / mdot_F if mdot_F > 0 else 0
         
         # Use current expansion ratio for 3D cache
-        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
+        # FIXED: Add safety check for division by zero
+        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat if self.config.chamber.A_throat > 0 else 10.0
         cea_props = self.cea_cache.eval(MR, Pc_val, 101325.0, eps_current)
         
         # Calculate reaction progress through chamber (if finite-rate chemistry enabled)
@@ -502,9 +503,15 @@ class ChamberSolver:
                 import warnings
                 warnings.warn(f"Reaction progress calculation failed: {e}. This may indicate invalid engine conditions.")
                 # Minimal fallback - but indicate uncertainty
+                # CRITICAL FIX: Correct residence time formula
+                # tau = V_chamber * rho / mdot_total = L* * rho * A_throat / mdot_total
+                # NOT L* / sqrt(gamma * R * T) which is a time scale related to sound speed, not residence time!
+                rho_chamber = Pc_val / (cea_props["R"] * cea_props["Tc"]) if cea_props["R"] > 0 and cea_props["Tc"] > 0 else 1.0
+                # Use actual mdot_total from closure (already calculated above at line 530)
+                tau_residence_correct = self.Lstar * rho_chamber * self.config.chamber.A_throat / mdot_total if mdot_total > 0 else 0.001
                 reaction_progress = {
                     "progress_throat": 1.0,  # Assume equilibrium
-                    "tau_residence": self.Lstar / np.sqrt(cea_props["gamma"] * cea_props["R"] * cea_props["Tc"]),
+                    "tau_residence": tau_residence_correct,  # FIXED: Use correct residence time formula
                     "calculation_failed": True,  # Flag for downstream use
                 }
         
@@ -555,10 +562,15 @@ class ChamberSolver:
         R = cea_props["R"]
         
         # Calculate Isp for validation
+        # CRITICAL FIX: Correct Isp formula
+        # Isp = F / (mdot * g0) = (Cf * Pc * At) / (mdot * g0)
+        # OR equivalently: Isp = cstar * Cf / g0
+        # The previous formula with gamma * sqrt(...) was incorrect
         g0 = 9.80665
-        Isp = (Pc_val * self.config.chamber.A_throat * gamma * np.sqrt(
-            (2.0 / (gamma + 1.0)) ** ((gamma + 1.0) / (gamma - 1.0))
-        )) / (mdot_total * g0) if mdot_total > 0 else 0.0
+        Cf_ideal = cea_props.get("Cf_ideal", 1.5)  # Get from CEA, default to typical value
+        Cf_actual = self.config.nozzle.efficiency * Cf_ideal  # Account for nozzle efficiency
+        # Use correct formula: Isp = Cf * Pc * At / (mdot * g0)
+        Isp = (Cf_actual * Pc_val * self.config.chamber.A_throat) / (mdot_total * g0) if mdot_total > 0 else 0.0
         
         # Validate engine state (use effective temperature after cooling)
         validation_results = validate_engine_state(
@@ -615,8 +627,10 @@ class ChamberSolver:
             # New: factor = (0.5)^0.5 = 0.707 (less severe)
             ratio = eff_cfg.target_smd_microns / max(actual_smd, 1e-9)
             # Use reduced exponent: 0.5 instead of full exponent for less severe penalty
-            effective_exponent = eff_cfg.smd_penalty_exponent * 0.5
-            smd_factor = np.clip(ratio ** effective_exponent, 0.5, 1.0)  # Floor at 0.5 instead of 0.0
+            # CRITICAL FIX: Remove arbitrary 0.5 multiplier and 0.5 floor
+            # Use the configured exponent directly, and use configurable floor
+            effective_exponent = eff_cfg.smd_penalty_exponent  # Remove arbitrary 0.5 multiplier
+            smd_factor = np.clip(ratio ** effective_exponent, eff_cfg.mixture_efficiency_floor, 1.0)  # Use configurable floor
 
         x_star_m = float(closure_diag.get("x_star") or 0.0)
         x_star_mm = x_star_m * 1000.0
@@ -625,9 +639,9 @@ class ChamberSolver:
         else:
             # Less conservative: reduce penalty severity
             excess = max(0.0, x_star_mm - eff_cfg.xstar_limit_mm) / max(eff_cfg.xstar_limit_mm, 1e-3)
-            # Use reduced exponent: 0.5x for less severe penalty
-            effective_exponent = eff_cfg.xstar_penalty_exponent * 0.5
-            xstar_factor = float(np.clip(np.exp(-effective_exponent * excess), 0.5, 1.0))  # Floor at 0.5
+            # CRITICAL FIX: Remove arbitrary 0.5 multiplier and 0.5 floor
+            effective_exponent = eff_cfg.xstar_penalty_exponent  # Remove arbitrary 0.5 multiplier
+            xstar_factor = float(np.clip(np.exp(-effective_exponent * excess), eff_cfg.mixture_efficiency_floor, 1.0))  # Use configurable floor
 
         we_o = float(closure_diag.get("We_O") or 0.0)
         we_f = float(closure_diag.get("We_F") or 0.0)
@@ -637,9 +651,9 @@ class ChamberSolver:
         else:
             # Less conservative: use square root for less severe penalty
             we_ratio = we_min_actual / eff_cfg.we_reference
-            # Use reduced exponent: 0.5x for less severe penalty
-            effective_exponent = eff_cfg.we_penalty_exponent * 0.5
-            we_factor = np.clip(we_ratio ** effective_exponent, 0.7, 1.0)  # Floor at 0.7 instead of 0.0
+            # CRITICAL FIX: Remove arbitrary 0.5 multiplier and 0.7 floor
+            effective_exponent = eff_cfg.we_penalty_exponent  # Remove arbitrary 0.5 multiplier
+            we_factor = np.clip(we_ratio ** effective_exponent, eff_cfg.mixture_efficiency_floor, 1.0)  # Use configurable floor
  
         turbulence_factor = 1.0
         if eff_cfg.use_turbulence_coupling:
@@ -652,9 +666,9 @@ class ChamberSolver:
             turbulence_factor = float(np.clip(turbulence_factor, eff_cfg.turbulence_efficiency_floor, 1.0))
 
         mixture_eff = smd_factor * xstar_factor * we_factor * turbulence_factor
-        # Increase floor to 0.85 for realistic efficiency (typical engines: 85-95%)
-        # This prevents efficiency from dropping too low due to conservative penalties
-        mixture_eff_floor = max(eff_cfg.mixture_efficiency_floor, 0.85)  # At least 85% efficiency
+        # CRITICAL FIX: Remove arbitrary 0.85 floor - use configured floor value
+        # The configured floor should be set appropriately, not overridden
+        mixture_eff_floor = eff_cfg.mixture_efficiency_floor  # Use configured value, don't override
         mixture_eff = float(np.clip(mixture_eff, mixture_eff_floor, 1.0))
         return mixture_eff
 
@@ -747,7 +761,10 @@ class ChamberSolver:
 
         turbulence_boost = 1.0
         if regen_cfg is not None:
-            turbulence_boost = (1.0 + max(regen_cfg.gas_turbulence_intensity, 0.0)) ** 0.8
+            # CRITICAL FIX: Remove arbitrary 0.8 exponent - turbulence effect on heat transfer
+            # Turbulence increases Nu, but the relationship is complex
+            # For now, use linear scaling: Nu_turbulent ≈ Nu_laminar × (1 + turbulence_intensity)
+            turbulence_boost = 1.0 + max(regen_cfg.gas_turbulence_intensity, 0.0)  # Remove arbitrary 0.8 exponent
             turbulence_intensity_calc = max(
                 turbulence_intensity_calc,
                 float(np.clip(regen_cfg.gas_turbulence_intensity, 0.0, 0.5)),

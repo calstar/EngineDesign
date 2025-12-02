@@ -460,9 +460,10 @@ class PintleEngineRunner:
         A_throat_initial = self.config.chamber.A_throat
         A_exit_initial = self.config.nozzle.A_exit
         L_chamber = self.config.chamber.length if self.config.chamber.length else 0.18
-        D_chamber_initial = np.sqrt(4 * V_chamber_initial / (np.pi * L_chamber))
-        D_throat_initial = np.sqrt(4 * A_throat_initial / np.pi)
-        D_exit_initial = np.sqrt(4 * A_exit_initial / np.pi)
+        # FIXED: Add safety checks for sqrt operations
+        D_chamber_initial = np.sqrt(max(0, 4 * V_chamber_initial / (np.pi * L_chamber))) if L_chamber > 0 else 0.1
+        D_throat_initial = np.sqrt(max(0, 4 * A_throat_initial / np.pi)) if A_throat_initial > 0 else 0.015
+        D_exit_initial = np.sqrt(max(0, 4 * A_exit_initial / np.pi)) if A_exit_initial > 0 else 0.1
         
         # Track cumulative recession
         cumulative_recession_chamber = 0.0

@@ -105,20 +105,23 @@ class ChamberOptimizer:
                 runner = PintleEngineRunner(config)
                 results = runner.evaluate(P_tank_O, P_tank_F)
                 
-                # Calculate errors
+                # Calculate errors (safe division)
                 F_actual = results.get("F", 0.0)
-                thrust_error = abs(F_actual - target_thrust) / target_thrust
+                thrust_error = abs(F_actual - target_thrust) / target_thrust if target_thrust > 0 else 1.0
                 
                 Isp_actual = results.get("Isp", 0.0)
                 isp_error = 0.0
-                if target_Isp is not None:
+                if target_Isp is not None and target_Isp > 0:
                     isp_error = abs(Isp_actual - target_Isp) / target_Isp
                 
-                # Stability margin error
+                # Stability margin error (safe division)
                 stability = results.get("stability_results", {})
                 chugging = stability.get("chugging", {})
                 stability_margin = chugging.get("stability_margin", 0.0)
-                stability_error = max(0.0, target_stability_margin - stability_margin) / target_stability_margin
+                if target_stability_margin > 0:
+                    stability_error = max(0.0, target_stability_margin - stability_margin) / target_stability_margin
+                else:
+                    stability_error = 0.0 if stability_margin >= 0.5 else 1.0
                 
                 # Combined objective (weighted)
                 objective_value = (

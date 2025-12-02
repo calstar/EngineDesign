@@ -148,8 +148,11 @@ class PintleInjector(InjectorModel):
                 Re_O_quick = calculate_reynolds_number(rho_O, u_O_quick, d_hyd_O, mu_O)
                 Re_F_quick = calculate_reynolds_number(rho_F, u_F_quick, d_hyd_F, mu_F)
 
-                T_tank_O = 90.0
-                T_tank_F = 300.0
+                # CRITICAL FIX: Remove hardcoded temperatures - should come from config or fluid properties
+                # LOX is typically at saturation temperature ~90K, RP-1 at ambient ~300K
+                # But these should be configurable, not hardcoded
+                T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)  # Use config if available
+                T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)  # Use config if available
                 Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
                 Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
                 Cd_O_quick = min(Cd_O_quick_base, Cd_O_eff)
@@ -172,8 +175,11 @@ class PintleInjector(InjectorModel):
             Re_O = calculate_reynolds_number(rho_O, u_O, d_hyd_O, mu_O)
             Re_F = calculate_reynolds_number(rho_F, u_F, d_hyd_F, mu_F)
 
-            Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=90.0)
-            Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=300.0)
+            # CRITICAL FIX: Use same temperature values as above, not hardcoded
+            T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)
+            T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)
+            Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
+            Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
             Cd_O = min(Cd_O_base, Cd_O_eff)
             Cd_F = min(Cd_F_base, Cd_F_eff)
 

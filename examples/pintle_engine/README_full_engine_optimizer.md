@@ -4,7 +4,7 @@ The **Full Engine Optimizer UI** is an end‑to‑end design environment for a L
 It couples injector sizing, chamber/nozzle geometry, stability analysis, thermal protection, and (optionally) flight performance checks into a single multi‑layer optimization pipeline.
 
 This UI is implemented in `design_optimization_view.py` and built on:
-- `PintleEngineConfig` / `config_minimal.yaml` / `optimized_engine.yaml` for configuration
+- `PintleEngineConfig` / `config_minimal.yaml` (and optionally any exported `optimized_engine.yaml`) for configuration
 - `PintleEngineRunner` for performance and stability evaluation
 - The `pintle_pipeline` optimizers (`comprehensive_optimizer`, `coupled_optimizer`, `chamber_optimizer`, etc.)
 
@@ -13,21 +13,21 @@ This UI is implemented in `design_optimization_view.py` and built on:
 ## High‑Level Workflow
 
 1. **Load a base engine config**
-   - Start from `examples/pintle_engine/config_minimal.yaml` or an existing `optimized_engine.yaml`.
+   - Start from `examples/pintle_engine/config_minimal.yaml` or any previously exported optimized configuration file.
    - The YAML is parsed and validated into a `PintleEngineConfig` (see `pintle_pipeline.config_schemas`).
 
 2. **Specify design requirements / constraints in the UI**
    - **Targets**: design thrust, target burn time, optimal O/F ratio, optional Isp target.
    - **Tank limits**: max LOX and fuel tank pressures.
-   - **Geometry limits**: max chamber OD, max nozzle exit diameter, max engine length, L\* bounds.
+   - **Geometry limits**: max chamber OD, max nozzle exit diameter, max engine length, $L^*$ bounds.
    - **Stability requirements**: minimum combined stability margin and/or minimum stability score, option to handicap/relax requirements.
    - **Analysis options**: enable/disable time‑varying analysis, set optimization iterations and tolerances.
 
 3. **Run the full engine optimizer**
    - The UI calls `_run_full_engine_optimization_with_flight_sim` which:
      - Builds a **multi‑objective optimizer** over geometry + pressure‑curve + thermal‑protection variables.
-     - Evaluates designs through **three main layers** (static, burn candidate, burn analysis).
-     - Logs progress to `full_engine_optimizer.log` and surfaces it live in the UI.
+     - Evaluates designs through **three main optimization layers** (Layer 1: static, Layer 2: burn candidate, Layer 3: burn analysis), preceded by a coupled geometry pre-optimization (Layer 0).
+     - Logs progress to a log file (default location: project root `full_engine_optimizer.log`) and surfaces it live in the UI.
 
 4. **Inspect results in the UI**
    - Summary of optimized geometry and pintle parameters.
@@ -36,7 +36,7 @@ This UI is implemented in `design_optimization_view.py` and built on:
    - Optional flight performance summary.
 
 5. **Export the optimized design**
-   - The final `PintleEngineConfig` can be serialized to YAML (e.g. `optimized_engine.yaml`) and used as a new starting point.
+   - The final `PintleEngineConfig` can be serialized to YAML (e.g., `optimized_engine.yaml`) and used as a new starting point for further refinement.
 
 ---
 
@@ -53,7 +53,7 @@ Before the main iterative optimizer, `_run_full_engine_optimization` performs a 
   - Minimum stability margin target.
 
 - **Key constraints**
-  - Chamber L\* range (`min_Lstar`, `max_Lstar`).
+  - Chamber $L^*$ range (`min_Lstar`, `max_Lstar`).
   - Chamber length and diameter limits (from max engine length and max chamber OD).
   - Nozzle expansion ratio bounds (derived from max exit diameter).
   - Pintle geometry ranges:
@@ -64,7 +64,7 @@ Before the main iterative optimizer, `_run_full_engine_optimization` performs a 
     - LOX orifice angle (fixed to 90° in this phase).
 
 - **Goals**
-  - Find a **consistent pintle + chamber + nozzle set** that can hit thrust/O/F targets within constraints.
+  - Find a **consistent pintle + chamber + nozzle set** that can hit thrust and O/F ratio targets within constraints.
   - Enforce basic stability and geometry sanity before launching the more expensive multi‑layer optimization.
 
 This phase provides a good starting `PintleEngineConfig` and associated runner/diagnostics for the following layers.
@@ -78,8 +78,8 @@ It treats a vector of **optimizer variables** `x` as a candidate engine and pres
 
 - **Representative optimization variables** (conceptual groups)
   - **Chamber / nozzle geometry**
-    - Throat area \(A_\mathrm{throat}\)
-    - L\* (chamber characteristic length)
+    - Throat area $A_\mathrm{throat}$
+    - $L^*$ (chamber characteristic length)
     - Derived: chamber volume, chamber length, chamber diameter (bounded by `max_chamber_outer_diameter`), contraction ratio.
   - **Tank pressure curve parameters**
     - Maximum LOX and fuel tank pressures.
@@ -98,15 +98,15 @@ It treats a vector of **optimizer variables** `x` as a candidate engine and pres
 
 - **Static objectives / penalties**
   - **Thrust match** to `target_thrust`.
-  - **Mixture ratio match** to `optimal_of`.
+  - **Mixture ratio match** to `optimal_of_ratio`.
   - **Stability** (via `stability_results`):
-    - Combined stability state (`stable` / `marginal` / `unstable`) with a stability score in \([0, 1]\).
+    - Combined stability state (`stable` / `marginal` / `unstable`) with a stability score in $[0, 1]$.
     - Individual margins: chugging, acoustic, feed‑system.
     - Penalties increase sharply for unstable or marginal designs and when margins fall below required thresholds.
   - **Isp quality** (bonus for higher Isp; penalty if substantially below 200 s).
-  - **Soft bounds** on variables to back up the hard L‑BFGS‑B bounds.
+  - **Soft bounds** on variables to back up the hard L-BFGS-B bounds.
 
-The **Layer 1 objective** is a weighted sum of these errors and penalties, heavily biased toward stability and thrust/O/F accuracy.  
+The **Layer 1 objective** is a weighted sum of these errors and penalties, heavily biased toward stability and thrust/O/F ratio accuracy.  
 Only candidates that pass these static checks move on to Layer 2.
 
 ---
@@ -123,7 +123,7 @@ Layer 2 lives in the “LAYER 2: TIME SERIES ANALYSIS (BURN CANDIDATE)” block.
   - A short vector of **initial thermal protection guesses**:
     - Ablative liner initial thickness (if `ablative_cooling.enabled`).
     - Graphite insert initial thickness (if `graphite_insert.enabled`).
-  - Each has simple bounds, e.g. 3–20 mm for ablative, 3–15 mm for graphite.
+  - Each has simple bounds, e.g., 3–20 mm for ablative, 3–15 mm for graphite.
 
 - **Objective**
   - Deep‑copies the current `optimized_config`, applies the trial thicknesses, and runs:
@@ -174,8 +174,8 @@ After Layer 3, the code reruns a final burn to verify that recession, thrust, an
 Across the full pipeline, the optimizer manipulates several groups of variables (some in the coupled pintle–chamber stage, some in Layers 1–3):
 
 - **Chamber / nozzle geometry**
-  - Throat area \(A_\mathrm{throat}\), nozzle exit area / expansion ratio.
-  - L\* and derived chamber volume, length, and diameter (within hardware envelopes).
+  - Throat area $A_\mathrm{throat}$, nozzle exit area / expansion ratio.
+  - $L^*$ and derived chamber volume, length, and diameter (within hardware envelopes).
   - Contraction geometry via the chamber geometry utilities in `chamber/chamber_geometry.py`.
 
 - **Injector geometry (pintle)**
@@ -218,7 +218,7 @@ The full engine optimizer balances several goals simultaneously:
   - Penalize marginal or unstable designs very strongly so they are rejected early.
 
 - **Hardware / geometry**
-  - Respect bounds on chamber OD, nozzle exit diameter, engine length, and L\*.
+  - Respect bounds on chamber OD, nozzle exit diameter, engine length, and $L^*$.
   - Keep pintle geometry within manufacturable and physically reasonable ranges.
 
 - **Thermal survivability**
@@ -227,7 +227,7 @@ The full engine optimizer balances several goals simultaneously:
 
 - **System / flight**
   - Use tank‑pressure profiles consistent with the COPV constraints.
-  - Optionally run a flight simulation (`_run_flight_simulation`) for good candidates to check trajectory‑level performance.
+  - Optionally run a flight simulation (`_run_flight_simulation`) for good candidates to check trajectory-level performance.
 
 All of these are folded into the **multi‑objective cost function** with carefully tuned weights and penalties, so that only designs that satisfy performance, stability, geometry, and thermal constraints can be accepted.
 
@@ -242,7 +242,7 @@ All of these are folded into the **multi‑objective cost function** with carefu
 
 - **Watch the layers**
   - In the UI, track which layer the optimizer is currently working on (messages and progress bar).
-  - If optimization stalls in Layer 1, loosen constraints (e.g. L\* range or chamber OD) or adjust tank limits.
+  - If optimization stalls in Layer 1, loosen constraints (e.g., $L^*$ range or chamber OD) or adjust tank limits.
   - If failures occur in Layers 2–3, inspect recession and stability plots and adjust thermal‑protection settings/requirements.
 
 - **Export and iterate**

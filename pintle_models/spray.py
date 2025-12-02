@@ -202,7 +202,9 @@ def ohnesorge_number(mu: float, rho: float, sigma: float, d_or: float) -> float:
     if rho <= 0 or sigma <= 0 or d_or <= 0:
         return 0.0
     
-    Oh = mu / np.sqrt(rho * sigma * d_or)
+    # FIXED: Ensure sqrt input is positive
+    sqrt_arg = rho * sigma * d_or
+    Oh = mu / np.sqrt(max(sqrt_arg, 1e-12)) if sqrt_arg > 0 else 0.0
     return float(Oh)
 
 

@@ -37,7 +37,8 @@ def delta_p_feed(
     if config.phi_type == "none":
         K_eff = config.K0
     elif config.phi_type == "sqrtP":
-        K_eff = config.K0 + config.K1 * np.sqrt(P_tank)
+        # FIXED: Ensure sqrt input is positive
+        K_eff = config.K0 + config.K1 * np.sqrt(max(0, P_tank))
     elif config.phi_type == "logP":
         K_eff = config.K0 + config.K1 * np.log(P_tank)
     else:

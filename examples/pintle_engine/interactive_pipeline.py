@@ -229,8 +229,9 @@ def solve_for_thrust_and_MR(
             thrust_kN = res["F"] / 1000.0
             MR = res["MR"]
             
-            thrust_error = (thrust_kN - target_thrust_kN) / target_thrust_kN
-            MR_error = (MR - target_MR) / target_MR
+            # Safe division with validation
+            thrust_error = (thrust_kN - target_thrust_kN) / target_thrust_kN if target_thrust_kN > 0 else 1.0
+            MR_error = (MR - target_MR) / target_MR if target_MR > 0 else 1.0
             
             # Log history
             history["P_tank_O"].append(P_O_psi)
@@ -246,28 +247,72 @@ def solve_for_thrust_and_MR(
             # If evaluation fails, return large error
             return np.array([1e6, 1e6])
     
-    # Solve using fsolve (Levenberg-Marquardt-like hybrid method)
+    # CRITICAL FIX: Use more robust solver with better options
+    # fsolve can fail if residual is poorly conditioned - use better method
+    from scipy.optimize import root
+    
+    # Solve using root (more robust than fsolve)
     try:
-        solution, info, ier, msg = fsolve(
+        # Try 'hybr' method first (default, fast)
+        result = root(
             residual,
             x0=np.array([P_O_guess, P_F_guess]),
-            full_output=True,
-            xtol=tolerance,
-            maxfev=max_iterations * 10,
+            method='hybr',
+            options={'xtol': tolerance, 'maxfev': max_iterations * 10},
         )
+        
+        if not result.success:
+            # If hybr fails, try 'lm' (Levenberg-Marquardt, more robust)
+            result = root(
+                residual,
+                x0=np.array([P_O_guess, P_F_guess]),
+                method='lm',
+                options={'xtol': tolerance, 'max_nfev': max_iterations * 10},
+            )
+        
+        solution = result.x
+        ier = 1 if result.success else 0
+        msg = result.message if hasattr(result, 'message') else str(result.status)
         
         P_O_sol, P_F_sol = solution
         
-        if ier != 1:
-            raise ThrustSolveError(
-                f"fsolve did not converge: {msg}",
-                {
-                    "history": history,
-                    "final_pressures": (P_O_sol, P_F_sol),
-                    "target_thrust": target_thrust_kN,
-                    "target_MR": target_MR,
-                },
-            )
+        # CRITICAL FIX: Check if solution is actually good before accepting
+        # Even if solver says it converged, verify the result
+        if ier != 1 or not result.success:
+            # Check if we got a reasonable solution anyway
+            try:
+                test_results = runner.evaluate(P_O_sol * PSI_TO_PA, P_F_sol * PSI_TO_PA)
+                test_thrust = test_results["F"] / 1000.0
+                test_MR = test_results["MR"]
+                thrust_err = abs(test_thrust - target_thrust_kN) / target_thrust_kN if target_thrust_kN > 0 else 1.0
+                MR_err = abs(test_MR - target_MR) / target_MR if target_MR > 0 else 1.0
+                
+                # If solution is actually good (within 2x tolerance), accept it
+                if thrust_err < tolerance * 2.0 and MR_err < tolerance * 2.0:
+                    # Solution is good enough - accept it
+                    pass
+                else:
+                    raise ThrustSolveError(
+                        f"Root finder did not converge: {msg}",
+                        {
+                            "history": history,
+                            "final_pressures": (P_O_sol, P_F_sol),
+                            "target_thrust": target_thrust_kN,
+                            "target_MR": target_MR,
+                            "actual_thrust": test_thrust,
+                            "actual_MR": test_MR,
+                        },
+                    )
+            except Exception as e:
+                raise ThrustSolveError(
+                    f"Root finder did not converge: {msg}",
+                    {
+                        "history": history,
+                        "final_pressures": (P_O_sol, P_F_sol),
+                        "target_thrust": target_thrust_kN,
+                        "target_MR": target_MR,
+                    },
+                ) from e
         
         # Evaluate final solution
         final_results = runner.evaluate(P_O_sol * PSI_TO_PA, P_F_sol * PSI_TO_PA)

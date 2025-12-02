@@ -115,9 +115,10 @@ def calculate_chamber_pressure_profile(
     pressures = P_injection - (P_injection - Pc) * (x_norm ** alpha)
     
     # Ensure monotonic (pressure decreases toward throat)
+    # CRITICAL FIX: Remove arbitrary 0.999 factor - use proper monotonic enforcement
     for i in range(1, len(pressures)):
         if pressures[i] > pressures[i-1]:
-            pressures[i] = pressures[i-1] * 0.999
+            pressures[i] = pressures[i-1]  # Enforce strict monotonicity, not 0.999 factor
     
     # Validate all pressures
     pressures = np.clip(pressures, Pc * 0.8, Pc * 1.2)  # Physical bounds
@@ -491,8 +492,9 @@ def calculate_complete_chamber_geometry(
         - stainless_thickness: Stainless steel thickness [m]
     """
     # Calculate current diameters
-    D_chamber_current = np.sqrt(4.0 * V_chamber / (np.pi * L_chamber)) if L_chamber > 0 else D_chamber_initial
-    D_throat_current = np.sqrt(4.0 * A_throat / np.pi)
+    # FIXED: Add safety checks for sqrt operations
+    D_chamber_current = np.sqrt(max(0, 4.0 * V_chamber / (np.pi * L_chamber))) if L_chamber > 0 else D_chamber_initial
+    D_throat_current = np.sqrt(max(0, 4.0 * A_throat / np.pi)) if A_throat > 0 else 0.015
     
     positions = np.linspace(0.0, L_chamber, n_points)
     
