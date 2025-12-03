@@ -2665,11 +2665,9 @@ def run_full_engine_optimization_with_flight_sim(
     # For Layer 1 (static) runs – where `use_time_varying=False` – we never
     # call the RocketPy‑backed flight simulation. This keeps the "Layer 1"
     # UI tab from unexpectedly triggering Layer 4 work.
-    # CRITICAL FIX: Run Layer 4 if we have pressure curves, even if Layer 2/3 failed
-    # This allows flight sim to run with Layer 1 results when time_varying is False
-    # Simplified condition: just need valid Layer 1 and pressure curves
     should_run_flight = (
-        pressure_candidate_valid  # Layer 1 must pass
+        use_time_varying  # Only run Layer 4 when time-varying analysis is enabled
+        and pressure_candidate_valid  # Layer 1 must pass
         and pressure_curves is not None  # Need pressure curves available
     )
 

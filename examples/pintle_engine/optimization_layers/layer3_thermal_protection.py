@@ -184,11 +184,15 @@ def run_layer3_thermal_protection(
                     )
                     return 1e6
 
-                config_layer3 = copy.deepcopy(optimized_config)
+                # Create isolated config copy - use Pydantic's model_copy if available for better isolation
+                # Otherwise fall back to deepcopy
+                if hasattr(optimized_config, 'model_copy'):
+                    config_layer3 = optimized_config.model_copy(deep=True)
+                else:
+                    config_layer3 = copy.deepcopy(optimized_config)
                 # CRITICAL: Always enable turbulence coupling for consistent physics
                 if hasattr(config_layer3, 'combustion') and hasattr(config_layer3.combustion, 'efficiency'):
                     config_layer3.combustion.efficiency.use_turbulence_coupling = True
-                
                 idx_param = 0
                 chosen_thicknesses: list[float] = []
 

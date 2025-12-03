@@ -35,8 +35,10 @@ class PintleEngineRunner:
         Parameters:
         -----------
         config : PintleEngineConfig
-            Engine configuration
+            Engine configuration (should be a deep copy if isolation is needed)
         """
+        # Store config reference - caller is responsible for ensuring isolation
+        # (deep copy is done in Layer 3 before passing config to runner)
         self.config = config
         
         # Initialize CEA cache
