@@ -68,6 +68,7 @@ from .display_results import (
     plot_flight_trajectory,
     plot_optimization_convergence,
     plot_time_varying_results,
+    plot_layer1_parameterization_history,
 )
 
 # COPV and flight helpers
@@ -106,6 +107,7 @@ __all__ = [
     'plot_flight_trajectory',
     'plot_optimization_convergence',
     'plot_time_varying_results',
+    'plot_layer1_parameterization_history',
     # COPV and flight
     'calculate_copv_pressure_curve',
     'run_flight_simulation',

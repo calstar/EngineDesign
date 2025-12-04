@@ -27,9 +27,11 @@ from .. import (
     plot_copv_pressure,
     plot_flight_trajectory,
     plot_time_varying_results,
+    plot_layer1_parameterization_history,
     generate_segmented_pressure_curve,
     calculate_copv_pressure_curve,
 )
+from ..layer1_static_optimization import run_layer1_optimization
 from ..layer2_pressure import run_layer2_pressure
 from ..layer3_thermal_protection import run_layer3_thermal_protection
 from ..layer4_flight_simulation import run_layer4_flight_simulation
@@ -1642,6 +1644,10 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             help="Acceptable deviation from target thrust"
         ) / 100.0
     
+    # Live objective convergence plot container (persists while optimization runs)
+    st.markdown("#### Layer 1 Objective Convergence")
+    objective_plot_container = st.empty()
+    
     if st.button("🚀 Run Layer 1 Optimization", type="primary", key="run_layer1"):
         try:
             target_burn_time = requirements.get("target_burn_time", 10.0)
@@ -1661,6 +1667,9 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 "apogee": 0.15,  # Not used for Layer 1
             }
             
+            # Reset any previous objective history
+            st.session_state["layer1_objective_history"] = []
+            
             progress_bar = st.progress(0, text="Initializing Layer 1 optimization...")
             status_text = st.empty()
             
@@ -1668,17 +1677,66 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 progress_bar.progress(progress, text=f"{stage}\n{message}")
                 status_text.text(f"{stage} | {message}")
             
-            # Run Layer 1 only (time_varying=False)
-            optimized_config, optimization_results = run_full_engine_optimization_with_flight_sim(
-                config_obj,
-                runner,
-                requirements,
-                target_burn_time,
-                max_iterations,
-                tolerances,
-                pressure_config,
-                progress_callback=progress_callback,
-                use_time_varying=False,  # Layer 1 only
+            def objective_callback(iteration: int, objective: float, best_objective: float):
+                """Stream Layer 1 objective history into a live-updating convergence plot."""
+                try:
+                    history = st.session_state.get("layer1_objective_history", [])
+                    history.append(
+                        {
+                            "iteration": int(iteration),
+                            "objective": float(objective),
+                            "best_objective": float(best_objective),
+                        }
+                    )
+                    st.session_state["layer1_objective_history"] = history
+
+                    if not history:
+                        return
+
+                    df = pd.DataFrame(history)
+                    fig = go.Figure()
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["iteration"],
+                            y=df["objective"],
+                            mode="lines+markers",
+                            name="Objective",
+                            line=dict(color="#1f77b4"),
+                        )
+                    )
+                    fig.add_trace(
+                        go.Scatter(
+                            x=df["iteration"],
+                            y=df["best_objective"],
+                            mode="lines",
+                            name="Best Objective",
+                            line=dict(color="#ff7f0e", dash="dash"),
+                        )
+                    )
+                    fig.update_layout(
+                        xaxis_title="Iteration",
+                        yaxis_title="Objective Value",
+                        height=300,
+                        margin=dict(l=40, r=20, t=30, b=40),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    )
+                    objective_plot_container.plotly_chart(fig, use_container_width=True)
+                except Exception:
+                    # Never let plotting errors break the optimization loop
+                    pass
+            
+            # Run Layer 1 optimization directly
+            optimized_config, optimization_results = run_layer1_optimization(
+                config_obj=config_obj,
+                runner=runner,
+                requirements=requirements,
+                target_burn_time=target_burn_time,
+                max_iterations=max_iterations,
+                tolerances=tolerances,
+                pressure_config=pressure_config,
+                update_progress=progress_callback,
+                log_status=lambda stage, msg: status_text.text(f"{stage} | {msg}"),
+                objective_callback=objective_callback,
             )
             
             progress_bar.empty()
@@ -1705,18 +1763,87 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
     st.markdown("---")
     st.markdown("### Layer 1 Status")
     if optimization_results and layer1_valid is not None:
-        if layer1_valid:
-            st.success("✅ Layer 1: Pressure Candidate VALID")
-        else:
-            st.error("❌ Layer 1: Pressure Candidate INVALID")
-        
-        # Show Layer 1 convergence history (same plot as full optimizer tab)
+        # ------------------------------------------------------------------
+        # Convergence / validity summary
+        # ------------------------------------------------------------------
+        convergence_info = optimization_results.get("convergence_info", {})
+        converged_flag = bool(convergence_info.get("converged", False))
+        iteration_history = optimization_results.get("iteration_history", []) or []
+        total_iterations = int(convergence_info.get("iterations", len(iteration_history)))
+        final_change = convergence_info.get("final_change", None)
+
+        cols_status = st.columns(3)
+        with cols_status[0]:
+            if layer1_valid:
+                st.success("✅ Layer 1: Pressure Candidate VALID")
+            else:
+                st.error("❌ Layer 1: Pressure Candidate INVALID")
+        with cols_status[1]:
+            st.metric("Converged", "Yes" if converged_flag else "No")
+        with cols_status[2]:
+            st.metric("Total Iterations", f"{total_iterations}")
+
+        if final_change is not None and np.isfinite(final_change):
+            st.caption(
+                f"Convergence uses max relative geometry change between coupled pintle/chamber iterations "
+                f"(final change: {final_change:.3e})."
+            )
+
+        # Optional: simple thrust error metric vs design target
+        performance = optimization_results.get("performance", {}) or {}
+        target_thrust = requirements.get("target_thrust")
+        if performance and target_thrust:
+            thrust_val = performance.get("thrust") or performance.get("F")
+            if thrust_val is not None:
+                thrust_err_pct = abs(thrust_val - target_thrust) / max(target_thrust, 1e-6) * 100.0
+                st.metric("Thrust Error", f"{thrust_err_pct:.1f} %")
+
+        # ------------------------------------------------------------------
+        # Convergence graphs
+        # ------------------------------------------------------------------
         st.markdown("#### Optimization Convergence History")
-        from .helpers import plot_optimization_convergence
         plot_optimization_convergence(optimization_results)
         
-        # Show Layer 1 performance metrics (forward‑mode style)
-        performance = optimization_results.get("performance", {})
+        # Objective history (from optimization loop), if available
+        history = st.session_state.get("layer1_objective_history", [])
+        if history:
+            df_hist = pd.DataFrame(history)
+            obj_fig = go.Figure()
+            obj_fig.add_trace(
+                go.Scatter(
+                    x=df_hist["iteration"],
+                    y=df_hist["objective"],
+                    mode="lines+markers",
+                    name="Objective",
+                    line=dict(color="#1f77b4"),
+                )
+            )
+            obj_fig.add_trace(
+                go.Scatter(
+                    x=df_hist["iteration"],
+                    y=df_hist["best_objective"],
+                    mode="lines",
+                    name="Best Objective",
+                    line=dict(color="#ff7f0e", dash="dash"),
+                )
+            )
+            obj_fig.update_layout(
+                title="Layer 1 Objective Function History",
+                xaxis_title="Iteration",
+                yaxis_title="Objective Value",
+                height=300,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            st.plotly_chart(obj_fig, use_container_width=True, key="layer1_objective_history_plot")
+        
+        # ------------------------------------------------------------------
+        # Parameterization variables history
+        # ------------------------------------------------------------------
+        plot_layer1_parameterization_history(optimization_results)
+        
+        # ------------------------------------------------------------------
+        # Performance metrics at t = 0 (forward mode)
+        # ------------------------------------------------------------------
         if performance:
             # Explicitly show the tank pressures at which performance is evaluated
             P_O_start_psi = performance.get("P_O_start_psi")
@@ -1732,6 +1859,7 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                         st.metric("Fuel Tank Pressure", f"{P_F_start_psi:.1f} psi")
 
             st.markdown("#### Performance at t = 0 (Forward Mode Metrics)")
+            PA_TO_PSI = 1.0 / 6894.76  # Conversion factor: Pa to psi
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 if "thrust" in performance:
@@ -1740,14 +1868,14 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     st.metric("Isp", f"{performance['Isp']:.1f} s")
             with col2:
                 if "Pc" in performance:
-                    st.metric("Chamber Pressure", f"{performance['Pc']/1e6:.2f} MPa")
+                    st.metric("Chamber Pressure", f"{performance['Pc'] * PA_TO_PSI:.1f} psi")
                 if "P_exit" in performance:
-                    st.metric("Exit Pressure", f"{performance['P_exit'] * 1e-6:.2f} MPa")
+                    st.metric("Real Exit Pressure", f"{performance['P_exit'] * PA_TO_PSI:.2f} psi")
                 # Show target exit pressure if available from optimizer
                 exit_targeting = optimization_results.get("exit_pressure_targeting", {})
                 target_P_exit = exit_targeting.get("target_P_exit", None)
                 if target_P_exit is not None:
-                    st.metric("Target Exit Pressure", f"{target_P_exit * 1e-6:.2f} MPa")
+                    st.metric("Target Exit Pressure", f"{target_P_exit * PA_TO_PSI:.2f} psi")
             with col3:
                 if "mdot_total" in performance:
                     st.metric("Total Mass Flow", f"{performance['mdot_total']:.3f} kg/s")
@@ -1772,36 +1900,181 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 if Cf_actual is not None:
                     st.metric("Cf (actual)", f"{Cf_actual:.3f}")
 
-        # Show optimized parameters
-        opt_params = optimization_results.get("optimized_parameters", {})
-        if opt_params:
-            st.markdown("#### Optimized Parameters")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Geometry**")
-                if "A_throat" in opt_params:
-                    D_throat = np.sqrt(4 * opt_params['A_throat'] / np.pi) * 1000
-                    st.caption(f"Throat Diameter: {D_throat:.2f} mm")
-                if "Lstar" in opt_params:
-                    st.caption(f"L*: {opt_params['Lstar'] * 1000:.1f} mm")
-                if "expansion_ratio" in opt_params:
-                    st.caption(f"Expansion Ratio: {opt_params['expansion_ratio']:.2f}")
-            with col2:
-                st.markdown("**Injector**")
-                if "d_pintle_tip" in opt_params:
-                    st.caption(f"Pintle Tip: {opt_params['d_pintle_tip'] * 1000:.2f} mm")
-                if "n_orifices" in opt_params:
-                    st.caption(f"Orifices: {int(opt_params['n_orifices'])}")
-                if "d_orifice" in opt_params:
-                    st.caption(f"Orifice Diameter: {opt_params['d_orifice'] * 1000:.2f} mm")
+        # ------------------------------------------------------------------
+        # Optimizer parameters table (geometry + injector + initial pressures)
+        # ------------------------------------------------------------------
+        st.markdown("#### Optimizer Parameters")
+        opt_params = optimization_results.get("optimized_parameters", {}) or {}
+
+        # Fallbacks from config if optimizer did not return explicit parameters
+        if not opt_params:
+            opt_params = {
+                "A_throat": getattr(config_obj.chamber, "A_throat", None),
+                "A_exit": getattr(config_obj.nozzle, "A_exit", None),
+                "Lstar": getattr(config_obj.chamber, "Lstar", None),
+                "chamber_diameter": getattr(
+                    config_obj.chamber,
+                    "chamber_inner_diameter",
+                    np.sqrt(
+                        4.0 * getattr(config_obj.chamber, "volume", 0.0)
+                        / (np.pi * max(getattr(config_obj.chamber, "length", 1e-6), 1e-6))
+                    ),
+                ),
+                "chamber_length": getattr(config_obj.chamber, "length", None),
+                "expansion_ratio": getattr(config_obj.nozzle, "expansion_ratio", None),
+            }
+
+        # Pintle injector details from config
+        injector_geom = getattr(getattr(config_obj, "injector", None), "geometry", None)
+        if injector_geom is not None:
+            fuel_geom = getattr(injector_geom, "fuel", None)
+            lox_geom = getattr(injector_geom, "lox", None)
+            if fuel_geom is not None:
+                opt_params.setdefault("d_pintle_tip", getattr(fuel_geom, "d_pintle_tip", None))
+            if lox_geom is not None:
+                opt_params.setdefault("n_orifices", getattr(lox_geom, "n_orifices", None))
+                opt_params.setdefault("d_orifice", getattr(lox_geom, "d_orifice", None))
+
+        rows = []
+
+        # Initial tank pressures (psi)
+        P_O_start_psi = performance.get("P_O_start_psi")
+        P_F_start_psi = performance.get("P_F_start_psi")
+        if P_O_start_psi is not None:
+            rows.append({"Parameter": "Init LOX Pressure", "Value": f"{P_O_start_psi:.1f}", "Units": "psi"})
+        if P_F_start_psi is not None:
+            rows.append({"Parameter": "Init Fuel Pressure", "Value": f"{P_F_start_psi:.1f}", "Units": "psi"})
+
+        # Chamber / nozzle geometry
+        A_throat = opt_params.get("A_throat")
+        A_exit = opt_params.get("A_exit")
+        Lstar_val = opt_params.get("Lstar", None)
+        D_inner = opt_params.get("chamber_diameter")
+        L_chamber = opt_params.get("chamber_length", None)
+        exp_ratio = opt_params.get("expansion_ratio")
+        
+        # Add L*, Inner Diameter, and Chamber Length back to table
+        if Lstar_val is not None:
+            rows.append({"Parameter": "L*", "Value": f"{Lstar_val:.4f}", "Units": "m"})
+        if D_inner is not None:
+            rows.append({"Parameter": "Inner Diameter", "Value": f"{D_inner*1000:.2f}", "Units": "mm"})
+        if L_chamber is not None:
+            rows.append({"Parameter": "Chamber Length", "Value": f"{L_chamber*1000:.2f}", "Units": "mm"})
+
+        # Calculate chamber outer diameter
+        D_outer = None
+        if D_inner is not None:
+            # Get wall thicknesses from config
+            ablative_cfg = getattr(config_obj, "ablative_cooling", None)
+            stainless_cfg = getattr(config_obj, "stainless_steel_case", None)
             
-            # Chamber geometry visualization (Layer 1 only)
-            st.markdown("#### Chamber Geometry (Layer 1 Result)")
-            try:
-                from .helpers import _display_chamber_geometry_plot
-                _display_chamber_geometry_plot(config_obj, optimization_results)
-            except Exception as e:
-                st.warning(f"Could not render chamber geometry plot: {e}")
+            wall_thickness = 0.0
+            if ablative_cfg and getattr(ablative_cfg, "enabled", False):
+                ablative_thickness = getattr(ablative_cfg, "initial_thickness", 0.0)
+                wall_thickness += ablative_thickness
+            if stainless_cfg and getattr(stainless_cfg, "enabled", False):
+                stainless_thickness = getattr(stainless_cfg, "thickness", 0.0)
+                wall_thickness += stainless_thickness
+            
+            D_outer = D_inner + 2.0 * wall_thickness
+        
+        if exp_ratio is not None:
+            rows.append({"Parameter": "Expansion Ratio", "Value": f"{exp_ratio:.3f}", "Units": "-"})
+
+        if A_throat is not None:
+            D_throat = np.sqrt(4 * A_throat / np.pi)
+            rows.append({"Parameter": "Throat Diameter", "Value": f"{D_throat*1000:.2f}", "Units": "mm"})
+            rows.append({"Parameter": "Throat Area", "Value": f"{A_throat*1e6:.2f}", "Units": "mm²"})
+        if A_exit is not None:
+            D_exit = np.sqrt(4 * A_exit / np.pi)
+            rows.append({"Parameter": "Exit Diameter", "Value": f"{D_exit*1000:.2f}", "Units": "mm"})
+            rows.append({"Parameter": "Exit Area", "Value": f"{A_exit*1e6:.2f}", "Units": "mm²"})
+        
+        # Add chamber outer diameter if calculated
+        if D_outer is not None:
+            rows.append({"Parameter": "Chamber Outer Diameter", "Value": f"{D_outer*1000:.2f}", "Units": "mm"})
+
+        # Injector parameters
+        if opt_params.get("d_pintle_tip") is not None:
+            rows.append(
+                {
+                    "Parameter": "Pintle Tip Diameter",
+                    "Value": f"{opt_params['d_pintle_tip']*1000:.2f}",
+                    "Units": "mm",
+                }
+            )
+        if opt_params.get("n_orifices") is not None:
+            rows.append(
+                {
+                    "Parameter": "Number of Orifices",
+                    "Value": f"{int(opt_params['n_orifices'])}",
+                    "Units": "-",
+                }
+            )
+        if opt_params.get("d_orifice") is not None:
+            rows.append(
+                {
+                    "Parameter": "Orifice Diameter",
+                    "Value": f"{opt_params['d_orifice']*1000:.2f}",
+                    "Units": "mm",
+                }
+            )
+
+        if rows:
+            df_params = pd.DataFrame(rows)
+            st.table(df_params)
+
+        # ------------------------------------------------------------------
+        # Chamber geometry visualizer (visual only)
+        # ------------------------------------------------------------------
+        st.markdown("#### Chamber Geometry Visualizer (Layer 1 Result)")
+        try:
+            from pintle_pipeline.chamber_geometry_visualizer import (
+                calculate_chamber_geometry_clear,
+                plot_chamber_geometry_clear,
+            )
+
+            # Safe geometry extraction (no recession here – static layer)
+            A_throat_vis = getattr(config_obj.chamber, "A_throat", A_throat or 1e-4)
+            D_throat_vis = np.sqrt(4 * A_throat_vis / np.pi)
+            D_chamber_vis = getattr(config_obj.chamber, "chamber_inner_diameter", D_inner or 0.08)
+            V_chamber_vis = getattr(config_obj.chamber, "volume", 0.001)
+            L_chamber_vis = getattr(config_obj.chamber, "length", L_chamber or 0.2)
+            Lstar_vis = getattr(config_obj.chamber, "Lstar", Lstar_val or 1.0)
+
+            L_nozzle_vis = getattr(config_obj.nozzle, "length", 0.1) if hasattr(config_obj, "nozzle") else 0.1
+            exp_ratio_vis = getattr(
+                config_obj.nozzle,
+                "expansion_ratio",
+                exp_ratio if exp_ratio is not None else 10.0,
+            )
+
+            ablative_cfg = getattr(config_obj, "ablative_cooling", None)
+            graphite_cfg = getattr(config_obj, "graphite_insert", None)
+
+            # Validate diameters with simple fallbacks
+            if D_chamber_vis <= 0 and V_chamber_vis > 0 and L_chamber_vis > 0:
+                D_chamber_vis = np.sqrt(4.0 * V_chamber_vis / (np.pi * L_chamber_vis))
+            if D_throat_vis <= 0 and A_throat_vis > 0:
+                D_throat_vis = np.sqrt(4.0 * A_throat_vis / np.pi)
+
+            geom_clear = calculate_chamber_geometry_clear(
+                L_chamber=L_chamber_vis,
+                D_chamber=D_chamber_vis,
+                D_throat=D_throat_vis,
+                L_nozzle=L_nozzle_vis,
+                expansion_ratio=exp_ratio_vis,
+                ablative_config=ablative_cfg,
+                graphite_config=graphite_cfg,
+                recession_chamber=0.0,
+                recession_graphite=0.0,
+                n_points=200,
+            )
+
+            fig_geom = plot_chamber_geometry_clear(geom_clear, config_obj)
+            st.plotly_chart(fig_geom, use_container_width=True, key="layer1_chamber_contour_plot")
+        except Exception as e:
+            st.warning(f"Could not render chamber geometry visualization: {e}")
 
         # ------------------------------------------------------------------
         # Layer 1 export for downstream Layer 2-only runs
@@ -2045,17 +2318,20 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 objective_callback=objective_callback,
             )
             
-            # Run time series with optimized pressure curves to get full results
+            # Run time series with optimized pressure curves to get full results.
+            # IMPORTANT: For Layer 2 we explicitly *disable* ablative/graphite
+            # geometry evolution. Layer 2 is only about the pressure candidate;
+            # thermal protection and recession are handled in Layer 3.
             optimized_runner = PintleEngineRunner(optimized_config)
             try:
                 full_time_results = optimized_runner.evaluate_arrays_with_time(
                     time_array,
                     P_tank_O_optimized,
                     P_tank_F_optimized,
-                    track_ablative_geometry=True,
+                    track_ablative_geometry=False,
                     use_coupled_solver=False,
                 )
-            except Exception as e:
+            except Exception:
                 full_time_results = {}
             
             # Build time-varying summary
@@ -2224,100 +2500,10 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             time_varying = optimization_results.get("time_varying_results", None)
         
         if time_varying:
-            st.markdown("#### Time-Varying Analysis Results")
-            if "max_recession_chamber" in time_varying:
-                st.metric("Max Chamber Recession", f"{time_varying['max_recession_chamber'] * 1000:.2f} mm")
-            if "max_recession_throat" in time_varying:
-                st.metric("Max Throat Recession", f"{time_varying['max_recession_throat'] * 1000:.2f} mm")
-            
-            # Show thermal protection
-            opt_config = st.session_state.get("optimized_config", config_obj)
-            if opt_config:
-                ablative_cfg = opt_config.ablative_cooling if hasattr(opt_config, 'ablative_cooling') else None
-                graphite_cfg = opt_config.graphite_insert if hasattr(opt_config, 'graphite_insert') else None
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if ablative_cfg and ablative_cfg.enabled:
-                        st.metric("Ablative Thickness", f"{ablative_cfg.initial_thickness * 1000:.2f} mm")
-                        st.caption("Initial guess (will be refined in Layer 3)")
-                with col2:
-                    if graphite_cfg and graphite_cfg.enabled:
-                        st.metric("Graphite Thickness", f"{graphite_cfg.initial_thickness * 1000:.2f} mm")
-                        st.caption("Initial guess (will be refined in Layer 3)")
-            
             # ------------------------------------------------------------------
-            # Layer 2 export: download YAML with all Layer 2 outputs
+            # Detailed Layer 2 plots (pressure curves, COPV, thrust, O/F, Pc, objective)
             # ------------------------------------------------------------------
-            layer2_results_safe = layer2_results if isinstance(layer2_results, dict) else {}
-            layer2_summary = layer2_results_safe.get("summary", {})
-            time_array_s = layer2_results_safe.get("time_array")
-            P_tank_O_opt = layer2_results_safe.get("P_tank_O_optimized")
-            P_tank_F_opt = layer2_results_safe.get("P_tank_F_optimized")
-
-            if layer2_summary and time_array_s is not None and P_tank_O_opt is not None and P_tank_F_opt is not None:
-                st.markdown("#### Download Layer 2 Results (YAML)")
-
-                # Start from the optimized PintleEngineConfig as YAML.
-                layer2_cfg = st.session_state.get("optimized_config", config_obj)
-                if hasattr(layer2_cfg, "model_dump"):
-                    layer2_config_dict = layer2_cfg.model_dump(exclude_none=False)
-                else:
-                    layer2_config_dict = {}
-
-                # Helper to recursively convert NumPy types into plain Python
-                # types so that YAML stays portable and can be loaded safely.
-                def _sanitize_for_yaml(obj):
-                    import numpy as _np
-
-                    if isinstance(obj, _np.ndarray):
-                        return obj.tolist()
-                    if isinstance(obj, _np.generic):
-                        # NumPy scalar → native Python scalar
-                        return obj.item()
-                    if isinstance(obj, dict):
-                        return {k: _sanitize_for_yaml(v) for k, v in obj.items()}
-                    if isinstance(obj, (list, tuple)):
-                        return [_sanitize_for_yaml(v) for v in obj]
-                    return obj
-
-                # Attach design requirements and all Layer 2 outputs.
-                layer2_config_dict.setdefault("design_requirements", requirements)
-                layer2_config_dict.setdefault("layer2", {})
-                layer2_config_dict["layer2"].update(
-                    {
-                        "summary": layer2_summary,
-                        "time_array_s": list(map(float, np.asarray(time_array_s, dtype=float).tolist())),
-                        "P_tank_O_pa": list(map(float, np.asarray(P_tank_O_opt, dtype=float).tolist())),
-                        "P_tank_F_pa": list(map(float, np.asarray(P_tank_F_opt, dtype=float).tolist())),
-                        "time_varying_summary": time_varying,
-                    }
-                )
-
-                # Optionally attach full time-series results if present (can be large).
-                full_results = layer2_results_safe.get("full_time_results")
-                if isinstance(full_results, dict):
-                    # Recursively sanitize all NumPy values
-                    layer2_config_dict["layer2"]["full_time_results"] = _sanitize_for_yaml(full_results)
-
-                import yaml
-
-                # Final pass: make sure the entire structure is YAML‑friendly
-                safe_layer2_config = _sanitize_for_yaml(layer2_config_dict)
-                layer2_yaml_str = yaml.dump(safe_layer2_config, default_flow_style=False)
-
-                st.download_button(
-                    label="💾 Download Layer 2 Results (YAML)",
-                    data=layer2_yaml_str,
-                    file_name="layer2_results.yaml",
-                    mime="text/yaml",
-                    help="Download the optimized Layer 2 PintleEngineConfig plus all Layer 2 outputs (summary, pressure curves, and time-varying results).",
-                )
-            
-            # ------------------------------------------------------------------
-            # Detailed time-series plots (converged pressure, thrust, O/F, objective)
-            # ------------------------------------------------------------------
-            st.markdown("#### Converged Time-Series Plots")
+            st.markdown("### Layer 2 Plots")
 
             layer2_results = st.session_state.get("layer2_results", {})
             full_results = layer2_results.get("full_time_results", {})
@@ -2363,43 +2549,6 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                         }
                     )
 
-                    # ------------------------------------------------------------------
-                    # COPV evaluation from converged Layer 2 curves (T0 = Tp = 260 K)
-                    # ------------------------------------------------------------------
-                    try:
-                        copv_volume_m3 = float(requirements.get("copv_free_volume_m3") or 0.0)
-                    except Exception:
-                        copv_volume_m3 = 0.0
-
-                    if copv_volume_m3 > 0.0:
-                        opt_config = st.session_state.get("optimized_config", config_obj)
-                        if opt_config is None:
-                            opt_config = config_obj
-
-                        copv_results = calculate_copv_pressure_curve(
-                            time_array=times,
-                            mdot_O=df_ts["mdot_O (kg/s)"].to_numpy(dtype=float),
-                            mdot_F=df_ts["mdot_F (kg/s)"].to_numpy(dtype=float),
-                            P_tank_O=np.asarray(P_tank_O_opt, dtype=float),
-                            P_tank_F=np.asarray(P_tank_F_opt, dtype=float),
-                            config=opt_config,
-                            copv_volume_m3=copv_volume_m3,
-                            T0_K=260.0,
-                            Tp_K=260.0,
-                        )
-
-                        # Store for cross-tab reuse
-                        st.session_state["layer2_copv_results"] = copv_results
-
-                        # Dedicated COPV pressure plot for Layer 2-only workflow
-                        st.markdown("#### COPV Pressure Curve (Layer 2, T = 260 K)")
-                        pressure_curves_l2 = {
-                            "time": times,
-                            "P_tank_O": np.asarray(P_tank_O_opt, dtype=float),
-                            "P_tank_F": np.asarray(P_tank_F_opt, dtype=float),
-                        }
-                        plot_copv_pressure(copv_results, pressure_curves_l2)
-
                     # Burn summary – use Layer 2 summary (from final pressure curves)
                     layer2_summary = (
                         layer2_results.get("summary", {})
@@ -2436,22 +2585,6 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                         if np.isfinite(ri_req):
                             required_impulse_kNs = ri_req / 1000.0
 
-                    # Display metrics – do not recompute impulse in the UI
-                    col_ts1, col_ts2, col_ts3 = st.columns(3)
-                    col_ts1.metric("Burn duration", f"{burn_duration:.2f} s")
-                    col_ts2.metric("Average thrust", f"{avg_thrust_kN:.2f} kN")
-
-                    if np.isfinite(total_impulse_kNs) and np.isfinite(required_impulse_kNs):
-                        col_ts3.metric(
-                            "Total impulse",
-                            f"{total_impulse_kNs:.2f} kN·s",
-                            delta=f"Goal: {required_impulse_kNs:.2f} kN·s",
-                        )
-                    elif np.isfinite(total_impulse_kNs):
-                        col_ts3.metric("Total impulse", f"{total_impulse_kNs:.2f} kN·s")
-                    else:
-                        col_ts3.metric("Total impulse", "N/A")
-
                     # Tank pressure curves (converged pressure candidate)
                     pressure_fig = go.Figure()
                     pressure_fig.add_trace(
@@ -2480,6 +2613,58 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                     )
                     st.plotly_chart(pressure_fig, use_container_width=True, key="layer2_pressure_curves")
+
+                    # COPV evaluation from converged Layer 2 curves (T0 = Tp = 260 K)
+                    try:
+                        copv_volume_m3 = float(requirements.get("copv_free_volume_m3") or 0.0)
+                    except Exception:
+                        copv_volume_m3 = 0.0
+
+                    if copv_volume_m3 > 0.0:
+                        opt_config = st.session_state.get("optimized_config", config_obj)
+                        if opt_config is None:
+                            opt_config = config_obj
+
+                        copv_results = calculate_copv_pressure_curve(
+                            time_array=times,
+                            mdot_O=df_ts["mdot_O (kg/s)"].to_numpy(dtype=float),
+                            mdot_F=df_ts["mdot_F (kg/s)"].to_numpy(dtype=float),
+                            P_tank_O=np.asarray(P_tank_O_opt, dtype=float),
+                            P_tank_F=np.asarray(P_tank_F_opt, dtype=float),
+                            config=opt_config,
+                            copv_volume_m3=copv_volume_m3,
+                            T0_K=260.0,
+                            Tp_K=260.0,
+                        )
+
+                        # Store for cross-tab reuse
+                        st.session_state["layer2_copv_results"] = copv_results
+
+                        # Dedicated COPV pressure plot for Layer 2-only workflow
+                        st.markdown("#### COPV Pressure Curve (Layer 2, T = 260 K)")
+                        pressure_curves_l2 = {
+                            "time": times,
+                            "P_tank_O": np.asarray(P_tank_O_opt, dtype=float),
+                            "P_tank_F": np.asarray(P_tank_F_opt, dtype=float),
+                        }
+                        plot_copv_pressure(copv_results, pressure_curves_l2)
+
+                    # Display metrics – do not recompute impulse in the UI
+                    col_ts1, col_ts2, col_ts3, col_ts4 = st.columns(4)
+                    col_ts1.metric("Burn duration", f"{burn_duration:.2f} s")
+                    col_ts2.metric("Average thrust", f"{avg_thrust_kN:.2f} kN")
+                    col_ts3.metric("Peak thrust", f"{max_thrust_kN:.2f} kN")
+
+                    if np.isfinite(total_impulse_kNs) and np.isfinite(required_impulse_kNs):
+                        col_ts4.metric(
+                            "Total impulse",
+                            f"{total_impulse_kNs:.2f} kN·s",
+                            delta=f"Goal: {required_impulse_kNs:.2f} kN·s",
+                        )
+                    elif np.isfinite(total_impulse_kNs):
+                        col_ts4.metric("Total impulse", f"{total_impulse_kNs:.2f} kN·s")
+                    else:
+                        col_ts4.metric("Total impulse", "N/A")
 
                     # Thrust vs time
                     thrust_fig = go.Figure()
@@ -2519,6 +2704,25 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     )
                     st.plotly_chart(of_fig, use_container_width=True, key="layer2_of_vs_time")
 
+                    # Chamber pressure vs time (psi)
+                    pc_fig = go.Figure()
+                    pc_fig.add_trace(
+                        go.Scatter(
+                            x=df_ts["time"],
+                            y=df_ts["Pc (psi)"],
+                            mode="lines",
+                            name="Pc",
+                            line=dict(color="#d62728"),
+                        )
+                    )
+                    pc_fig.update_layout(
+                        title="Chamber Pressure vs Time",
+                        xaxis_title="Time [s]",
+                        yaxis_title="Pc [psi]",
+                        height=300,
+                    )
+                    st.plotly_chart(pc_fig, use_container_width=True, key="layer2_pc_vs_time")
+
                     # Objective history (from optimization loop), if available
                     history = st.session_state.get("layer2_objective_history", [])
                     if history:
@@ -2550,6 +2754,73 @@ def _layer2_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                         )
                         st.plotly_chart(obj_fig, use_container_width=True, key="layer2_objective_history_plot")
+
+                    # ------------------------------------------------------------------
+                    # Layer 2 export: download YAML with all Layer 2 outputs
+                    # (kept at the bottom, after plots and metrics)
+                    # ------------------------------------------------------------------
+                    layer2_results_safe = layer2_results if isinstance(layer2_results, dict) else {}
+                    layer2_summary = layer2_results_safe.get("summary", {})
+                    time_array_s = layer2_results_safe.get("time_array")
+                    P_tank_O_opt = layer2_results_safe.get("P_tank_O_optimized")
+                    P_tank_F_opt = layer2_results_safe.get("P_tank_F_optimized")
+
+                    if layer2_summary and time_array_s is not None and P_tank_O_opt is not None and P_tank_F_opt is not None:
+                        # Start from the optimized PintleEngineConfig as YAML.
+                        layer2_cfg = st.session_state.get("optimized_config", config_obj)
+                        if hasattr(layer2_cfg, "model_dump"):
+                            layer2_config_dict = layer2_cfg.model_dump(exclude_none=False)
+                        else:
+                            layer2_config_dict = {}
+
+                        # Helper to recursively convert NumPy types into plain Python
+                        # types so that YAML stays portable and can be loaded safely.
+                        def _sanitize_for_yaml(obj):
+                            import numpy as _np
+
+                            if isinstance(obj, _np.ndarray):
+                                return obj.tolist()
+                            if isinstance(obj, _np.generic):
+                                # NumPy scalar → native Python scalar
+                                return obj.item()
+                            if isinstance(obj, dict):
+                                return {k: _sanitize_for_yaml(v) for k, v in obj.items()}
+                            if isinstance(obj, (list, tuple)):
+                                return [_sanitize_for_yaml(v) for v in obj]
+                            return obj
+
+                        # Attach design requirements and all Layer 2 outputs.
+                        layer2_config_dict.setdefault("design_requirements", requirements)
+                        layer2_config_dict.setdefault("layer2", {})
+                        layer2_config_dict["layer2"].update(
+                            {
+                                "summary": layer2_summary,
+                                "time_array_s": list(map(float, np.asarray(time_array_s, dtype=float).tolist())),
+                                "P_tank_O_pa": list(map(float, np.asarray(P_tank_O_opt, dtype=float).tolist())),
+                                "P_tank_F_pa": list(map(float, np.asarray(P_tank_F_opt, dtype=float).tolist())),
+                                "time_varying_summary": time_varying,
+                            }
+                        )
+
+                        # Optionally attach full time-series results if present (can be large).
+                        full_results = layer2_results_safe.get("full_time_results")
+                        if isinstance(full_results, dict):
+                            # Recursively sanitize all NumPy values
+                            layer2_config_dict["layer2"]["full_time_results"] = _sanitize_for_yaml(full_results)
+
+                        import yaml
+
+                        # Final pass: make sure the entire structure is YAML‑friendly
+                        safe_layer2_config = _sanitize_for_yaml(layer2_config_dict)
+                        layer2_yaml_str = yaml.dump(safe_layer2_config, default_flow_style=False)
+
+                        st.download_button(
+                            label="💾 Download Layer 2 Results (YAML)",
+                            data=layer2_yaml_str,
+                            file_name="layer2_results.yaml",
+                            mime="text/yaml",
+                            help="Download the optimized Layer 2 PintleEngineConfig plus all Layer 2 outputs (summary, pressure curves, and time-varying results).",
+                        )
                 except Exception as plot_exc:
                     st.warning(f"Could not render Layer 2 time-series plots: {plot_exc}")
     elif layer2_valid is None:

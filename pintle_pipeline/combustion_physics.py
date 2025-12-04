@@ -208,7 +208,7 @@ def calculate_reaction_time_scale(
     
     # Clamp to reasonable range (0.1 ms to 100 ms)
     tau_chem = np.clip(tau_chem, 0.1e-5, 1e-2)
-    print(f"tau_chem: {tau_chem}")
+    # print(f"tau_chem: {tau_chem}")
     return float(tau_chem)
 
 
@@ -365,7 +365,7 @@ def calculate_mixing_efficiency(
         )
     else:
         evap_factor = 0.5  # Unknown
-    print(f"evaporation_length: {evaporation_length}, evap_factor: {evap_factor}")
+    # print(f"evaporation_length: {evaporation_length}, evap_factor: {evap_factor}")
 
     tau_res_eff = (Lstar / max(U, 1e-4)) * (1.0 / evap_factor)
 
@@ -382,7 +382,7 @@ def calculate_mixing_efficiency(
         lox_velocity=U_inj_estimate,
         Re_chamber=Re_chamber,
     )
-    print(f"Dc: {Dc}, L_recirc: {L_recirc}")
+    # print(f"Dc: {Dc}, L_recirc: {L_recirc}")
 
     # Physics-based SMD factor
     # Calculate injector Reynolds and Weber for physics-based calculation
@@ -402,7 +402,7 @@ def calculate_mixing_efficiency(
 
     Da_mix = tau_res_eff / tau_mix
     Da_mix = np.clip(Da_mix, 0.0, 50.0)
-    print(f'tau_res_eff: {tau_res_eff}, tau_mix: {tau_mix}, Da_mix: {Da_mix}')
+    # print(f'tau_res_eff: {tau_res_eff}, tau_mix: {tau_mix}, Da_mix: {Da_mix}')
     eta_m = 1.0 - np.exp(-Da_mix)
     return float(np.clip(eta_m, 0.0, 1.0))
 
@@ -488,7 +488,10 @@ def calculate_combustion_efficiency_advanced(
         eta_Lstar = 1.0 - config.C * (1.0 - Lstar / 1.0)
         eta_Lstar = np.clip(eta_Lstar, 0.0, 1.0)
     else:  # exponential (default)
-        SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
+        if spray_diagnostics is not None:
+            SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
+        else:
+            SMD = 100e-6  # Default SMD if diagnostics not available
         #print(f"the SMD is {SMD}")
         eta_Lstar = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, SMD, Lstar)
     
@@ -504,7 +507,7 @@ def calculate_combustion_efficiency_advanced(
     # Da >> 1: equilibrium (eta → 1)
     # Da ~ 1: finite-rate (eta ~ 0.8-0.95)
     # Da << 1: slow chemistry (eta ~ 0.5-0.8)
-    print(f"Da: {Da}")
+    # print(f"Da: {Da}")
     eta_kinetics = 1 - np.exp(-Da**0.5)
         #eta_kinetics = 0.5 + 0.3 * (Da / 0.1)
     
@@ -524,8 +527,8 @@ def calculate_combustion_efficiency_advanced(
         eta_mixing = 1.0  # Assume perfect mixing if no diagnostics
     
     # Apply spray quality penalty if enabled
-    if config.use_spray_correction:
-        spray_quality_good = spray_diagnostics.get("constraints_satisfied", True) if spray_diagnostics else True
+    if config.use_spray_correction and spray_diagnostics is not None:
+        spray_quality_good = spray_diagnostics.get("constraints_satisfied", True)
         if not spray_quality_good:
             eta_mixing *= config.spray_penalty_factor
     
@@ -543,7 +546,7 @@ def calculate_combustion_efficiency_advanced(
     eta_turbulence = np.clip(eta_turbulence, 0.85, 1.0)
     
     # 5. Combined efficiency
-    print(f"eta_Lstar: {eta_Lstar}, eta_kinetics: {eta_kinetics}, eta_mixing: {eta_mixing}, eta_turbulence: {eta_turbulence}")
+    # print(f"eta_Lstar: {eta_Lstar}, eta_kinetics: {eta_kinetics}, eta_mixing: {eta_mixing}, eta_turbulence: {eta_turbulence}")
     eta_total = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
     
     # Apply cooling efficiency if provided (external)

@@ -540,7 +540,7 @@ def run_layer2_pressure(
     min_pressure_pa: float = 1e6,  # Legacy absolute minimum clamp (~150 psi)
     optimal_of_ratio: Optional[float] = None,  # Target O/F ratio for validation
     min_stability_margin: Optional[float] = None,  # Minimum stability margin
-    max_iterations: int = 30,  # Maximum optimization iterations
+    max_iterations: int = 20,  # Maximum optimization iterations (reduced from 30 for faster convergence)
     max_evaluations: Optional[int] = None,  # Maximum function evaluations (None = unlimited)
     save_evaluation_plots: bool = False,  # Save PNG plots of each evaluation's pressure curves
     min_lox_pressure_floor_pa: Optional[float] = None,
@@ -727,9 +727,14 @@ def run_layer2_pressure(
         "iter": 0,
         "max_iter": max_iterations,
         "best_obj": float("inf"),
+        "best_x": None,  # Track the X vector corresponding to best_obj
         "last_obj": None,
+        "prev_obj": None,  # Track previous objective for rate of change
         "eval_count": 0,
-        "start_time": time.time()
+        "start_time": time.time(),
+        "converged": False,  # Track if we've effectively converged
+        "no_improvement_count": 0,  # Count iterations without significant improvement
+        "small_change_count": 0,  # Count iterations with very small rate of change
     }
     
     def layer2_callback(xk):
@@ -737,6 +742,53 @@ def run_layer2_pressure(
         frac = min(layer2_state["iter"] / max(layer2_state["max_iter"], 1), 1.0)
         progress_pct = int(frac * 100)
         elapsed = time.time() - layer2_state["start_time"]
+        
+        # Check for convergence based on rate of change (regardless of absolute objective value)
+        if layer2_state["last_obj"] is not None and layer2_state["prev_obj"] is not None:
+            # Calculate relative rate of change
+            current_obj = layer2_state["last_obj"]
+            prev_obj = layer2_state["prev_obj"]
+            
+            # Relative change: |current - previous| / max(|current|, |previous|, small_epsilon)
+            abs_change = abs(current_obj - prev_obj)
+            max_magnitude = max(abs(current_obj), abs(prev_obj), 1e-9)
+            relative_change = abs_change / max_magnitude
+            
+            # If relative change is very small (< 0.1% or < 1e-4 absolute), count it
+            if relative_change < 1e-3 or abs_change < 1e-4:
+                layer2_state["small_change_count"] += 1
+            else:
+                layer2_state["small_change_count"] = 0  # Reset if we see meaningful change
+            
+            # If we've had 3+ consecutive iterations with very small rate of change, we've converged
+            if layer2_state["small_change_count"] >= 3:
+                layer2_state["converged"] = True
+                layer2_logger.info(
+                    f"✓ Early convergence detected: objective rate of change is negligible "
+                    f"(relative change < 0.1% for {layer2_state['small_change_count']} iterations). "
+                    f"Best objective: {layer2_state['best_obj']:.6f}, "
+                    f"Current: {current_obj:.6f}, Change: {abs_change:.2e} ({relative_change*100:.4f}%)"
+                )
+        
+        # Also check for convergence: if objective is very low and hasn't improved much (legacy check)
+        if layer2_state["last_obj"] is not None and not layer2_state["converged"]:
+            # If objective is already very good (< 0.1), check if we've converged
+            if layer2_state["best_obj"] < 0.1:
+                # Check if improvement in last iteration was negligible
+                if layer2_state["last_obj"] is not None and layer2_state["best_obj"] is not None:
+                    improvement = layer2_state["best_obj"] - layer2_state["last_obj"]
+                    if improvement < 1e-5:  # Very small improvement
+                        layer2_state["no_improvement_count"] += 1
+                    else:
+                        layer2_state["no_improvement_count"] = 0
+                    
+                    # If we've had 3+ iterations with no significant improvement and objective is already very low
+                    if layer2_state["no_improvement_count"] >= 3 and layer2_state["best_obj"] < 0.1:
+                        layer2_state["converged"] = True
+                        layer2_logger.info(
+                            f"✓ Early convergence detected: objective {layer2_state['best_obj']:.6f} "
+                            f"has not improved significantly in {layer2_state['no_improvement_count']} iterations"
+                        )
         
         # Log progress
         if layer2_state["last_obj"] is not None:
@@ -892,6 +944,15 @@ def run_layer2_pressure(
                 handler.flush()
             return 1e6
         
+        # Early return if we've already converged (rate of change is negligible)
+        # This helps the optimizer stop faster by returning a constant value
+        if phase == "local" and layer2_state.get("converged", False):
+            best_obj = layer2_state.get("best_obj", 1e6)
+            if np.isfinite(best_obj):
+                # Return the best objective we've seen - this constant value will
+                # trigger the tolerance-based stopping in L-BFGS-B
+                return float(best_obj)
+        
         # Select resolution for this objective call
         if n_points is None:
             n_points = n_time_points
@@ -987,19 +1048,76 @@ def run_layer2_pressure(
             thrust_hist = np.atleast_1d(results_layer2.get("F", np.full(n_points, peak_thrust)))
             available_n = min(thrust_hist.shape[0], n_points)
             if available_n < 1:
+                layer2_logger.warning(f"    No valid time points in results for eval #{eval_num}; returning large penalty.")
+                for handler in layer2_logger.handlers:
+                    handler.flush()
                 return 1e6
             
             thrust_hist = thrust_hist[:available_n]
-            # Robustly clamp any non-finite thrust values so that downstream
-            # penalties stay finite and the optimizer can move away from
-            # pathological regions instead of getting stuck with NaNs.
+            time_hist = time_eval[:available_n]
+            
+            # CRITICAL: Validate that results are not mostly NaN/invalid
+            # Check if too many time steps failed (more than 50% NaN is unacceptable)
+            finite_thrust_mask = np.isfinite(thrust_hist)
+            finite_thrust_count = np.sum(finite_thrust_mask)
+            finite_thrust_ratio = finite_thrust_count / available_n if available_n > 0 else 0.0
+            
+            if finite_thrust_ratio < 0.5:
+                # More than 50% of time steps failed - reject this solution
+                layer2_logger.warning(
+                    f"    Too many failed time steps for eval #{eval_num}: "
+                    f"only {finite_thrust_count}/{available_n} ({finite_thrust_ratio*100:.1f}%) have valid thrust. "
+                    f"Returning large penalty."
+                )
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+                return 1e6
+            
+            # Check if critical metrics (thrust, OF) are valid
+            # If average thrust is NaN or zero, reject
+            valid_thrust_values = thrust_hist[finite_thrust_mask]
+            if len(valid_thrust_values) == 0:
+                layer2_logger.warning(
+                    f"    No valid thrust values for eval #{eval_num}; returning large penalty."
+                )
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+                return 1e6
+            
+            avg_thrust = float(np.mean(valid_thrust_values))
+            if not np.isfinite(avg_thrust) or avg_thrust <= 0:
+                layer2_logger.warning(
+                    f"    Invalid average thrust ({avg_thrust}) for eval #{eval_num}; returning large penalty."
+                )
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+                return 1e6
+            
+            # Check OF ratio validity
+            MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(available_n, optimal_of_ratio if optimal_of_ratio else 2.3)))
+            MR_hist = MR_hist[:available_n]
+            finite_MR_mask = np.isfinite(MR_hist) & (MR_hist > 0) & (MR_hist < 100)  # Reasonable bounds
+            finite_MR_count = np.sum(finite_MR_mask)
+            
+            if finite_MR_count < available_n * 0.5:
+                # More than 50% of OF ratios are invalid - reject
+                layer2_logger.warning(
+                    f"    Too many invalid OF ratios for eval #{eval_num}: "
+                    f"only {finite_MR_count}/{available_n} ({finite_MR_count/available_n*100:.1f}%) are valid. "
+                    f"Returning large penalty."
+                )
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+                return 1e6
+            
+            # Now safely replace NaN values with defaults for remaining calculations
+            # (but we've already validated that we have enough valid data)
             thrust_hist = np.nan_to_num(
                 thrust_hist,
                 nan=0.0,
                 posinf=1e6,
                 neginf=-1e6,
             )
-            time_hist = time_eval[:available_n]
             
             # Note: Initial pressures are fixed from Layer 1 and assumed to produce peak_thrust
             # We do not optimize or check initial thrust - it's already correct from Layer 1
@@ -1107,21 +1225,24 @@ def run_layer2_pressure(
                 stability_penalty = max(0, 0.7 - min_stability) * 10.0
             
             # Check 4: O/F ratio (if specified)
+            # Note: MR_hist was already extracted and validated above
             of_penalty = 0.0
             if optimal_of_ratio is not None:
-                MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(available_n, optimal_of_ratio)))
-                MR_hist = MR_hist[:available_n]
-                MR_hist = np.nan_to_num(
-                    MR_hist,
-                    nan=optimal_of_ratio,
-                    posinf=optimal_of_ratio * 5.0,
-                    neginf=0.0,
-                )
-                avg_MR = float(np.mean(MR_hist))
-                MR_error = abs(avg_MR - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
-                # Allow 20% O/F error before penalty
-                if MR_error > 0.20:
-                    of_penalty = (MR_error - 0.20) * 20.0
+                # Use only valid MR values for calculation
+                valid_MR_values = MR_hist[finite_MR_mask]
+                if len(valid_MR_values) > 0:
+                    avg_MR = float(np.mean(valid_MR_values))
+                    if np.isfinite(avg_MR) and avg_MR > 0:
+                        MR_error = abs(avg_MR - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
+                        # Allow 20% O/F error before penalty
+                        if MR_error > 0.20:
+                            of_penalty = (MR_error - 0.20) * 20.0
+                    else:
+                        # Invalid average MR - add penalty
+                        of_penalty = 50.0
+                else:
+                    # No valid MR values - large penalty
+                    of_penalty = 100.0
             
             # Objective: minimize penalties (no initial thrust penalty - it's fixed from Layer 1)
             components = [
@@ -1160,9 +1281,18 @@ def run_layer2_pressure(
                     n_seg_fuel=N_SEGMENTS,
                 )
             
-            # Update best objective
+            # Update best objective and corresponding X vector
+            prev_best = layer2_state["best_obj"]
             if obj < layer2_state["best_obj"]:
+                improvement = prev_best - obj
                 layer2_state["best_obj"] = obj
+                # CRITICAL: Save the X vector that produced this best objective
+                # Make a copy to avoid reference issues
+                layer2_state["best_x"] = np.array(x_layer2, copy=True)
+                # Reset counters if we made significant progress
+                if improvement > 1e-5:
+                    layer2_state["no_improvement_count"] = 0
+                    layer2_state["small_change_count"] = 0  # Reset rate-of-change counter too
                 layer2_logger.info(
                     f"    ✓ New best objective: {obj:.6f} "
                     f"(penalties: impulse={impulse_penalty:.2f}, burn_time={burn_time_penalty:.2f}, "
@@ -1176,6 +1306,8 @@ def run_layer2_pressure(
                     f"Evaluation took {eval_time:.2f}s"
                 )
             
+            # Update previous objective before setting new one (for rate of change tracking)
+            layer2_state["prev_obj"] = layer2_state["last_obj"]
             layer2_state["last_obj"] = obj
 
             # Stream objective history to external callback (e.g., UI plot) if provided
@@ -1257,15 +1389,46 @@ def run_layer2_pressure(
         for handler in layer2_logger.handlers:
             handler.flush()
 
+        # CRITICAL FIX: Use the best X vector found during DE phase (which may be better than de_result.x)
+        # The layer2_state["best_obj"] tracks the best objective across ALL evaluations,
+        # and layer2_state["best_x"] contains the corresponding X vector
+        if layer2_state["best_x"] is not None and layer2_state["best_obj"] < de_result.fun:
+            # We found a better solution during DE than what DE returned
+            local_start_x = layer2_state["best_x"]
+            layer2_logger.info(
+                f"Using best solution from DE phase (obj={layer2_state['best_obj']:.6f}) "
+                f"instead of DE result (obj={de_result.fun:.6f}) as starting point for local optimization"
+            )
+        else:
+            # Use DE's result as starting point
+            local_start_x = de_result.x
+            layer2_logger.info(
+                f"Using DE result (obj={de_result.fun:.6f}) as starting point for local optimization"
+            )
+        for handler in layer2_logger.handlers:
+            handler.flush()
+
         # Local polish with L-BFGS-B (full time grid, n_time_points)
+        # Use tighter tolerances to stop earlier when converged
+        # Also reduce max iterations if DE already found a good solution
+        effective_max_iter = max_iterations
+        best_obj_so_far = min(layer2_state["best_obj"], de_result.fun)
+        if best_obj_so_far < 1.0:  # If we found a good solution
+            effective_max_iter = min(max_iterations, 15)  # Use fewer iterations
+            layer2_logger.info(
+                f"Best solution so far (obj={best_obj_so_far:.6f}), "
+                f"limiting local search to {effective_max_iter} iterations"
+            )
+        
         result_layer2 = scipy_minimize(
             layer2_objective_local,
-            de_result.x,
+            local_start_x,  # Use the best X vector found during DE
             method="L-BFGS-B",
             bounds=bounds,
             options={
-                "maxiter": max_iterations,
-                "ftol": 1e-4,
+                "maxiter": effective_max_iter,
+                "ftol": 1e-5,  # Tighter tolerance for earlier stopping
+                "gtol": 1e-5,  # Gradient tolerance - stop when gradient is small
             },
             callback=layer2_callback,
         )

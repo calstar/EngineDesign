@@ -242,13 +242,144 @@ def plot_optimization_convergence(optimization_results: Dict[str, Any]) -> None:
     st.markdown("#### 🎯 Optimized Pressure Profiles")
     col1, col2 = st.columns(2)
     with col1:
-        lox_end = pressure_info.get("lox_end_ratio", 0.7)
-        lox_desc = "Regulated" if lox_end > 0.92 else ("Mild blowdown" if lox_end > 0.75 else "Aggressive blowdown")
-        st.metric("LOX Tank End Pressure", f"{lox_end*100:.1f}%", delta=lox_desc, delta_color="off")
+        # Check if we have initial pressure info (Layer 1 static only)
+        lox_start_psi = pressure_info.get("lox_start_psi")
+        lox_end_ratio = pressure_info.get("lox_end_ratio", 0.7)
+        
+        # For Layer 1 (static only), show initial pressure in psi
+        # For Layer 2+, show end pressure ratio
+        if lox_start_psi is not None:
+            # Layer 1: Show initial pressure
+            st.metric("LOX Tank Initial Pressure", f"{lox_start_psi:.1f} psi", delta="Static (Layer 1)", delta_color="off")
+        else:
+            # Layer 2+: Show end pressure ratio
+            lox_desc = "Regulated" if lox_end_ratio > 0.92 else ("Mild blowdown" if lox_end_ratio > 0.75 else "Aggressive blowdown")
+            st.metric("LOX Tank End Pressure", f"{lox_end_ratio*100:.1f}%", delta=lox_desc, delta_color="off")
     with col2:
-        fuel_end = pressure_info.get("fuel_end_ratio", 0.7)
-        fuel_desc = "Regulated" if fuel_end > 0.92 else ("Mild blowdown" if fuel_end > 0.75 else "Aggressive blowdown")
-        st.metric("Fuel Tank End Pressure", f"{fuel_end*100:.1f}%", delta=fuel_desc, delta_color="off")
+        # Check if we have initial pressure info (Layer 1 static only)
+        fuel_start_psi = pressure_info.get("fuel_start_psi")
+        fuel_end_ratio = pressure_info.get("fuel_end_ratio", 0.7)
+        
+        # For Layer 1 (static only), show initial pressure in psi
+        # For Layer 2+, show end pressure ratio
+        if fuel_start_psi is not None:
+            # Layer 1: Show initial pressure
+            st.metric("Fuel Tank Initial Pressure", f"{fuel_start_psi:.1f} psi", delta="Static (Layer 1)", delta_color="off")
+        else:
+            # Layer 2+: Show end pressure ratio
+            fuel_desc = "Regulated" if fuel_end_ratio > 0.92 else ("Mild blowdown" if fuel_end_ratio > 0.75 else "Aggressive blowdown")
+            st.metric("Fuel Tank End Pressure", f"{fuel_end_ratio*100:.1f}%", delta=fuel_desc, delta_color="off")
+
+
+def plot_layer1_parameterization_history(optimization_results: Dict[str, Any]) -> None:
+    """Plot history of all Layer 1 parameterization variables (geometries and pressures)."""
+    history = optimization_results.get("iteration_history", [])
+    
+    if not history:
+        st.info("No optimization history available.")
+        return
+    
+    st.markdown("### 📊 Parameterization Variables History")
+    
+    iterations = [h.get("iteration", i) for i, h in enumerate(history)]
+    
+    # Extract all parameterization variables
+    # Try to get from individual fields first, fall back to extracting from "x" array if available
+    def get_var(h, key, x_idx, default, scale=1.0):
+        """Get variable from history entry, with fallback to x array."""
+        if key in h and h[key] is not None:
+            return h[key] * scale
+        elif "x" in h and h["x"] is not None and len(h["x"]) > x_idx:
+            return float(h["x"][x_idx]) * scale
+        else:
+            return default * scale
+    
+    A_throat = [get_var(h, "A_throat", 0, 0.001) * 1e6 for h in history]  # Convert to mm²
+    Lstar = [get_var(h, "Lstar", 1, 1.0) for h in history]
+    expansion_ratio = [get_var(h, "expansion_ratio", 2, 10.0) for h in history]
+    D_chamber_outer = [get_var(h, "D_chamber_outer", 3, 0.1) * 1000 for h in history]  # Convert to mm
+    D_chamber_inner = [h.get("D_chamber_inner", (h.get("x", [0.1])[3] if "x" in h and len(h.get("x", [])) > 3 else 0.1) - 0.0254) * 1000 for h in history]  # Convert to mm
+    d_pintle_tip = [get_var(h, "d_pintle_tip", 4, 0.015) * 1000 for h in history]  # Convert to mm
+    h_gap = [get_var(h, "h_gap", 5, 0.0006) * 1000 for h in history]  # Convert to mm
+    n_orifices = [int(round(get_var(h, "n_orifices", 6, 16, scale=1.0))) for h in history]
+    d_orifice = [get_var(h, "d_orifice", 7, 0.003) * 1000 for h in history]  # Convert to mm
+    P_O_start_psi = [get_var(h, "P_O_start_psi", 10, 500) for h in history]
+    P_F_start_psi = [get_var(h, "P_F_start_psi", 11, 600) for h in history]
+    
+    # Create subplots: 4 rows x 3 cols = 12 plots
+    fig = make_subplots(
+        rows=4, cols=3,
+        subplot_titles=(
+            "Throat Area [mm²]", "L* [m]", "Expansion Ratio",
+            "Chamber Outer Diameter [mm]", "Chamber Inner Diameter [mm]", "Pintle Tip Diameter [mm]",
+            "Gap Height [mm]", "Number of Orifices", "Orifice Diameter [mm]",
+            "LOX Start Pressure [psi]", "Fuel Start Pressure [psi]", ""
+        ),
+        vertical_spacing=0.12,
+        horizontal_spacing=0.10,
+    )
+    
+    # Row 1: Core geometry
+    fig.add_trace(
+        go.Scatter(x=iterations, y=A_throat, mode='lines+markers', name='A_throat', line=dict(color='blue'), showlegend=False),
+        row=1, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=Lstar, mode='lines+markers', name='L*', line=dict(color='green'), showlegend=False),
+        row=1, col=2
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=expansion_ratio, mode='lines+markers', name='Expansion Ratio', line=dict(color='orange'), showlegend=False),
+        row=1, col=3
+    )
+    
+    # Row 2: Chamber dimensions and pintle
+    fig.add_trace(
+        go.Scatter(x=iterations, y=D_chamber_outer, mode='lines+markers', name='D_outer', line=dict(color='red'), showlegend=False),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=D_chamber_inner, mode='lines+markers', name='D_inner', line=dict(color='purple'), showlegend=False),
+        row=2, col=2
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=d_pintle_tip, mode='lines+markers', name='d_pintle', line=dict(color='cyan'), showlegend=False),
+        row=2, col=3
+    )
+    
+    # Row 3: Injector geometry
+    fig.add_trace(
+        go.Scatter(x=iterations, y=h_gap, mode='lines+markers', name='h_gap', line=dict(color='magenta'), showlegend=False),
+        row=3, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=n_orifices, mode='lines+markers', name='n_orifices', line=dict(color='brown'), showlegend=False),
+        row=3, col=2
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=d_orifice, mode='lines+markers', name='d_orifice', line=dict(color='pink'), showlegend=False),
+        row=3, col=3
+    )
+    
+    # Row 4: Pressures
+    fig.add_trace(
+        go.Scatter(x=iterations, y=P_O_start_psi, mode='lines+markers', name='P_LOX', line=dict(color='blue'), showlegend=False),
+        row=4, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=P_F_start_psi, mode='lines+markers', name='P_Fuel', line=dict(color='orange'), showlegend=False),
+        row=4, col=2
+    )
+    
+    # Update x-axis labels for bottom row
+    fig.update_xaxes(title_text="Iteration", row=4, col=1)
+    fig.update_xaxes(title_text="Iteration", row=4, col=2)
+    fig.update_xaxes(title_text="Iteration", row=4, col=3)
+    
+    # Update layout
+    fig.update_layout(height=1000, showlegend=False, title_text="Layer 1 Parameterization Variables Over Iterations")
+    
+    st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("layer1_parameterization_history_plot"))
 
 
 def plot_time_varying_results(time_varying_results: Dict[str, np.ndarray]) -> None:
