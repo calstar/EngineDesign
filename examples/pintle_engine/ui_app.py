@@ -38,6 +38,12 @@ from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight, detect_tank_underfill_time
+from examples.pintle_engine.flight_visuals import (
+    extract_flight_series,
+    plot_flight_results,
+    render_rocket_view,
+    plot_additional_rocket_plots,
+)
 from examples.pintle_engine.design_optimization_view import design_optimization_view
 from examples.pintle_engine.copv_pressure.copv_solve_both import (
     size_or_check_copv_for_polytropic_N2,
@@ -241,114 +247,6 @@ def build_rp_function(times_s: np.ndarray, values: np.ndarray, interpolation: st
     v_sorted = np.asarray(values, dtype=float)[order]
     source = np.column_stack((t_sorted, v_sorted))
     return Function(source, interpolation=interpolation)
-
-
-def _series_to_np(series_obj) -> np.ndarray:
-    """RocketPy series to numpy, handling versions with/without get_source."""
-    try:
-        return np.asarray(series_obj.get_source(), dtype=float)
-    except Exception:
-        return np.asarray(series_obj, dtype=float)
-
-
-def _to_1d(arr_like, *, column: int = 1) -> np.ndarray:
-    """Convert array to 1D.
-    
-    RocketPy Function.get_source() returns (N, 2) arrays where column 0 is time
-    and column 1 is the value. By default we extract column 1 (values).
-    Use column=0 to extract time instead.
-    """
-    arr = np.asarray(arr_like)
-    if arr.ndim == 0:
-        arr = arr.reshape(1)
-    elif arr.ndim == 2 and arr.shape[1] == 2:
-        # RocketPy (N, 2) format: extract the specified column
-        arr = arr[:, column]
-    elif arr.ndim > 1:
-        squeezed = np.squeeze(arr)
-        arr = squeezed if squeezed.ndim == 1 else np.ravel(arr)
-    return arr.astype(float, copy=False)
-
-
-def extract_flight_series(flight, elevation: float = 0.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return time, altitude AGL, and vertical velocity arrays aligned and 1-D.
-    
-    Args:
-        flight: RocketPy Flight object
-        elevation: Launch site elevation (m) to subtract from z for AGL
-    """
-    # RocketPy returns (N, 2) arrays from get_source(): col 0 = time, col 1 = value
-    # For time, we extract column 0; for values (z, vz), we extract column 1
-    z_raw = _series_to_np(getattr(flight, "z", []))
-    t_series = _to_1d(z_raw, column=0)  # time from any (N, 2) source
-    z_series = _to_1d(z_raw, column=1)  # altitude values (ASL from RocketPy)
-    z_series = z_series - elevation  # Convert to AGL
-    vz_series = _to_1d(_series_to_np(getattr(flight, "vz", [])), column=1)
-    n = int(min(len(t_series), len(z_series), len(vz_series)))
-    if n == 0:
-        return np.array([]), np.array([]), np.array([])
-    return t_series[:n], z_series[:n], vz_series[:n]
-
-
-def plot_flight_results(t: np.ndarray, z: np.ndarray, vz: np.ndarray, *, key_suffix: str = "") -> None:
-    """Plot altitude/velocity vs time if series are non-empty."""
-    if t.size == 0:
-        st.warning("Flight produced empty time series.")
-        return
-    df = pd.DataFrame({"time": t, "Altitude AGL (m)": z, "Vertical Velocity (m/s)": vz})
-    st.plotly_chart(px.line(df, x="time", y="Altitude AGL (m)", title="Altitude AGL vs Time"), width='stretch', key=f"flight_alt_plot{key_suffix}")
-    st.plotly_chart(px.line(df, x="time", y="Vertical Velocity (m/s)", title="Vertical Velocity vs Time"), width='stretch', key=f"flight_vel_plot{key_suffix}")
-
-
-def render_rocket_view(flight) -> None:
-    """Render a static rocket view using RocketPy's draw."""
-    try:
-        import matplotlib.pyplot as plt  # local import to avoid global dependency if not needed
-        # Clear previous figures to avoid overlay
-        plt.close('all')
-        result = getattr(flight, "rocket", None)
-        if result is None:
-            st.info("Rocket object not available for drawing.")
-            return
-        maybe_fig = result.draw()
-        fig = maybe_fig if hasattr(maybe_fig, "savefig") else plt.gcf()
-        st.pyplot(fig, clear_figure=True, width='stretch')
-    except Exception as exc:
-        st.info(f"Rocket view unavailable: {exc}")
-
-
-def plot_additional_rocket_plots(flight, t_series: np.ndarray, *, key_suffix: str = "") -> None:
-    """Try to render extra rocket/flight plots if the series exist on the Flight object."""
-    if t_series.size == 0:
-        return
-    plots: list[tuple[str, str]] = []
-    # Candidate attributes and labels
-    candidates = [
-        ("ax", "Axial Acceleration"),
-        ("ay", "Lateral Acceleration Y"),
-        ("az", "Lateral Acceleration Z"),
-        ("alpha", "Angle of Attack"),
-        ("beta", "Sideslip Angle"),
-        ("mach_number", "Mach Number"),
-    ]
-    for attr, label in candidates:
-        series_obj = getattr(flight, attr, None)
-        if series_obj is not None:
-            try:
-                # RocketPy (N, 2) arrays: column 1 contains the values
-                vals = _to_1d(_series_to_np(series_obj), column=1)
-                if vals.size > 0:
-                    plots.append((label, vals))
-            except Exception:
-                pass
-    if not plots:
-        st.info("No additional flight plots available.")
-        return
-    for label, vals in plots:
-        n = min(len(t_series), len(vals))
-        if n > 0:
-            df = pd.DataFrame({"time": t_series[:n], label: vals[:n]})
-            st.plotly_chart(px.line(df, x="time", y=label, title=label), width='stretch', key=f"flight_{label.replace(' ', '_').lower()}{key_suffix}")
 
 
 # ============================================================================
@@ -2862,12 +2760,17 @@ def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
 
     if uploaded_file is not None:
         try:
-            config_text = uploaded_file.getvalue().decode("utf-8")
+            raw_bytes = uploaded_file.getvalue()
+            config_text = raw_bytes.decode("utf-8")
             config_dict = yaml.safe_load(config_text)
             # Validate the config
             PintleEngineConfig(**config_dict)
             # Store the raw YAML dict to preserve all fields including optional ones
             st.session_state["config_dict"] = config_dict
+            # Also keep a copy of the raw optimizer YAML (including Layer blocks)
+            # so views like Flight Simulation can access embedded Layer 4 data
+            # even if config_dict is later mutated.
+            st.session_state["optimizer_yaml_raw_dict"] = copy.deepcopy(config_dict)
             old_config_label = st.session_state.get("config_label", "default")
             st.session_state["config_label"] = uploaded_file.name
             # Clear form state for both old and new config labels to ensure clean reset
@@ -5190,15 +5093,142 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 help="Fuel tank pressure. Typically lower than LOX pressure due to different injector geometry."
             )
     else:
-        # Dataset selection and column mapping
-        datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
-        if not datasets:
-            st.warning("No datasets available. Run a time-series or forward analysis first to populate datasets.")
-            return
-        ds_names = list(datasets.keys())
-        default_ds = st.session_state.get("last_custom_dataset") or ds_names[0]
-        dataset_name = st.selectbox("Dataset for thrust and O/F", ds_names, index=ds_names.index(default_ds) if default_ds in ds_names else 0, key="flight_ds_select")
-        ds_df = datasets[dataset_name]
+        # Dataset selection / upload and column mapping
+        dataset_source = st.radio(
+            "Dataset source",
+            ["Existing analysis dataset(s)", "Embedded dataset from optimizer YAML config"],
+            horizontal=False,
+            key="flight_ds_source",
+        )
+
+        if dataset_source == "Existing analysis dataset(s)":
+            datasets: Dict[str, pd.DataFrame] = st.session_state.get("custom_plot_datasets", {})
+            if not datasets:
+                st.warning("No datasets available. Run a time-series or forward analysis first to populate datasets.")
+                return
+            ds_names = list(datasets.keys())
+            default_ds = st.session_state.get("last_custom_dataset") or ds_names[0]
+            dataset_name = st.selectbox(
+                "Dataset for thrust and O/F",
+                ds_names,
+                index=ds_names.index(default_ds) if default_ds in ds_names else 0,
+                key="flight_ds_select",
+            )
+            ds_df = datasets[dataset_name]
+        else:
+            # Use data embedded in uploaded optimizer YAML config (Layer 4 export)
+            # to rebuild the thrust / mdot dataset. Prefer the exact time-varying
+            # results used during optimization (updated_time_results) so that
+            # the Flight Simulation tab matches the Layer 4 optimizer apogee.
+            # IMPORTANT: use the raw optimizer YAML dict if available so that
+            # Layer blocks are not lost when config_dict is mutated elsewhere.
+            cfg_dict = st.session_state.get("optimizer_yaml_raw_dict") or st.session_state.get("config_dict")
+            layer4_block = (cfg_dict or {}).get("layer4") if isinstance(cfg_dict, dict) else None
+            if not isinstance(layer4_block, dict):
+                st.warning(
+                    "No Layer 4 block found in the uploaded YAML config. "
+                    "Load a Layer 4 results YAML from the optimizer, or use an existing analysis dataset."
+                )
+                return
+
+            layer3_inputs = layer4_block.get("layer3_inputs") or {}
+            time_array_s = layer3_inputs.get("time_array_s") or layer3_inputs.get("time_array")
+            P_tank_O_pa = layer3_inputs.get("P_tank_O_pa")
+            P_tank_F_pa = layer3_inputs.get("P_tank_F_pa")
+
+            # First, try to use the exact updated_time_results that Layer 3/4 used.
+            # Depending on export version, this may live either under layer3_inputs
+            # or directly under the same parent that holds time_array_s.
+            updated_time_results = None
+            if isinstance(layer3_inputs, dict) and "updated_time_results" in layer3_inputs:
+                updated_time_results = layer3_inputs.get("updated_time_results")
+            elif "updated_time_results" in layer4_block:
+                # Fallback: some exports store updated_time_results alongside layer3_inputs
+                updated_time_results = layer4_block.get("updated_time_results")
+
+            ds_df = None
+            if isinstance(updated_time_results, dict) and "F" in updated_time_results:
+                try:
+                    times = np.asarray(time_array_s, dtype=float)
+                except Exception as exc:
+                    st.error(f"Could not parse time array from YAML config: {exc}")
+                    return
+
+                # Extract thrust and mass-flow histories from the exported results
+                try:
+                    thrust_vals_SI = np.asarray(updated_time_results.get("F"), dtype=float)
+                    mdot_O_vals = np.asarray(updated_time_results.get("mdot_O"), dtype=float)
+                    mdot_F_vals = np.asarray(updated_time_results.get("mdot_F"), dtype=float)
+                except Exception as exc:
+                    st.error(f"Could not parse thrust/mdot arrays from YAML updated_time_results: {exc}")
+                    return
+
+                if not (
+                    len(times) == len(thrust_vals_SI) == len(mdot_O_vals) == len(mdot_F_vals)
+                ) or len(times) < 2:
+                    st.warning(
+                        "Updated time-varying results in Layer 4 YAML have inconsistent lengths "
+                        "or too few samples. Falling back to recomputing from tank pressures."
+                    )
+                    updated_time_results = None
+                else:
+                    # Build a DataFrame that mirrors the structure produced by
+                    # compute_timeseries_dataframe so the rest of this view works unchanged.
+                    ds_df = pd.DataFrame(
+                        {
+                            "time": times,
+                            "Thrust (N)": thrust_vals_SI,
+                            "mdot_O (kg/s)": mdot_O_vals,
+                            "mdot_F (kg/s)": mdot_F_vals,
+                        }
+                    )
+
+            if ds_df is None:
+                # Fallback: rebuild time series from tank pressures if updated_time_results
+                # are not available in the YAML.
+                if time_array_s is None or P_tank_O_pa is None or P_tank_F_pa is None:
+                    st.warning(
+                        "Layer 4 YAML does not contain time_array_s / P_tank_O_pa / P_tank_F_pa. "
+                        "Re-export Layer 4 results or use an existing analysis dataset."
+                    )
+                    return
+
+                try:
+                    times = np.asarray(time_array_s, dtype=float)
+                    P_O_pa = np.asarray(P_tank_O_pa, dtype=float)
+                    P_F_pa = np.asarray(P_tank_F_pa, dtype=float)
+                except Exception as exc:
+                    st.error(f"Could not parse time/pressure arrays from YAML config: {exc}")
+                    return
+
+                if not (len(times) == len(P_O_pa) == len(P_F_pa)) or len(times) < 2:
+                    st.warning(
+                        "Time and pressure arrays from YAML have inconsistent lengths or too few samples "
+                        "to build a dataset."
+                    )
+                    return
+
+                # Convert pressures back to psi for reuse of compute_timeseries_dataframe
+                P_O_psi = P_O_pa * PA_TO_PSI
+                P_F_psi = P_F_pa * PA_TO_PSI
+
+                # Ensure we have a runner
+                if isinstance(runner, PintleEngineConfig):
+                    runner_for_timeseries = PintleEngineRunner(runner)
+                else:
+                    runner_for_timeseries = runner
+
+                try:
+                    ds_df, _ = compute_timeseries_dataframe(
+                        runner_for_timeseries,
+                        times=np.asarray(times, dtype=float),
+                        P_tank_O_psi=np.asarray(P_O_psi, dtype=float),
+                        P_tank_F_psi=np.asarray(P_F_psi, dtype=float),
+                    )
+                except Exception as exc:
+                    st.error(f"Failed to rebuild dataset from optimizer YAML config: {exc}")
+                    return
+
         num_cols = ds_df.select_dtypes(include=[np.number]).columns.tolist()
         # sensible defaults
         time_col = "time" if "time" in ds_df.columns else num_cols[0]
@@ -5268,11 +5298,60 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             burn_time = None
             colpf1, colpf2 = st.columns(2)
             with colpf1:
-                default_m_lox = float(getattr(getattr(config_obj, "lox_tank", None), "mass", None)) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 18.0
+                # Default LOX mass: start from config, but if the dataset is coming from an
+                # uploaded optimizer YAML (Layer 4 export), prefer the adjusted LOX mass
+                # from that YAML so the flight sim matches the exported candidate.
+                default_m_lox = float(
+                    getattr(getattr(config_obj, "lox_tank", None), "mass", None)
+                ) if getattr(getattr(config_obj, "lox_tank", None), "mass", None) is not None else 18.0
+
+                if dataset_source == "Embedded dataset from optimizer YAML config":
+                    cfg_dict = st.session_state.get("config_dict")
+                    layer4_block = (cfg_dict or {}).get("layer4") if isinstance(cfg_dict, dict) else None
+                    flight_result = (
+                        layer4_block.get("flight_sim_result")
+                        if isinstance(layer4_block, dict)
+                        else None
+                    )
+                    if isinstance(flight_result, dict):
+                        try:
+                            default_m_lox = float(
+                                flight_result.get("adjusted_lox_mass", default_m_lox)
+                                if flight_result.get("adjusted_lox_mass", None) is not None
+                                else default_m_lox
+                            )
+                        except Exception:
+                            # Fall back to config/default if YAML value is not parseable
+                            pass
+
                 m_lox = st.number_input("Initial LOX mass [kg]", min_value=0.1, value=default_m_lox, step=0.1, key="flight_m_lox_ds",
                     help="Initial liquid oxidizer mass. Burn truncates when LOX runs out.")
             with colpf2:
-                default_m_fuel = float(getattr(getattr(config_obj, "fuel_tank", None), "mass", None)) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
+                # Default fuel mass: same logic as LOX; prefer adjusted fuel mass from
+                # the uploaded optimizer YAML when that option is selected.
+                default_m_fuel = float(
+                    getattr(getattr(config_obj, "fuel_tank", None), "mass", None)
+                ) if getattr(getattr(config_obj, "fuel_tank", None), "mass", None) is not None else 4.0
+
+                if dataset_source == "Embedded dataset from optimizer YAML config":
+                    cfg_dict = st.session_state.get("config_dict")
+                    layer4_block = (cfg_dict or {}).get("layer4") if isinstance(cfg_dict, dict) else None
+                    flight_result = (
+                        layer4_block.get("flight_sim_result")
+                        if isinstance(layer4_block, dict)
+                        else None
+                    )
+                    if isinstance(flight_result, dict):
+                        try:
+                            default_m_fuel = float(
+                                flight_result.get("adjusted_fuel_mass", default_m_fuel)
+                                if flight_result.get("adjusted_fuel_mass", None) is not None
+                                else default_m_fuel
+                            )
+                        except Exception:
+                            # Fall back to config/default if YAML value is not parseable
+                            pass
+
                 m_fuel = st.number_input("Initial Fuel mass [kg]", min_value=0.1, value=default_m_fuel, step=0.1, key="flight_m_fuel_ds",
                     help="Initial liquid fuel mass. Burn truncates when fuel runs out.")
             sel_date = None
@@ -5859,80 +5938,88 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             if not np.isfinite(burn_time_ds) or burn_time_ds <= 0.0:
                 st.error("Dataset time axis must increase (duration must be > 0 s). Check the selected time column.")
                 return
-            
-            # Check for tank underfill and truncate dataset if needed
-            m_lox0 = float(m_lox)
-            m_fuel0 = float(m_fuel)
-            
+
             # Normalize time to start at 0
             t_min = float(np.min(t_vals))
             t_vals_normalized = t_vals - t_min
-            
-            # Build temporary Functions for underfill detection
-            mdot_lox_temp = build_rp_function(t_vals_normalized, mdot_O_vals)
-            mdot_fuel_temp = build_rp_function(t_vals_normalized, mdot_F_vals)
-            
-            # Detect underfill by integrating mdot arrays
-            lox_cutoff = detect_tank_underfill_time(mdot_lox_temp, m_lox0, burn_time_ds)
-            fuel_cutoff = detect_tank_underfill_time(mdot_fuel_temp, m_fuel0, burn_time_ds)
-            
-            # Find earliest cutoff
-            cutoff_time = None
-            if lox_cutoff is not None and fuel_cutoff is not None:
-                cutoff_time = min(lox_cutoff, fuel_cutoff)
-            elif lox_cutoff is not None:
-                cutoff_time = lox_cutoff
-            elif fuel_cutoff is not None:
-                cutoff_time = fuel_cutoff
-            
-            # Truncate arrays if needed
-            if cutoff_time is not None and cutoff_time < burn_time_ds:
-                # Find index where time exceeds cutoff
-                trunc_idx = np.searchsorted(t_vals_normalized, cutoff_time, side='right')
-                if trunc_idx < len(t_vals_normalized) and trunc_idx > 0:
-                    # Keep points before cutoff
-                    t_before = t_vals_normalized[:trunc_idx]
-                    thrust_before = thrust_vals_SI[:trunc_idx]
-                    mdot_O_before = mdot_O_vals[:trunc_idx]
-                    mdot_F_before = mdot_F_vals[:trunc_idx]
-                    
-                    # Interpolate values at exact cutoff_time
-                    # Find the two bounding points for interpolation
-                    idx_after = trunc_idx
-                    idx_before = trunc_idx - 1
-                    
-                    if idx_before >= 0 and idx_after < len(t_vals_normalized):
-                        t0, t1 = t_vals_normalized[idx_before], t_vals_normalized[idx_after]
-                        if t1 > t0:
-                            frac = (cutoff_time - t0) / (t1 - t0)
-                            # Linear interpolation for each array
-                            thrust_at_cutoff = thrust_vals_SI[idx_before] + frac * (thrust_vals_SI[idx_after] - thrust_vals_SI[idx_before])
-                            mdot_O_at_cutoff = mdot_O_vals[idx_before] + frac * (mdot_O_vals[idx_after] - mdot_O_vals[idx_before])
-                            mdot_F_at_cutoff = mdot_F_vals[idx_before] + frac * (mdot_F_vals[idx_after] - mdot_F_vals[idx_before])
+
+            # For datasets coming from an embedded optimizer YAML (Layer 4 export),
+            # we want to mirror the Layer 4 behavior: pass the full curves into
+            # setup_flight and let it handle tank underfill and truncation.
+            # For all other datasets, keep the existing pre-truncation logic.
+            if dataset_source == "Embedded dataset from optimizer YAML config":
+                thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
+                mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
+                mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
+            else:
+                # Check for tank underfill and truncate dataset if needed
+                m_lox0 = float(m_lox)
+                m_fuel0 = float(m_fuel)
+
+                # Build temporary Functions for underfill detection
+                mdot_lox_temp = build_rp_function(t_vals_normalized, mdot_O_vals)
+                mdot_fuel_temp = build_rp_function(t_vals_normalized, mdot_F_vals)
+
+                # Detect underfill by integrating mdot arrays
+                lox_cutoff = detect_tank_underfill_time(mdot_lox_temp, m_lox0, burn_time_ds)
+                fuel_cutoff = detect_tank_underfill_time(mdot_fuel_temp, m_fuel0, burn_time_ds)
+
+                # Find earliest cutoff
+                cutoff_time = None
+                if lox_cutoff is not None and fuel_cutoff is not None:
+                    cutoff_time = min(lox_cutoff, fuel_cutoff)
+                elif lox_cutoff is not None:
+                    cutoff_time = lox_cutoff
+                elif fuel_cutoff is not None:
+                    cutoff_time = fuel_cutoff
+
+                # Truncate arrays if needed
+                if cutoff_time is not None and cutoff_time < burn_time_ds:
+                    # Find index where time exceeds cutoff
+                    trunc_idx = np.searchsorted(t_vals_normalized, cutoff_time, side="right")
+                    if trunc_idx < len(t_vals_normalized) and trunc_idx > 0:
+                        # Keep points before cutoff
+                        t_before = t_vals_normalized[:trunc_idx]
+                        thrust_before = thrust_vals_SI[:trunc_idx]
+                        mdot_O_before = mdot_O_vals[:trunc_idx]
+                        mdot_F_before = mdot_F_vals[:trunc_idx]
+
+                        # Interpolate values at exact cutoff_time
+                        idx_after = trunc_idx
+                        idx_before = trunc_idx - 1
+
+                        if idx_before >= 0 and idx_after < len(t_vals_normalized):
+                            t0, t1 = t_vals_normalized[idx_before], t_vals_normalized[idx_after]
+                            if t1 > t0:
+                                frac = (cutoff_time - t0) / (t1 - t0)
+                                # Linear interpolation for each array
+                                thrust_at_cutoff = thrust_vals_SI[idx_before] + frac * (thrust_vals_SI[idx_after] - thrust_vals_SI[idx_before])
+                                mdot_O_at_cutoff = mdot_O_vals[idx_before] + frac * (mdot_O_vals[idx_after] - mdot_O_vals[idx_before])
+                                mdot_F_at_cutoff = mdot_F_vals[idx_before] + frac * (mdot_F_vals[idx_after] - mdot_F_vals[idx_before])
+                            else:
+                                thrust_at_cutoff = thrust_vals_SI[idx_before]
+                                mdot_O_at_cutoff = mdot_O_vals[idx_before]
+                                mdot_F_at_cutoff = mdot_F_vals[idx_before]
                         else:
-                            thrust_at_cutoff = thrust_vals_SI[idx_before]
-                            mdot_O_at_cutoff = mdot_O_vals[idx_before]
-                            mdot_F_at_cutoff = mdot_F_vals[idx_before]
-                    else:
-                        # Fallback: use the last values before cutoff
-                        thrust_at_cutoff = thrust_before[-1] if len(thrust_before) > 0 else 0.0
-                        mdot_O_at_cutoff = mdot_O_before[-1] if len(mdot_O_before) > 0 else 0.0
-                        mdot_F_at_cutoff = mdot_F_before[-1] if len(mdot_F_before) > 0 else 0.0
-                    
-                    # Append exact cutoff point and zero point just after for sharp transition
-                    eps = 1e-6
-                    t_vals_normalized = np.concatenate([t_before, [cutoff_time, cutoff_time + eps]])
-                    thrust_vals_SI = np.concatenate([thrust_before, [thrust_at_cutoff, 0.0]])
-                    mdot_O_vals = np.concatenate([mdot_O_before, [mdot_O_at_cutoff, 0.0]])
-                    mdot_F_vals = np.concatenate([mdot_F_before, [mdot_F_at_cutoff, 0.0]])
-                    
-                    burn_time_ds = float(cutoff_time)
-                    st.info(f"Truncated burn at {cutoff_time:.4f} s due to propellant depletion")
-            
-            # Build RocketPy Functions
-            thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
-            mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
-            mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
+                            # Fallback: use the last values before cutoff
+                            thrust_at_cutoff = thrust_before[-1] if len(thrust_before) > 0 else 0.0
+                            mdot_O_at_cutoff = mdot_O_before[-1] if len(mdot_O_before) > 0 else 0.0
+                            mdot_F_at_cutoff = mdot_F_before[-1] if len(mdot_F_before) > 0 else 0.0
+
+                        # Append exact cutoff point and zero point just after for sharp transition
+                        eps = 1e-6
+                        t_vals_normalized = np.concatenate([t_before, [cutoff_time, cutoff_time + eps]])
+                        thrust_vals_SI = np.concatenate([thrust_before, [thrust_at_cutoff, 0.0]])
+                        mdot_O_vals = np.concatenate([mdot_O_before, [mdot_O_at_cutoff, 0.0]])
+                        mdot_F_vals = np.concatenate([mdot_F_before, [mdot_F_at_cutoff, 0.0]])
+
+                        burn_time_ds = float(cutoff_time)
+                        st.info(f"Truncated burn at {cutoff_time:.4f} s due to propellant depletion")
+
+                # Build RocketPy Functions
+                thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
+                mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
+                mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
             
             # Update config with dataset-derived burn time and masses
             if working.get("thrust") is None:

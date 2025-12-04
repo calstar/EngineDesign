@@ -36,6 +36,12 @@ from ..layer2_pressure import run_layer2_pressure
 from ..layer3_thermal_protection import run_layer3_thermal_protection
 from ..layer4_flight_simulation import run_layer4_flight_simulation
 from ..copv_flight_helpers import run_flight_simulation
+from examples.pintle_engine.flight_visuals import (
+    extract_flight_series,
+    plot_flight_results,
+    render_rocket_view,
+    plot_additional_rocket_plots,
+)
 
 # Import helper functions from views.helpers
 from .helpers import (
@@ -212,7 +218,7 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             key="opt_cm_wo_motor",
             help="Center of mass of the airframe ONLY (no engine, tanks, or propellant), measured from rocket tail (z=0).",
         )
-
+    
         st.markdown("##### Inertia (airframe only)")
         st.caption("💡 Propulsion inertia is auto-calculated using parallel axis theorem.")
         
@@ -3123,12 +3129,15 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             progress_bar.empty()
             status_text.empty()
             
-            # Store results
+            # Store results (including time base and optimized tank pressures)
             config_obj = optimized_config
             st.session_state["optimized_config"] = optimized_config
             st.session_state["layer3_results"] = {
                 "updated_time_results": updated_time_results,
                 "thermal_results": thermal_results,
+                "time_array": time_array,
+                "P_tank_O_array": P_tank_O_array,
+                "P_tank_F_array": P_tank_F_array,
             }
             
             # CRITICAL: Save as the "final" optimized config (Layer 3 is the final thermal protection step)
@@ -3257,6 +3266,87 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     st.metric("Graphite Thickness", f"{thickness * 1000:.2f} mm")
                     st.caption("20% margin over max recession")
             
+            # ------------------------------------------------------------------
+            # Layer 3 export: download YAML that updates Layer 2 config with
+            # optimized ablative/graphite thickness (and optional Layer 3 data)
+            # ------------------------------------------------------------------
+            try:
+                import yaml as _yaml
+                import numpy as _np
+
+                st.markdown("#### Download Layer 3 Results (YAML)")
+
+                # Start from the Layer 3-optimized PintleEngineConfig as YAML.
+                layer3_cfg = opt_config
+                if hasattr(layer3_cfg, "model_dump"):
+                    layer3_config_dict = layer3_cfg.model_dump(exclude_none=False)
+                else:
+                    layer3_config_dict = {}
+
+                # Attach design requirements and a compact Layer 3 payload.
+                layer3_config_dict.setdefault("design_requirements", requirements)
+                layer3_config_dict.setdefault("layer3", {})
+
+                layer3_block = layer3_config_dict["layer3"]
+
+                # Include optimized thicknesses explicitly for clarity.
+                layer3_block["thermal_results"] = thermal_results_data or {}
+
+                # Attach time base and tank pressures if available so Layer 4
+                # can be run later from this file (optional but very useful).
+                time_array_s = layer3_results.get("time_array") if isinstance(layer3_results, dict) else None
+                P_tank_O_pa = layer3_results.get("P_tank_O_array") if isinstance(layer3_results, dict) else None
+                P_tank_F_pa = layer3_results.get("P_tank_F_array") if isinstance(layer3_results, dict) else None
+
+                if time_array_s is not None and P_tank_O_pa is not None and P_tank_F_pa is not None:
+                    layer3_block["time_array_s"] = list(map(float, _np.asarray(time_array_s, dtype=float).tolist()))
+                    layer3_block["P_tank_O_pa"] = list(map(float, _np.asarray(P_tank_O_pa, dtype=float).tolist()))
+                    layer3_block["P_tank_F_pa"] = list(map(float, _np.asarray(P_tank_F_pa, dtype=float).tolist()))
+
+                # Optionally include updated_time_results in a sanitized form
+                updated_time_results = layer3_results.get("updated_time_results") if isinstance(layer3_results, dict) else None
+
+                def _sanitize_for_yaml(obj):
+                    """Recursively convert objects to YAML‑safe types.
+                    
+                    - NumPy arrays/scalars → lists / native scalars
+                    - dict / list / tuple → sanitized recursively
+                    - Other custom objects (e.g. ValidationResult) → string
+                    """
+                    if isinstance(obj, _np.ndarray):
+                        return obj.tolist()
+                    if isinstance(obj, _np.generic):
+                        return obj.item()
+                    if isinstance(obj, dict):
+                        return {k: _sanitize_for_yaml(v) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [_sanitize_for_yaml(v) for v in obj]
+                    # Fallback: stringify any non‑primitive Python object so we
+                    # don't emit `!!python/object` tags that break safe loaders.
+                    if isinstance(obj, (str, int, float, bool)) or obj is None:
+                        return obj
+                    return str(obj)
+
+                if isinstance(updated_time_results, dict):
+                    layer3_block["updated_time_results"] = _sanitize_for_yaml(updated_time_results)
+
+                # Final pass: make sure the entire structure is YAML‑friendly
+                safe_layer3_config = _sanitize_for_yaml(layer3_config_dict)
+                layer3_yaml_str = _yaml.dump(safe_layer3_config, default_flow_style=False)
+
+                st.download_button(
+                    label="💾 Download Layer 3 Results (YAML)",
+                    data=layer3_yaml_str,
+                    file_name="layer3_results.yaml",
+                    mime="text/yaml",
+                    help=(
+                        "Download the PintleEngineConfig with Layer 3‑optimized ablative and "
+                        "graphite thickness, plus optional Layer 3 time base and data."
+                    ),
+                )
+            except Exception as layer3_export_exc:
+                st.warning(f"Could not create Layer 3 YAML export: {layer3_export_exc}")
+
             # Show recession data
             # Get recession values from thermal_results (primary source) or time_varying (fallback)
             # Note: thermal_results_data was already retrieved above for thickness display
@@ -3586,29 +3676,216 @@ def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         return config_obj
     
     requirements = st.session_state.get("design_requirements", {})
+    tolerances = st.session_state.get("tolerances", {})
     if not requirements:
         st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
         return config_obj
     
+    # ------------------------------------------------------------------
+    # Run Layer 4 individually (UI-only, mirroring full pipeline behavior)
+    # ------------------------------------------------------------------
     st.markdown("---")
-    st.info(
-        "Layer 4 flight simulation runs automatically as part of the full engine "
-        "optimization pipeline. Run the main optimizer (Layers 0‑4) to execute this "
-        "step with real data."
+    st.markdown("### Run Layer 4 Individually")
+
+    # Optional: allow user to upload a Layer 3 results YAML produced by the
+    # "Download Layer 3 Results (YAML)" button. This enables resuming a
+    # Layer 3+4 workflow without re-running the thermal optimization.
+    st.markdown("#### Optional: Load Layer 3 Results (YAML)")
+    uploaded_layer3_file = st.file_uploader(
+        "Upload `layer3_results.yaml`",
+        type=["yaml", "yml"],
+        key="layer4_layer3_upload",
+        help=(
+            "Load a Layer 3 results YAML previously exported from this app. "
+            "This will populate the converged time base, tank pressures, and "
+            "time-varying results so Layer 4 can run without re-running Layer 3."
+        ),
     )
+
+    if uploaded_layer3_file is not None:
+        import yaml
+        import numpy as np
+
+        # Read raw bytes once so we can try multiple loaders if needed
+        raw_bytes = uploaded_layer3_file.read()
+
+        uploaded_layer3_dict = None
+
+        try:
+            # First, try the safe loader (no Python object tags)
+            uploaded_layer3_dict = yaml.safe_load(raw_bytes)
+        except Exception:
+            # Fallback: some internally-generated YAMLs may contain Python/NumPy
+            # tags (e.g. !!python/object:...). In that case, fall back to the
+            # full loader, with a warning since it's only for trusted files.
+            try:
+                uploaded_layer3_dict = yaml.load(raw_bytes, Loader=yaml.FullLoader)
+                st.warning(
+                    "Loaded Layer 3 YAML with a permissive loader because it "
+                    "contains Python-specific tags. Only upload files produced "
+                    "by this app."
+                )
+            except Exception as e:
+                st.error(f"Could not parse uploaded Layer 3 YAML: {e}")
+                uploaded_layer3_dict = None
+
+        if isinstance(uploaded_layer3_dict, dict):
+            # Try to rebuild the optimized PintleEngineConfig from the full mapping.
+            try:
+                uploaded_layer3_config = PintleEngineConfig(**uploaded_layer3_dict)
+                st.session_state["optimized_config"] = uploaded_layer3_config
+                st.session_state["config_obj"] = uploaded_layer3_config
+                st.session_state["config_dict"] = uploaded_layer3_config.model_dump(exclude_none=False)
+                config_obj = uploaded_layer3_config
+            except Exception:
+                uploaded_layer3_config = None
+
+            # If the YAML contains design requirements, update them so metrics match.
+            dr = uploaded_layer3_dict.get("design_requirements")
+            if isinstance(dr, dict):
+                requirements = dr
+                st.session_state["design_requirements"] = dr
+
+            # Normalize the embedded Layer 3 payload into the structure expected
+            # by the rest of this tab (same keys as when run in-session).
+            layer3_block = uploaded_layer3_dict.get("layer3", {})
+            if isinstance(layer3_block, dict):
+                time_array_s = np.asarray(layer3_block.get("time_array_s", []), dtype=float)
+                P_tank_O_pa = np.asarray(layer3_block.get("P_tank_O_pa", []), dtype=float)
+                P_tank_F_pa = np.asarray(layer3_block.get("P_tank_F_pa", []), dtype=float)
+                updated_time_results = layer3_block.get("updated_time_results", {})
+                thermal_results = layer3_block.get("thermal_results", {})
+
+                layer3_results_from_yaml = {
+                    "time_array": time_array_s,
+                    "P_tank_O_array": P_tank_O_pa,
+                    "P_tank_F_array": P_tank_F_pa,
+                    "updated_time_results": updated_time_results,
+                    "thermal_results": thermal_results,
+                }
+
+                st.session_state["layer3_results"] = layer3_results_from_yaml
+            else:
+                st.error("Uploaded Layer 3 YAML is missing the required `layer3` section.")
+        else:
+            st.error("Uploaded Layer 3 file did not contain a valid YAML mapping/object.")
+
+    if st.button("🚀 Run Layer 4 Flight Simulation", type="primary", key="run_layer4"):
+        import numpy as np
+
+        # Pull converged pressure curves and time-varying results from Layer 3.
+        # Layer 3 is the final thermal protection step and already runs with the
+        # optimized pressure candidate from Layer 2.
+        layer3_results = st.session_state.get("layer3_results", None)
+        if not isinstance(layer3_results, dict):
+            st.error("❌ Layer 3 results are missing. Please run Layer 3 optimization first.")
+            return config_obj
+
+        time_array = np.asarray(layer3_results.get("time_array"), dtype=float)
+        P_tank_O_array = np.asarray(layer3_results.get("P_tank_O_array"), dtype=float)
+        P_tank_F_array = np.asarray(layer3_results.get("P_tank_F_array"), dtype=float)
+        full_time_results = layer3_results.get("updated_time_results", {})
+
+        if (
+            time_array.size == 0
+            or P_tank_O_array.size == 0
+            or P_tank_F_array.size == 0
+            or not isinstance(full_time_results, dict)
+        ):
+            st.error(
+                "❌ Layer 3 time base, tank pressures, or time-varying results are incomplete. "
+                "Please re-run Layer 3 optimization."
+            )
+            return config_obj
+
+        # Build pressure_curves dict expected by run_flight_simulation
+        n = time_array.size
+        thrust_array = np.asarray(full_time_results.get("F", np.full(n, 0.0)), dtype=float)
+        mdot_O_array = np.asarray(full_time_results.get("mdot_O", np.full(n, 0.0)), dtype=float)
+        mdot_F_array = np.asarray(full_time_results.get("mdot_F", np.full(n, 0.0)), dtype=float)
+
+        # Ensure consistent lengths
+        min_len = min(len(time_array), len(thrust_array), len(mdot_O_array), len(mdot_F_array))
+        if min_len == 0:
+            st.error("❌ Time-series arrays for thrust or mass flow are empty. Cannot run flight simulation.")
+            return config_obj
+
+        time_array = time_array[:min_len]
+        thrust_array = thrust_array[:min_len]
+        mdot_O_array = mdot_O_array[:min_len]
+        mdot_F_array = mdot_F_array[:min_len]
+
+        pressure_curves = {
+            "time": time_array,
+            "thrust": thrust_array,
+            "mdot_O": mdot_O_array,
+            "mdot_F": mdot_F_array,
+        }
+
+        # Requirements and tolerances
+        target_burn_time = float(requirements.get("target_burn_time", 10.0))
+        target_apogee = float(requirements.get("target_apogee", 3048.0))
+        apogee_tol = float(tolerances.get("apogee", 0.15))
+
+        optimized_config = st.session_state.get("optimized_config", config_obj)
+
+        progress_bar = st.progress(0, text="Running Layer 4 flight simulation...")
+        status_text = st.empty()
+
+        def update_progress(stage: str, progress: float, message: str):
+            # Mirror main optimizer behavior: drive a single progress bar and status text
+            progress_bar.progress(progress, text=f"{stage} | {message}")
+            status_text.text(f"{stage} | {message}")
+
+        def log_status(stage: str, message: str):
+            # Surface key status messages in the status text area
+            status_text.text(f"{stage} | {message}")
+
+        try:
+            flight_sim_result = run_layer4_flight_simulation(
+                optimized_config=optimized_config,
+                pressure_curves=pressure_curves,
+                time_array=time_array,
+                P_tank_O_array=P_tank_O_array,
+                P_tank_F_array=P_tank_F_array,
+                target_burn_time=target_burn_time,
+                target_apogee=target_apogee,
+                apogee_tol=apogee_tol,
+                update_progress=update_progress,
+                log_status=log_status,
+                run_flight_simulation_func=run_flight_simulation,
+            )
+            st.session_state["layer4_results"] = flight_sim_result
+
+            # Small bump to show completion
+            update_progress("Layer 4: Flight Candidate", 0.90, "Flight simulation complete.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Layer 4 flight simulation failed: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+            return config_obj
+
     st.markdown("---")
     st.markdown("### Layer 4 Status")
     
-    # Check for optimization results
+    # Check for optimization results and/or standalone Layer 4 runs
     optimization_results = st.session_state.get("optimization_results", None)
     layer_status = optimization_results.get("layer_status", {}) if optimization_results else {}
-    layer4_valid = layer_status.get("layer_4_flight_candidate", False)
     flight_sim_result = optimization_results.get("flight_sim_result", {}) if optimization_results else {}
     layer4_results = st.session_state.get("layer4_results", None)
     
     if (optimization_results and flight_sim_result) or layer4_results:
         if layer4_results:
             flight_sim_result = layer4_results
+        
+        # Determine validity from either full optimizer or standalone Layer 4 result
+        layer4_valid_flag = layer_status.get("layer_4_flight_candidate", None)
+        if layer4_valid_flag is None:
+            layer4_valid = bool(flight_sim_result.get("flight_candidate_valid", False))
+        else:
+            layer4_valid = bool(layer4_valid_flag)
+
         if layer4_valid:
             st.success("✅ Layer 4: Flight Candidate VALID")
         else:
@@ -3685,10 +3962,110 @@ def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 with col2:
                     if "adjusted_fuel_mass" in flight_sim_result:
                         st.metric("Fuel Mass", f"{flight_sim_result['adjusted_fuel_mass']:.2f} kg")
+
+            # Detailed time-series plots using RocketPy Flight object (if available),
+            # mirroring the standalone flight_sim_view output.
+            flight_obj = flight_sim_result.get("flight_obj", None)
+            if flight_obj is not None:
+                try:
+                    st.markdown("#### Flight Visualizations (Layer 4)")
+                    elevation = float(requirements.get("environment", {}).get("elevation", 0.0))
+                    flight_time, flight_alt_agl, flight_vz = extract_flight_series(flight_obj, elevation)
+                    if flight_time.size > 0:
+                        plot_flight_results(flight_time, flight_alt_agl, flight_vz, key_suffix="_layer4")
+                        render_rocket_view(flight_obj)
+                        plot_additional_rocket_plots(flight_obj, flight_time, key_suffix="_layer4")
+                    else:
+                        st.info("Flight time series are empty; no plots to display.")
+                except Exception as flight_plot_exc:
+                    st.warning(f"Could not render Layer 4 flight visualizations: {flight_plot_exc}")
         elif flight_sim_result.get("skipped", False):
             st.warning(f"⚠️ Flight simulation was skipped: {flight_sim_result.get('reason', 'Unknown reason')}")
         else:
             st.error(f"❌ Flight simulation failed: {flight_sim_result.get('error', 'Unknown error')}")
+
+        if flight_sim_result:
+            try:
+                import yaml as _yaml
+                import numpy as _np
+
+                layer4_cfg = st.session_state.get("optimized_config", config_obj)
+                if hasattr(layer4_cfg, "model_dump"):
+                    layer4_config_dict = layer4_cfg.model_dump(exclude_none=False)
+                else:
+                    layer4_config_dict = {}
+
+                # Always capture design requirements for downstream consumers.
+                layer4_config_dict.setdefault("design_requirements", requirements)
+
+                # Build Layer 4 export block.
+                layer4_block = layer4_config_dict.setdefault("layer4", {})
+                if tolerances:
+                    layer4_block["tolerances"] = tolerances
+
+                def _sanitize_for_yaml(obj):
+                    """Recursively convert objects into YAML-safe primitives."""
+                    if isinstance(obj, _np.ndarray):
+                        return obj.tolist()
+                    if isinstance(obj, _np.generic):
+                        return obj.item()
+                    if isinstance(obj, dict):
+                        return {k: _sanitize_for_yaml(v) for k, v in obj.items()}
+                    if isinstance(obj, (list, tuple)):
+                        return [_sanitize_for_yaml(v) for v in obj]
+                    if isinstance(obj, (str, int, float, bool)) or obj is None:
+                        return obj
+                    return str(obj)
+
+                    # End of _sanitize_for_yaml
+
+                # Copy flight sim result but drop non-serializable objects like RocketPy Flight.
+                flight_result_export = dict(flight_sim_result)
+                flight_result_export.pop("flight_obj", None)
+                layer4_block["flight_sim_result"] = _sanitize_for_yaml(flight_result_export)
+
+                # Attach the Layer 3 inputs that fed Layer 4 so the workflow can be replayed.
+                layer3_results_for_layer4 = st.session_state.get("layer3_results")
+                if isinstance(layer3_results_for_layer4, dict):
+                    inputs_block = {}
+
+                    time_array = layer3_results_for_layer4.get("time_array")
+                    P_tank_O_array = layer3_results_for_layer4.get("P_tank_O_array")
+                    P_tank_F_array = layer3_results_for_layer4.get("P_tank_F_array")
+
+                    if time_array is not None:
+                        inputs_block["time_array_s"] = _np.asarray(time_array, dtype=float).tolist()
+                    if P_tank_O_array is not None:
+                        inputs_block["P_tank_O_pa"] = _np.asarray(P_tank_O_array, dtype=float).tolist()
+                    if P_tank_F_array is not None:
+                        inputs_block["P_tank_F_pa"] = _np.asarray(P_tank_F_array, dtype=float).tolist()
+
+                    updated_time_results = layer3_results_for_layer4.get("updated_time_results")
+                    if isinstance(updated_time_results, dict):
+                        inputs_block["updated_time_results"] = _sanitize_for_yaml(updated_time_results)
+
+                    thermal_results = layer3_results_for_layer4.get("thermal_results")
+                    if isinstance(thermal_results, dict):
+                        inputs_block["thermal_results"] = _sanitize_for_yaml(thermal_results)
+
+                    if inputs_block:
+                        layer4_block["layer3_inputs"] = inputs_block
+
+                safe_layer4_config = _sanitize_for_yaml(layer4_config_dict)
+                layer4_yaml_str = _yaml.dump(safe_layer4_config, default_flow_style=False)
+
+                st.download_button(
+                    label="💾 Download Layer 4 Results (YAML)",
+                    data=layer4_yaml_str,
+                    file_name="layer4_results.yaml",
+                    mime="text/yaml",
+                    help=(
+                        "Download the PintleEngineConfig with Layer 4 flight simulation results, "
+                        "including tank pressure inputs and iteration history."
+                    ),
+                )
+            except Exception as layer4_export_exc:
+                st.warning(f"Could not create Layer 4 YAML export: {layer4_export_exc}")
     else:
         st.info("💡 Layer 4 has not been run yet. Click 'Run Layer 4 with Fake Data' above to test with generated pressure curves.")
     
