@@ -51,7 +51,8 @@ class PintleEngineRunner:
         self,
         P_tank_O: float,
         P_tank_F: float,
-        Pc_guess: Optional[float] = None
+        Pc_guess: Optional[float] = None,
+        P_ambient: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Evaluate engine performance at given tank pressures.
@@ -64,6 +65,10 @@ class PintleEngineRunner:
             Fuel tank pressure [Pa]
         Pc_guess : float, optional
             Initial guess for chamber pressure [Pa]
+        P_ambient : float, optional
+            Ambient pressure [Pa]. If None, defaults to sea level (101325 Pa).
+            This is used for thrust calculation and should match the target exit pressure
+            for accurate performance evaluation.
         
         Returns:
         --------
@@ -90,15 +95,18 @@ class PintleEngineRunner:
         # Get CEA properties for nozzle calculation
         # Calculate current expansion ratio (for 3D CEA cache)
         eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
-        cea_props = self.cea_cache.eval(MR, Pc, 101325.0, eps_current)
+        
+        # Use ambient pressure for CEA evaluation if provided, otherwise use sea level
+        Pa_for_cea = P_ambient if P_ambient is not None else 101325.0
+        cea_props = self.cea_cache.eval(MR, Pc, Pa_for_cea, eps_current)
         cstar_actual = diagnostics["cstar_actual"]
         gamma = diagnostics["gamma"]
         R = diagnostics["R"]
         Tc = diagnostics["Tc"]
         
         # Calculate thrust
-        # Use sea level ambient pressure (101325 Pa) as default
-        Pa = 101325.0  # Pa - Ambient pressure (sea level)
+        # Use provided ambient pressure or default to sea level (101325 Pa)
+        Pa = P_ambient if P_ambient is not None else 101325.0  # Pa - Ambient pressure
         
         # Calculate current expansion ratio (for 3D CEA cache)
         eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
@@ -266,7 +274,8 @@ class PintleEngineRunner:
     def evaluate_arrays(
         self,
         P_tank_O: Union[np.ndarray, list],
-        P_tank_F: Union[np.ndarray, list]
+        P_tank_F: Union[np.ndarray, list],
+        P_ambient: Optional[float] = None
     ) -> Dict[str, np.ndarray]:
         """
         Evaluate engine performance for arrays of tank pressures (time series).
@@ -277,6 +286,10 @@ class PintleEngineRunner:
             Array of oxidizer tank pressures [Pa]
         P_tank_F : array-like
             Array of fuel tank pressures [Pa]
+        P_ambient : float, optional
+            Ambient pressure [Pa]. If None, defaults to sea level (101325 Pa).
+            This is used for thrust calculation and should match the target exit pressure
+            for accurate performance evaluation.
         
         Returns:
         --------
@@ -320,7 +333,8 @@ class PintleEngineRunner:
             try:
                 point_results = self.evaluate(
                     float(P_tank_O.flat[i]),
-                    float(P_tank_F.flat[i])
+                    float(P_tank_F.flat[i]),
+                    P_ambient=P_ambient
                 )
                 
                 # Store scalar results (including eps for 3D CEA cache)
@@ -347,6 +361,7 @@ class PintleEngineRunner:
         P_tank_F: Union[np.ndarray, list],
         track_ablative_geometry: Optional[bool] = None,
         use_coupled_solver: bool = True,  # NEW: Use fully-coupled solver
+        P_ambient: Optional[float] = None,
     ) -> Dict[str, np.ndarray]:
         """
         Evaluate engine performance over time with ablative geometry evolution.
@@ -365,6 +380,10 @@ class PintleEngineRunner:
             Array of fuel tank pressures [Pa]
         track_ablative_geometry : bool, optional
             Override config setting for geometry tracking
+        P_ambient : float, optional
+            Ambient pressure [Pa]. If None, defaults to sea level (101325 Pa).
+            This is used for thrust calculation and should match the target exit pressure
+            for accurate performance evaluation.
         
         Returns:
         --------
@@ -492,7 +511,8 @@ class PintleEngineRunner:
                 )
                 
                 # Calculate thrust and performance
-                Pa = 101325.0  # Ambient pressure
+                # Use provided ambient pressure or default to sea level (101325 Pa)
+                Pa = P_ambient if P_ambient is not None else 101325.0  # Ambient pressure
                 
                 # Calculate current expansion ratio (for 3D CEA cache)
                 eps_current = config_copy.nozzle.A_exit / config_copy.chamber.A_throat

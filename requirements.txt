@@ -9,3 +9,4 @@ rocketpy
 streamlit
 plotly
 ezdxf
+cma

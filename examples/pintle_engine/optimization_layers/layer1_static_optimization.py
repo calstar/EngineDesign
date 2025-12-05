@@ -24,6 +24,14 @@ from pathlib import Path
 from pintle_pipeline.config_schemas import PintleEngineConfig
 from pintle_models.runner import PintleEngineRunner
 
+from scipy.optimize import minimize, differential_evolution
+
+try:
+    import cma
+except ImportError:  # pragma: no cover - optional dependency
+    cma = None
+   
+
 # Import utility function
 try:
     from .utils import extract_all_parameters
@@ -349,8 +357,7 @@ def run_layer1_optimization(
         optimized_config: Optimized engine configuration
         results: Results dict with performance, validation, history, etc.
     """
-    from scipy.optimize import minimize, differential_evolution
-    
+ 
     # Set up Layer 1 logging
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file_path = f"layer1_static_{timestamp}.log"
@@ -395,6 +402,28 @@ def run_layer1_optimization(
     max_nozzle_exit = requirements.get("max_nozzle_exit_diameter", 0.101)
     thrust_tol = tolerances.get("thrust", 0.10)
     
+    # Calculate target exit pressure from environment config (GPS/GFS-derived atmospheric pressure)
+    # Use standard atmosphere model based on elevation if environment config is available
+    target_P_exit = 101325.0  # Default: sea level (1 atm)
+    if hasattr(config_obj, 'environment') and config_obj.environment is not None:
+        elevation = getattr(config_obj.environment, 'elevation', 0.0)
+        if elevation is not None and elevation >= 0:
+            # Standard atmosphere model: P = P0 * exp(-M*g*h/(R*T0))
+            # P0 = 101325 Pa (sea level)
+            # M = 0.0289644 kg/mol (molar mass of dry air)
+            # g = 9.80665 m/s² (standard gravity)
+            # R = 8.31447 J/(mol·K) (universal gas constant)
+            # T0 = 288.15 K (sea level temperature)
+            P0 = 101325.0  # Pa
+            M = 0.0289644  # kg/mol
+            g = 9.80665    # m/s²
+            R = 8.31447    # J/(mol·K)
+            T0 = 288.15    # K
+            target_P_exit = P0 * np.exp(-M * g * elevation / (R * T0))
+            layer1_logger.info(f"Using atmospheric pressure from elevation: {elevation:.1f} m -> {target_P_exit:.1f} Pa ({target_P_exit/101325.0:.3f} atm)")
+    else:
+        layer1_logger.info(f"Environment config not available, using default sea level pressure: {target_P_exit:.1f} Pa")
+    
     layer1_logger.info(f"Target thrust: {target_thrust:.1f} N")
     layer1_logger.info(f"Target O/F ratio: {optimal_of:.2f}")
     layer1_logger.info(f"Min stability margin: {min_stability:.2f}")
@@ -433,9 +462,12 @@ def run_layer1_optimization(
     Pc_est = Pc_est_psi * psi_to_Pa
     Cf_est = 1.5
     A_throat_init = target_thrust / (Cf_est * Pc_est) if Pc_est > 0 else 0.001
-    A_throat_init = np.clip(A_throat_init, 5e-5, 2e-3)
+    A_throat_init = np.clip(A_throat_init, 5e-5, 3.0e-3)
     
     # Calculate bounds ensuring injector area < throat area
+    # Use a more relaxed minimum - allow smaller throat areas since injector geometry
+    # is also being optimized and the constraint will naturally prevent throat from
+    # being too small relative to the actual chosen injector geometry
     max_n_orifices = 20
     max_d_orifice = 0.004
     max_LOX_area = max_n_orifices * np.pi * (max_d_orifice / 2) ** 2
@@ -445,7 +477,9 @@ def run_layer1_optimization(
     R_outer_max = R_inner_max + max_h_gap
     max_fuel_area = np.pi * (R_outer_max ** 2 - R_inner_max ** 2)
     max_injector_area = max(max_LOX_area, max_fuel_area)
-    min_A_throat_safe = max_injector_area * 1.5
+    # Reduced from 1.5x to 1.1x to allow smaller throat areas - constraint in objective
+    # will still enforce injector_area < throat_area for the actual chosen geometry
+    min_A_throat_safe = max_injector_area * 1.1
     
     # Initial pressure bounds (50-95% of max)
     min_P_ratio = 0.5
@@ -453,7 +487,7 @@ def run_layer1_optimization(
     min_outer_diameter = max_chamber_od * 0.5
     
     bounds = [
-        (min_A_throat_safe, 2e-3),  # [0] A_throat
+        (min_A_throat_safe, 3.0e-3),  # [0] A_throat
         (min_Lstar, max_Lstar),     # [1] Lstar
         (4.0, 20.0),                # [2] expansion_ratio
         (min_outer_diameter, max_chamber_od),  # [3] outer diameter
@@ -477,9 +511,10 @@ def run_layer1_optimization(
     R_outer_est = R_inner_est + default_h_gap
     A_fuel_est = np.pi * (R_outer_est ** 2 - R_inner_est ** 2)
     max_injector_area_est = max(A_lox_est, A_fuel_est)
-    A_throat_min_safe = max_injector_area_est * 2.0
+    # Use same relaxed multiplier for initial guess
+    A_throat_min_safe = max_injector_area_est * 1.1
     A_throat_init = max(A_throat_init, A_throat_min_safe)
-    A_throat_init = np.clip(A_throat_init, 5e-5, 2e-3)
+    A_throat_init = np.clip(A_throat_init, 5e-5, 3.0e-3)
     
     P_O_start_init = max_lox_P_psi * 0.80
     P_F_start_init = max_fuel_P_psi * 0.80
@@ -538,7 +573,6 @@ def run_layer1_optimization(
     # Define objective function
     def objective(x: np.ndarray) -> float:
         """Layer 1 objective function: optimize geometry + initial pressures."""
-        nonlocal opt_state
         
         # Initialize opt_state keys
         for key in ["consecutive_failures", "last_valid_obj", "iteration", "function_evaluations", "best_objective", "best_x"]:
@@ -623,7 +657,7 @@ def run_layer1_optimization(
         
         # Evaluate
         try:
-            final_results = test_runner.evaluate(P_O_test, P_F_test)
+            final_results = test_runner.evaluate(P_O_test, P_F_test, P_ambient=target_P_exit)
             final_pressures = (P_O_test, P_F_test)
         except Exception as eval_error:
             error_str = str(eval_error)
@@ -636,6 +670,7 @@ def run_layer1_optimization(
         Isp_actual = final_results.get("Isp", 0)
         MR_actual = final_results.get("MR", 0)
         Pc_actual = final_results.get("Pc", 0)
+        Cf_actual = final_results.get("Cf_actual", final_results.get("Cf", 0))
         stability = final_results.get("stability_results", {})
         
         # Calculate errors
@@ -651,11 +686,62 @@ def run_layer1_optimization(
             thrust_penalty_extra = 500.0 * (thrust_error - 0.50) ** 2
         
         # Exit pressure error
+        # Use target_P_exit calculated from environment config (GPS/GFS-derived atmospheric pressure)
         P_exit_actual = final_results.get("P_exit", 0.0)
         exit_pressure_error = 0.0
-        target_P_exit = 1.0 * 101325.0  # Ambient at launch
+        # target_P_exit is calculated from environment config elevation using standard atmosphere model
+        # (defined in outer scope, calculated once at optimization start)
         if target_P_exit > 0:
             exit_pressure_error = abs(P_exit_actual - target_P_exit) / target_P_exit
+        
+        # Cf (thrust coefficient) penalty - HIGHEST PRIORITY
+        # Acceptable range: 1.3-1.8 (relaxed from 1.3-1.45 to allow for underexpanded nozzles)
+        # Penalty structure designed to handle coupling with thrust
+        Cf_min_acceptable = 1.3
+        Cf_max_acceptable = 1.8
+        Cf_error = 0.0
+        Cf_penalty = 0.0
+        Cf_in_range = False
+        
+        if Cf_actual > 0 and np.isfinite(Cf_actual):
+            if Cf_actual < Cf_min_acceptable:
+                # Penalty for being below acceptable range
+                deficit = Cf_min_acceptable - Cf_actual
+                # Moderate quadratic penalty - Cf is important
+                Cf_penalty = 650.0 * (deficit ** 2)
+                Cf_error = deficit / Cf_min_acceptable
+                Cf_in_range = False
+            elif Cf_actual > Cf_max_acceptable:
+                # Penalty for being above acceptable range
+                excess = Cf_actual - Cf_max_acceptable
+                # Progressive penalty structure: softer for moderate excess, stronger for large excess
+                # This allows optimizer to work towards target without being overly penalized
+                if excess <= 0.3:
+                    # Very small excess (1.8-2.1): very gentle penalty
+                    Cf_penalty = 300.0 * (excess ** 2)
+                elif excess <= 0.6:
+                    # Moderate excess (2.1-2.4): moderate penalty
+                    base_penalty = 300.0 * (0.3 ** 2)  # Penalty up to 0.3 excess
+                    extra_penalty = 400.0 * ((excess - 0.3) ** 2)  # Additional for 0.3-0.6 excess
+                    Cf_penalty = base_penalty + extra_penalty
+                else:
+                    # Large excess (>2.4): stronger penalty
+                    base_penalty = 300.0 * (0.3 ** 2)  # Penalty up to 0.3 excess
+                    mid_penalty = 400.0 * (0.3 ** 2)  # Penalty for 0.3-0.6 excess
+                    extra_penalty = 600.0 * ((excess - 0.6) ** 2)  # Additional for >0.6 excess
+                    Cf_penalty = base_penalty + mid_penalty + extra_penalty
+                Cf_error = excess / Cf_max_acceptable
+                Cf_in_range = False
+            else:
+                # Within acceptable range (1.3-1.8): no penalty
+                Cf_penalty = 0.0
+                Cf_error = 0.0
+                Cf_in_range = True
+        elif Cf_actual <= 0 or not np.isfinite(Cf_actual):
+            # Large penalty for invalid Cf
+            Cf_penalty = 1500.0
+            Cf_error = 1.0
+            Cf_in_range = False
         
         # Stability handling
         stability_state = stability.get("stability_state", "marginal")
@@ -691,6 +777,19 @@ def run_layer1_optimization(
             margin_penalty += 10.0 * (1.0 - feed_margin / min_stability)
         
         stability_penalty = stability_penalty + margin_penalty
+
+        # ------------------------------------------------------------------
+        # Soft preference for shorter chambers
+        # ------------------------------------------------------------------
+        preferred_L_chamber = float(requirements.get("preferred_chamber_length_m", 0.25))
+        length_penalty = 0.0
+        L_chamber_curr = getattr(getattr(config, "chamber", None), "length", None)
+        if L_chamber_curr is not None and np.isfinite(L_chamber_curr) and preferred_L_chamber > 0.0:
+            if L_chamber_curr > preferred_L_chamber:
+                excess_ratio = (L_chamber_curr - preferred_L_chamber) / preferred_L_chamber
+                # Gentle quadratic penalty so this never dominates thrust/O/F/stability.
+                length_penalty = 30.0 * excess_ratio ** 2
+        
         
         # Bounds penalty
         bounds_penalty = 0.0
@@ -701,19 +800,62 @@ def run_layer1_optimization(
             elif val > hi:
                 bounds_penalty += 10.0 * ((val - hi) / (hi - lo + 1e-10)) ** 2
         
-        # Objective components
-        thrust_penalty = (thrust_error ** 2) * 200.0
+        # Objective components - RESTRUCTURED to handle Cf-thrust-Pc coupling
+        # Priority order: Cf > Stability > Thrust > O/F
+        # When Cf is in range, reduce thrust penalty weight (they're coupled)
+        
+        # Base thrust penalty
+        thrust_penalty_base = (thrust_error ** 2) * 250.0
+        
+        # Adaptive thrust penalty: reduce weight when Cf is acceptable or close
+        # This handles the coupling - if Cf is reasonable, we're more forgiving on thrust
+        # Priority: Cf > Stability > Thrust (when Cf is reasonable)
+        if Cf_in_range:
+            # Cf is acceptable (1.3-1.8): reduce thrust penalty weight by 40%
+            # This allows optimizer to prioritize Cf without being overly penalized
+            # for thrust variations that naturally occur when adjusting geometry
+            thrust_penalty = thrust_penalty_base * 0.6
+        elif Cf_actual > 0 and np.isfinite(Cf_actual) and Cf_actual > Cf_max_acceptable:
+            # Cf is above acceptable: gradual penalty increase based on how far above
+            # Extended range: allow adaptive penalty up to 2.4 (1.8 * 1.33)
+            # This helps optimizer reduce Cf from high values (2.3+) without being
+            # overly penalized on thrust while working towards target
+            adaptive_max = Cf_max_acceptable * 1.33  # Up to 2.4
+            if Cf_actual <= adaptive_max:
+                # Cf is in adaptive range (1.8-2.4): gradual penalty increase
+                excess_ratio = (Cf_actual - Cf_max_acceptable) / (adaptive_max - Cf_max_acceptable)
+                excess_ratio = max(0.0, min(1.0, excess_ratio))  # Clip to [0, 1]
+                # Interpolate between reduced (0.6x) and full penalty
+                # More gradual: start at 0.5x for very close, ramp to 1.0x at 2.4
+                thrust_penalty = thrust_penalty_base * (0.5 + 0.5 * excess_ratio)
+            else:
+                # Cf is very high (>2.4): full thrust penalty
+                thrust_penalty = thrust_penalty_base
+        else:
+            # Cf is below acceptable (too low): full thrust penalty
+            # Don't reduce thrust penalty when Cf is problematic
+            thrust_penalty = thrust_penalty_base
+        
+        # O/F penalty (moderate priority)
         of_penalty = (of_error ** 2) * 300.0
+        
+        # Exit pressure penalty (low priority - less important than Cf/thrust/stability)
         exit_pressure_penalty = (exit_pressure_error ** 2) * 80.0
+        
+        # Stability penalty (HIGH priority - second only to Cf)
         stability_weight = 50.0 * stability_penalty
         
+        # Combined objective
+        # Structure: Cf (highest) > Stability > Thrust (adaptive) > O/F > Exit pressure
         obj = (
-            thrust_penalty +
-            of_penalty +
-            exit_pressure_penalty +
-            stability_weight +
-            bounds_penalty +
-            thrust_penalty_extra +
+            Cf_penalty +           # Highest priority - Cf accuracy
+            stability_weight +     # Second priority - stability margins
+            thrust_penalty +       # Third priority - thrust (adaptive weight based on Cf)
+            of_penalty +           # Fourth priority - O/F ratio
+            exit_pressure_penalty + # Fifth priority - exit pressure matching
+            length_penalty +       # Soft preference - chamber length
+            bounds_penalty +       # Constraint enforcement
+            thrust_penalty_extra + # Extra penalties for very bad cases
             of_penalty_extra
         )
         
@@ -782,6 +924,7 @@ def run_layer1_optimization(
         lox_start_ratio_hist = P_O_start_psi_hist / max_lox_P_psi if max_lox_P_psi > 0 else 0.7
         fuel_start_ratio_hist = P_F_start_psi_hist / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.7
         combined_stability_margin = min(chugging_margin, acoustic_margin, feed_margin)
+        L_chamber_hist = L_chamber_curr if (L_chamber_curr is not None and np.isfinite(L_chamber_curr)) else None
         
         opt_state["history"].append({
             "iteration": iteration,
@@ -792,6 +935,7 @@ def run_layer1_optimization(
             "expansion_ratio": expansion_ratio_curr,
             "D_chamber_outer": D_outer_curr,
             "D_chamber_inner": D_inner_curr,
+            "L_chamber": L_chamber_hist,
             "d_pintle_tip": d_pintle_tip_curr,
             "h_gap": h_gap_curr,
             "n_orifices": n_orifices_curr,
@@ -807,6 +951,9 @@ def run_layer1_optimization(
             "Isp": Isp_actual,
             "MR": MR_actual,
             "Pc": Pc_actual,
+            "Cf": Cf_actual,
+            "Cf_error": Cf_error,
+            "Cf_penalty": Cf_penalty,
             # Stability metrics
             "stability_margin": combined_stability_margin,
             "stability_state": stability_state,
@@ -848,7 +995,7 @@ def run_layer1_optimization(
             layer1_logger.info(
                 f"    ✓ New best objective: {obj:.6f} "
                 f"(thrust_err: {thrust_error*100:.2f}%, O/F_err: {of_error*100:.2f}%, "
-                f"stability: {stability_state}, score: {stability_score:.3f})"
+                f"Cf: {Cf_actual:.3f}, stability: {stability_state}, score: {stability_score:.3f})"
             )
             for handler in layer1_logger.handlers:
                 handler.flush()
@@ -895,94 +1042,180 @@ def run_layer1_optimization(
     layer1_logger.info("")
     layer1_logger.info("Starting optimization...")
     layer1_logger.info("")
-    update_progress("Layer 1: Global Search", 0.45, "Running differential evolution...")
     opt_state["iteration"] = 0
     opt_state["function_evaluations"] = 0
+    
+    class _ResultWrapper:
+        def __init__(self, x, fun, success=True):
+            self.x = np.asarray(x, dtype=float)
+            self.fun = float(fun)
+            self.success = success
     
     result = None
     x0_refined = x0
     
-    try:
-        layer1_logger.info("Phase 1: Global search (differential evolution)...")
-        de_result = differential_evolution(
-            objective,
-            bounds,
-            maxiter=20,
-            popsize=10,
-            mutation=(0.5, 1),
-            recombination=0.7,
-            seed=42,
-            polish=False,
-            workers=1,
-        )
-        x0_refined = de_result.x
-        func_evals_de = opt_state.get("function_evaluations", 0)
-        de_obj = de_result.fun
-        layer1_logger.info(f"Global search (differential_evolution) finished with objective {de_obj:.6f}")
-        layer1_logger.info(f"Function evaluations: {func_evals_de}")
-        log_status("Layer 1", f"Global search complete: {func_evals_de} func evals, obj={de_obj:.3f}, refining with L-BFGS-B...")
-        for handler in layer1_logger.handlers:
-            handler.flush()
-        opt_state["function_evaluations"] = 0
-    except Exception as e:
-        layer1_logger.warning(f"Differential evolution failed: {e}, using original initial guess")
-        log_status("Layer 1 Warning", f"Differential evolution failed: {e}, using original initial guess")
-        x0_refined = x0
-        opt_state["function_evaluations"] = 0
+    lower_bounds = np.array([b[0] for b in bounds], dtype=float)
+    upper_bounds = np.array([b[1] for b in bounds], dtype=float)
+    span = np.maximum(upper_bounds - lower_bounds, 1e-9)
     
-    # Local refinement with L-BFGS-B
-    if result is None:
-        maxfun_capped = min(max_iterations * 3, 500)
-        if opt_state.get('objective_satisfied', False) or opt_state.get('force_maxfun_1', False):
-            maxfun_capped = 1
-            log_status("Layer 1", "Objective satisfied - setting maxfun=1 to stop immediately")
+    use_cma_solver = cma is not None
+    
+    if use_cma_solver:
+        layer1_logger.info("Using CMA-ES for noisy coupled optimization.")
+        update_progress("Layer 1: CMA-ES", 0.45, "Running CMA-ES global solver...")
         
-        update_progress("Layer 1: Local Refinement", 0.47, f"Refining with L-BFGS-B (max {maxfun_capped} func evals)...")
-        layer1_logger.info("Phase 2: Local refinement (L-BFGS-B)...")
+        # Set per-dimension step sizes to ensure global exploration across ALL variables
+        # CMA_stds scales step size per dimension: actual_step[i] = sigma0 * CMA_stds[i]
+        # We want each variable to be able to explore ~15% of its range per sigma
+        target_fraction_of_range = 0.15  # 15% of range per sigma
         
-        class FakeResult:
-            def __init__(self, x, fun):
-                self.x = x
-                self.fun = fun
-                self.success = True
+        # Calculate base sigma0 from median span (reasonable global scale)
+        sigma0 = float(np.median(span) * target_fraction_of_range)
+        if not np.isfinite(sigma0) or sigma0 <= 0:
+            sigma0 = 0.05
+        
+        # Set CMA_stds proportional to each variable's range
+        # This ensures variables with larger ranges (like expansion_ratio) get larger step sizes
+        cma_stds = np.ones_like(span)
+        for i in range(len(span)):
+            if span[i] > 0:
+                # Desired step size for this dimension: fraction of its range
+                desired_step = span[i] * target_fraction_of_range
+                # CMA_stds[i] = desired_step / sigma0
+                # This makes step size in dimension i proportional to its range
+                cma_stds[i] = max(0.1, desired_step / sigma0) if sigma0 > 0 else 1.0
+        
+        # Special handling for discrete n_orifices (index 6): ensure it can jump between integers
+        n_orifices_idx = 6
+        target_step_n = 1.0  # ~one orifice per sigma
+        if sigma0 > 0:
+            cma_stds[n_orifices_idx] = max(cma_stds[n_orifices_idx], target_step_n / sigma0)
+
+        popsize = min(32, max(8, 4 + int(3 * np.log(len(x0_refined) + 1))))
+        cma_options = {
+            "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
+            "popsize": popsize,
+            "maxiter": max_iterations,
+            "verb_disp": 0,
+            "verb_log": 0,
+            "CMA_stds": cma_stds.tolist(),
+        }
         
         try:
-            if opt_state.get('objective_satisfied', False):
-                maxfun_capped = min(maxfun_capped, 3)
-                log_status("Layer 1", f"Objective satisfied - reducing maxfun to {maxfun_capped}")
+            es = cma.CMAEvolutionStrategy(x0_refined.tolist(), sigma0, cma_options)
+            while not es.stop():
+                candidates = es.ask()
+                values = []
+                for cand in candidates:
+                    cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
+                    val = objective(cand_arr)
+                    values.append(float(val))
+                es.tell(candidates, values)
+                
+                iter_idx = max(1, es.countiter)
+                progress = 0.10 + 0.35 * min(iter_idx / max_iterations, 1.0)
+                update_progress("Layer 1: CMA-ES", progress, f"CMA-ES iteration {iter_idx}/{max_iterations}")
+                
+                if opt_state.get("objective_satisfied", False):
+                    layer1_logger.info("Objective satisfied during CMA-ES run; stopping early.")
+                    es.stop()
+                    break
             
-            result = minimize(
-                objective,
-                x0_refined,
-                method='L-BFGS-B',
-                bounds=bounds,
-                options={
-                    'maxiter': max_iterations,
-                    'maxfun': maxfun_capped,
-                    'ftol': obj_tolerance * 0.1,
-                    'gtol': 1e-5,
-                    'maxls': 20,
-                    'disp': False,
-                }
-            )
-            layer1_logger.info("")
-            layer1_logger.info("Optimization completed")
-            layer1_logger.info(f"Success: {result.success}")
-            layer1_logger.info(f"Final objective value: {result.fun:.6f}")
-            layer1_logger.info(f"Iterations: {result.nit if hasattr(result, 'nit') else 'N/A'}")
-            layer1_logger.info(f"Function evaluations: {result.nfev if hasattr(result, 'nfev') else 'N/A'}")
-            layer1_logger.info("")
+            cma_result = es.result
+            x0_refined = np.asarray(cma_result.xbest, dtype=float)
+            best_fun = float(cma_result.fbest)
+            layer1_logger.info(f"CMA-ES finished with objective {best_fun:.6f} after {es.countiter} iterations.")
+            log_status("Layer 1", f"CMA-ES complete: {es.countiter} iterations, obj={best_fun:.3f}, refining with L-BFGS-B...")
+            for handler in layer1_logger.handlers:
+                handler.flush()
+            # Reset function evaluation counter for L-BFGS-B refinement
+            opt_state["function_evaluations"] = 0
         except Exception as e:
-            layer1_logger.error(f"L-BFGS-B error: {e}")
-            log_status("Layer 1 Warning", f"L-BFGS-B error: {e}, using best result found")
-            if opt_state.get('objective_satisfied', False):
-                satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', float('inf')))
-                best_x = opt_state.get('best_x', x0_refined)
-                result = FakeResult(best_x, satisfied_obj)
-            elif 'de_result' in locals():
-                result = FakeResult(x0_refined, de_obj)
-            else:
-                result = FakeResult(x0, float('inf'))
+            layer1_logger.error(f"CMA-ES failed: {e}. Falling back to differential evolution + L-BFGS-B.")
+            log_status("Layer 1 Warning", f"CMA-ES failed: {e}. Falling back to legacy solver.")
+            use_cma_solver = False
+            x0_refined = x0
+    
+    if not use_cma_solver:
+        update_progress("Layer 1: Global Search", 0.45, "Running differential evolution...")
+        try:
+            layer1_logger.info("Phase 1: Global search (differential evolution)...")
+            de_result = differential_evolution(
+                objective,
+                bounds,
+                maxiter=20,
+                popsize=10,
+                mutation=(0.5, 1),
+                recombination=0.7,
+                seed=42,
+                polish=False,
+                workers=1,
+            )
+            x0_refined = de_result.x
+            func_evals_de = opt_state.get("function_evaluations", 0)
+            de_obj = de_result.fun
+            layer1_logger.info(f"Global search (differential_evolution) finished with objective {de_obj:.6f}")
+            layer1_logger.info(f"Function evaluations: {func_evals_de}")
+            log_status("Layer 1", f"Global search complete: {func_evals_de} func evals, obj={de_obj:.3f}, refining with L-BFGS-B...")
+            for handler in layer1_logger.handlers:
+                handler.flush()
+            opt_state["function_evaluations"] = 0
+        except Exception as e:
+            layer1_logger.warning(f"Differential evolution failed: {e}, using original initial guess")
+            log_status("Layer 1 Warning", f"Differential evolution failed: {e}, using original initial guess")
+            x0_refined = x0
+            opt_state["function_evaluations"] = 0
+    
+    # L-BFGS-B refinement runs after either CMA-ES or differential evolution
+    maxfun_capped = min(max_iterations * 3, 500)
+    if opt_state.get('objective_satisfied', False) or opt_state.get('force_maxfun_1', False):
+        maxfun_capped = 1
+        log_status("Layer 1", "Objective satisfied - setting maxfun=1 to stop immediately")
+    
+    update_progress("Layer 1: Local Refinement", 0.47, f"Refining with L-BFGS-B (max {maxfun_capped} func evals)...")
+    layer1_logger.info("Phase 2: Local refinement (L-BFGS-B)...")
+    
+    try:
+        if opt_state.get('objective_satisfied', False):
+            maxfun_capped = min(maxfun_capped, 3)
+            log_status("Layer 1", f"Objective satisfied - reducing maxfun to {maxfun_capped}")
+        
+        lbfgs_result = minimize(
+            objective,
+            x0_refined,
+            method='L-BFGS-B',
+            bounds=bounds,
+            options={
+                'maxiter': max_iterations,
+                'maxfun': maxfun_capped,
+                'ftol': obj_tolerance * 0.1,
+                'gtol': 1e-3,  # Relaxed from 1e-5 to allow larger steps before convergence
+                'maxls': 50,    # Increased from 20 to allow more aggressive line searches
+                'disp': False,
+            }
+        )
+        layer1_logger.info("")
+        layer1_logger.info("Optimization completed")
+        layer1_logger.info(f"Success: {lbfgs_result.success}")
+        layer1_logger.info(f"Final objective value: {lbfgs_result.fun:.6f}")
+        layer1_logger.info(f"Iterations: {lbfgs_result.nit if hasattr(lbfgs_result, 'nit') else 'N/A'}")
+        layer1_logger.info(f"Function evaluations: {lbfgs_result.nfev if hasattr(lbfgs_result, 'nfev') else 'N/A'}")
+        layer1_logger.info("")
+        result = lbfgs_result
+    except Exception as e:
+        layer1_logger.error(f"L-BFGS-B error: {e}")
+        log_status("Layer 1 Warning", f"L-BFGS-B error: {e}, using best result found")
+        if opt_state.get('objective_satisfied', False):
+            satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', float('inf')))
+            best_x = opt_state.get('best_x', x0_refined)
+            result = _ResultWrapper(best_x, satisfied_obj)
+        elif use_cma_solver and 'best_fun' in locals():
+            # CMA-ES succeeded but L-BFGS-B failed
+            result = _ResultWrapper(x0_refined, best_fun)
+        elif 'de_result' in locals():
+            result = _ResultWrapper(x0_refined, de_obj)
+        else:
+            result = _ResultWrapper(x0, float('inf'))
     
     if opt_state.get('objective_satisfied', False):
         satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', 0))
@@ -1045,10 +1278,45 @@ def run_layer1_optimization(
         stored_stability_score = stored_results.get("stability_score", None)
         stored_stability_state = stored_results.get("stability_state", None)
         log_status("Layer 1 Validation", f"Using stored validation results: Thrust err {initial_thrust_error*100:.2f}%, O/F err {initial_MR_error*100:.2f}%")
+        
+        # For stored results, we need to re-evaluate to get P_exit and Cf
+        # (stored_results only contains F, MR, errors, and stability)
+        try:
+            eval_results = optimized_runner.evaluate(P_O_initial, P_F_initial, P_ambient=target_P_exit)
+            # Copy P_exit and Cf from evaluation if available
+            if "P_exit" in eval_results:
+                initial_performance["P_exit"] = eval_results["P_exit"]
+            if "Cf" in eval_results or "Cf_actual" in eval_results:
+                initial_performance["Cf"] = eval_results.get("Cf_actual", eval_results.get("Cf"))
+                initial_performance["Cf_actual"] = initial_performance["Cf"]
+            # Also copy other useful metrics that might be missing
+            if "Isp" in eval_results:
+                initial_performance["Isp"] = eval_results["Isp"]
+            if "Pc" in eval_results:
+                initial_performance["Pc"] = eval_results["Pc"]
+        except Exception:
+            # If re-evaluation fails, calculate Cf from available data
+            F_val = initial_performance.get("F", 0)
+            Pc_val = initial_performance.get("Pc", 0)
+            A_throat_val = getattr(optimized_config.chamber, "A_throat", None)
+            if A_throat_val and A_throat_val > 0 and Pc_val > 0:
+                Cf_calculated = F_val / (Pc_val * A_throat_val)
+                initial_performance["Cf_actual"] = Cf_calculated
+                initial_performance["Cf"] = Cf_calculated
     else:
-        initial_performance = optimized_runner.evaluate(P_O_initial, P_F_initial)
+        initial_performance = optimized_runner.evaluate(P_O_initial, P_F_initial, P_ambient=target_P_exit)
         initial_thrust_error = abs(initial_performance.get("F", 0) - target_thrust) / target_thrust if target_thrust > 0 else 1.0
         initial_MR_error = abs(initial_performance.get("MR", 0) - optimal_of) / optimal_of if optimal_of > 0 else 1.0
+        
+        # Ensure Cf is included (calculate if not provided by runner)
+        if "Cf" not in initial_performance and "Cf_actual" not in initial_performance:
+            F_val = initial_performance.get("F", 0)
+            Pc_val = initial_performance.get("Pc", 0)
+            A_throat_val = getattr(optimized_config.chamber, "A_throat", None)
+            if A_throat_val and A_throat_val > 0 and Pc_val > 0:
+                Cf_calculated = F_val / (Pc_val * A_throat_val)
+                initial_performance["Cf_actual"] = Cf_calculated
+                initial_performance["Cf"] = Cf_calculated
     
     # Check stability
     stored_results = opt_state.get("best_results_for_validation", {})
@@ -1172,6 +1440,9 @@ def run_layer1_optimization(
             "converged": opt_state["converged"],
             "iterations": len(iteration_history),
             "final_change": opt_state["best_objective"],
+        },
+        "exit_pressure_targeting": {
+            "target_P_exit": target_P_exit,  # Atmospheric pressure from environment config (GPS/GFS-derived)
         },
         "optimized_pressure_curves": {
             "lox_end_ratio": final_lox_end_ratio,

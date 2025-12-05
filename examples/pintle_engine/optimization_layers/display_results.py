@@ -144,131 +144,39 @@ def plot_flight_trajectory(flight_obj, requirements: Dict[str, Any]) -> None:
 
 
 def plot_optimization_convergence(optimization_results: Dict[str, Any]) -> None:
-    """Show optimization convergence plot."""
+    """
+    Lightweight optimization summary.
+
+    Historically this function rendered a large multi‑panel “Optimization Convergence”
+    dashboard (8 plots + several metric sections). That view was visually noisy and is
+    now removed to keep the Layer 1 UI focused on the objective/parameterization
+    history plots.
+
+    We keep a very small summary here so any existing callers continue to work
+    without drawing the full dashboard.
+    """
     history = optimization_results.get("iteration_history", [])
-    
+
     if not history:
         st.info("No optimization history available.")
         return
-    
-    st.markdown("### 📈 Optimization Convergence")
-    
-    iterations = [h.get("iteration", i) for i, h in enumerate(history)]
-    thrust_errors = [h.get("thrust_error", 0) * 100 for h in history]
-    of_errors = [h.get("of_error", 0) * 100 for h in history]
-    objectives = [h.get("objective", 0) for h in history]
-    thrusts = [h.get("thrust", 0) for h in history]
-    lox_ratios = [h.get("lox_end_ratio", 0.7) * 100 for h in history]
-    fuel_ratios = [h.get("fuel_end_ratio", 0.7) * 100 for h in history]
-    lstars = [h.get("Lstar", 1.0) for h in history]
-    l_chambers = [h.get("L_chamber", 0.2) * 1000 for h in history]
-    
-    fig = make_subplots(
-        rows=4, cols=2,
-        subplot_titles=(
-            "Objective Function", "Thrust Error [%]", 
-            "O/F Error [%]", "Thrust [N]",
-            "LOX End Pressure [%]", "Fuel End Pressure [%]",
-            "L* [m]", "Chamber Length [mm]"
-        ),
-        vertical_spacing=0.10,
-    )
-    
-    fig.add_trace(
-        go.Scatter(x=iterations, y=objectives, mode='lines+markers', name='Objective', line=dict(color='blue')),
-        row=1, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=thrust_errors, mode='lines+markers', name='Thrust Error', line=dict(color='red')),
-        row=1, col=2
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=of_errors, mode='lines+markers', name='O/F Error', line=dict(color='orange')),
-        row=2, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=thrusts, mode='lines+markers', name='Thrust', line=dict(color='green')),
-        row=2, col=2
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=lox_ratios, mode='lines+markers', name='LOX End %', line=dict(color='cyan')),
-        row=3, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=fuel_ratios, mode='lines+markers', name='Fuel End %', line=dict(color='magenta')),
-        row=3, col=2
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=lstars, mode='lines+markers', name='L*', line=dict(color='purple')),
-        row=4, col=1
-    )
-    fig.add_trace(
-        go.Scatter(x=iterations, y=l_chambers, mode='lines+markers', name='L_chamber', line=dict(color='brown')),
-        row=4, col=2
-    )
-    
-    fig.update_xaxes(title_text="Iteration", row=4, col=1)
-    fig.update_xaxes(title_text="Iteration", row=4, col=2)
-    fig.update_layout(height=800, showlegend=False)
-    
-    st.plotly_chart(fig, use_container_width=True, key=_get_unique_key("optimization_summary_plot"))
-    
-    conv_info = optimization_results.get("convergence_info", {})
-    pressure_info = optimization_results.get("optimized_pressure_curves", {})
-    
-    col1, col2, col3, col4 = st.columns(4)
+
+    thrust_errors = [h.get("thrust_error", 0.0) * 100.0 for h in history]
+    of_errors = [h.get("of_error", 0.0) * 100.0 for h in history]
+    conv_info = optimization_results.get("convergence_info", {}) or {}
+
+    st.markdown("### 📈 Optimization Summary")
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Total Iterations", f"{len(history)}")
     with col2:
         st.metric("Final Thrust Error", f"{thrust_errors[-1]:.1f}%" if thrust_errors else "N/A")
     with col3:
         st.metric("Final O/F Error", f"{of_errors[-1]:.1f}%" if of_errors else "N/A")
-    with col4:
-        status = "✅ Yes" if conv_info.get("converged", False) else "⚠️ No"
-        st.metric("Converged", status)
-    
-    st.markdown("#### 📐 Chamber Geometry")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        final_lstar = lstars[-1] if lstars else 1.0
-        st.metric("Final L*", f"{final_lstar:.3f} m")
-    with col2:
-        final_l_chamber = l_chambers[-1] if l_chambers else 200
-        st.metric("Chamber Length", f"{final_l_chamber:.1f} mm", delta="Using max diameter", delta_color="off")
-    with col3:
-        final_d_chamber = history[-1].get("D_chamber", 0.1) * 1000 if history else 100
-        st.metric("Chamber Diameter", f"{final_d_chamber:.1f} mm")
-    
-    st.markdown("#### 🎯 Optimized Pressure Profiles")
-    col1, col2 = st.columns(2)
-    with col1:
-        # Check if we have initial pressure info (Layer 1 static only)
-        lox_start_psi = pressure_info.get("lox_start_psi")
-        lox_end_ratio = pressure_info.get("lox_end_ratio", 0.7)
-        
-        # For Layer 1 (static only), show initial pressure in psi
-        # For Layer 2+, show end pressure ratio
-        if lox_start_psi is not None:
-            # Layer 1: Show initial pressure
-            st.metric("LOX Tank Initial Pressure", f"{lox_start_psi:.1f} psi", delta="Static (Layer 1)", delta_color="off")
-        else:
-            # Layer 2+: Show end pressure ratio
-            lox_desc = "Regulated" if lox_end_ratio > 0.92 else ("Mild blowdown" if lox_end_ratio > 0.75 else "Aggressive blowdown")
-            st.metric("LOX Tank End Pressure", f"{lox_end_ratio*100:.1f}%", delta=lox_desc, delta_color="off")
-    with col2:
-        # Check if we have initial pressure info (Layer 1 static only)
-        fuel_start_psi = pressure_info.get("fuel_start_psi")
-        fuel_end_ratio = pressure_info.get("fuel_end_ratio", 0.7)
-        
-        # For Layer 1 (static only), show initial pressure in psi
-        # For Layer 2+, show end pressure ratio
-        if fuel_start_psi is not None:
-            # Layer 1: Show initial pressure
-            st.metric("Fuel Tank Initial Pressure", f"{fuel_start_psi:.1f} psi", delta="Static (Layer 1)", delta_color="off")
-        else:
-            # Layer 2+: Show end pressure ratio
-            fuel_desc = "Regulated" if fuel_end_ratio > 0.92 else ("Mild blowdown" if fuel_end_ratio > 0.75 else "Aggressive blowdown")
-            st.metric("Fuel Tank End Pressure", f"{fuel_end_ratio*100:.1f}%", delta=fuel_desc, delta_color="off")
+
+    # Optional simple converged flag
+    status = "Yes" if conv_info.get("converged", False) else "No"
+    st.caption(f"Converged: **{status}**")
 
 
 def plot_layer1_parameterization_history(optimization_results: Dict[str, Any]) -> None:

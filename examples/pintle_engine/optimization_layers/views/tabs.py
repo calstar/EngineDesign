@@ -1722,6 +1722,7 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     fig.update_layout(
                         xaxis_title="Iteration",
                         yaxis_title="Objective Value",
+                        yaxis_type="log",
                         height=300,
                         margin=dict(l=40, r=20, t=30, b=40),
                         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -1805,12 +1806,10 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 st.metric("Thrust Error", f"{thrust_err_pct:.1f} %")
 
         # ------------------------------------------------------------------
-        # Convergence graphs
-        # ------------------------------------------------------------------
-        st.markdown("#### Optimization Convergence History")
-        plot_optimization_convergence(optimization_results)
-        
         # Objective history (from optimization loop), if available
+        # (Detailed multi-panel convergence dashboard removed for Layer 1 tab
+        #  to keep the UI focused on the objective history and parameterization
+        #  variable history.)
         history = st.session_state.get("layer1_objective_history", [])
         if history:
             df_hist = pd.DataFrame(history)
@@ -1837,15 +1836,19 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 title="Layer 1 Objective Function History",
                 xaxis_title="Iteration",
                 yaxis_title="Objective Value",
+                yaxis_type="log",
                 height=300,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
             st.plotly_chart(obj_fig, use_container_width=True, key="layer1_objective_history_plot")
         
-        # ------------------------------------------------------------------
-        # Parameterization variables history
-        # ------------------------------------------------------------------
-        plot_layer1_parameterization_history(optimization_results)
+        # NOTE:
+        # Historically this tab showed an additional multi-panel parameterization
+        # history dashboard implemented in `display_results.plot_layer1_parameterization_history`.
+        # To keep the Layer 1-only page minimal (and fully decoupled from
+        # `display_results`), that dashboard has been removed from this tab.
+        # The underlying history is still recorded in `optimization_results`
+        # for use by the full-engine views or offline analysis if desired.
         
         # ------------------------------------------------------------------
         # Performance metrics at t = 0 (forward mode)
@@ -1866,17 +1869,32 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
 
             st.markdown("#### Performance at t = 0 (Forward Mode Metrics)")
             PA_TO_PSI = 1.0 / 6894.76  # Conversion factor: Pa to psi
+            
+            # Try to get Cf and P_exit from performance dict, or calculate Cf if needed
+            Cf_actual = performance.get("Cf_actual", performance.get("Cf"))
+            if Cf_actual is None:
+                # Calculate Cf from F, Pc, and A_throat if available
+                F_val = performance.get("thrust", performance.get("F"))
+                Pc_val = performance.get("Pc")
+                if F_val is not None and Pc_val is not None:
+                    A_throat_val = getattr(config_obj.chamber, "A_throat", None)
+                    if A_throat_val and A_throat_val > 0 and Pc_val > 0:
+                        Cf_actual = F_val / (Pc_val * A_throat_val)
+            
+            P_exit_actual = performance.get("P_exit")
+            
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                if "thrust" in performance:
-                    st.metric("Thrust", f"{performance['thrust']:.0f} N")
+                if "thrust" in performance or "F" in performance:
+                    thrust_val = performance.get("thrust", performance.get("F", 0))
+                    st.metric("Thrust", f"{thrust_val:.0f} N")
                 if "Isp" in performance:
                     st.metric("Isp", f"{performance['Isp']:.1f} s")
             with col2:
                 if "Pc" in performance:
                     st.metric("Chamber Pressure", f"{performance['Pc'] * PA_TO_PSI:.1f} psi")
-                if "P_exit" in performance:
-                    st.metric("Real Exit Pressure", f"{performance['P_exit'] * PA_TO_PSI:.2f} psi")
+                if P_exit_actual is not None:
+                    st.metric("Exit Pressure", f"{P_exit_actual * PA_TO_PSI:.2f} psi")
                 # Show target exit pressure if available from optimizer
                 exit_targeting = optimization_results.get("exit_pressure_targeting", {})
                 target_P_exit = exit_targeting.get("target_P_exit", None)
@@ -1887,6 +1905,9 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                     st.metric("Total Mass Flow", f"{performance['mdot_total']:.3f} kg/s")
                 if "mdot_O" in performance:
                     st.metric("Oxidizer Flow", f"{performance['mdot_O']:.3f} kg/s")
+                # Display Cf prominently in this column
+                if Cf_actual is not None:
+                    st.metric("Cf (Thrust Coefficient)", f"{Cf_actual:.3f}")
             with col4:
                 if "mdot_F" in performance:
                     st.metric("Fuel Flow", f"{performance['mdot_F']:.3f} kg/s")
@@ -1902,9 +1923,19 @@ def _layer1_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 if "v_exit" in performance:
                     st.metric("Exit Velocity", f"{performance['v_exit']:.1f} m/s")
             with col7:
-                Cf_actual = performance.get("Cf_actual", performance.get("Cf"))
-                if Cf_actual is not None:
-                    st.metric("Cf (actual)", f"{Cf_actual:.3f}")
+                # Show Cf again here if not shown above, or show additional metrics
+                if Cf_actual is None:
+                    st.metric("Cf (Thrust Coefficient)", "N/A")
+                # Could show other metrics here if needed
+
+        # ------------------------------------------------------------------
+        # Full optimization-variable convergence history (all 12 variables)
+        # ------------------------------------------------------------------
+        try:
+            st.markdown("#### Layer 1 Parameterization Convergence (All Optimization Variables)")
+            plot_layer1_parameterization_history(optimization_results)
+        except Exception as e:
+            st.warning(f"Could not plot Layer 1 parameterization history: {e}")
 
         # ------------------------------------------------------------------
         # Optimizer parameters table (geometry + injector + initial pressures)
