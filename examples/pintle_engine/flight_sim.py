@@ -320,16 +320,57 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
             "reason": cutoff_reason,
             "message": truncation_msg
         }
+        # Nudge cutoff earlier to avoid zero/negative mass at the edge.
+        # Use a stronger margin to stay safely away from the depletion point.
+        margin = max(0.5, 0.05 * burn_time)
+        cutoff_time = max(0.0, cutoff_time - margin)
+        # If margin wipes out the burn, abort gracefully
+        if cutoff_time <= 0:
+            return {
+                "success": False,
+                "error": "Burn truncated to <= 0s due to tank underfill.",
+                "flight": None,
+                "flight_time": 0.0,
+                "apogee": 0.0,
+                "max_velocity": 0.0,
+                "truncation_info": {"truncated": True, "cutoff_time": 0.0, "reason": cutoff_reason, "message": truncation_msg},
+            }
         # Truncate thrust curve
         thrust_curve = truncate_thrust_curve(thrust_curve, cutoff_time)
         # Truncate mdot functions
-        mdot_lox = truncate_mdot_function(mdot_lox, cutoff_time, burn_time)
-        mdot_fuel = truncate_mdot_function(mdot_fuel, cutoff_time, burn_time)
+        mdot_lox = truncate_mdot_function(mdot_lox, cutoff_time, cutoff_time)
+        mdot_fuel = truncate_mdot_function(mdot_fuel, cutoff_time, cutoff_time)
         # Update burn_time to cutoff_time (but keep original for tank discretization)
         effective_burn_time = cutoff_time
     else:
         effective_burn_time = burn_time
         truncation_info = {"truncated": False}
+
+    # Additional safety: if integrated mdot would exceed available mass, shorten burn further
+    def _consumed_mass(mdot_func, t_end, n_samples=1500):
+        times = np.linspace(0, t_end, n_samples)
+        vals = np.array([float(mdot_func(t)) for t in times])
+        return float(np.trapz(vals, times))
+
+    # Only if we have Function/callable mdot after truncation
+    try:
+        fuel_consumed = _consumed_mass(mdot_fuel, effective_burn_time)
+        if fuel_consumed >= m_rp10 - 1e-6 and fuel_consumed > 0:
+            # shrink burn until consumption fits with small margin
+            for _ in range(5):
+                scale = (m_rp10 * 0.98) / max(fuel_consumed, 1e-9)
+                if scale >= 1.0:
+                    break
+                effective_burn_time = max(0.05, effective_burn_time * scale)
+                # Re-truncate curves to new effective time
+                thrust_curve = truncate_thrust_curve(thrust_curve, effective_burn_time)
+                mdot_lox = truncate_mdot_function(mdot_lox, effective_burn_time, effective_burn_time)
+                mdot_fuel = truncate_mdot_function(mdot_fuel, effective_burn_time, effective_burn_time)
+                fuel_consumed = _consumed_mass(mdot_fuel, effective_burn_time)
+            truncation_info["truncated"] = True
+            truncation_info["cutoff_time"] = effective_burn_time
+    except Exception:
+        pass
 
     # Nozzle exit area (only used for visualization, not trajectory)
     # Note: When providing a thrust curve, RocketPy doesn't use nozzle params for simulation.
@@ -627,7 +668,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     oxidizer_tank = MassFlowRateBasedTank(
         name="LOX Tank",
         geometry=lox_geom,
-        flux_time=burn_time,
+        flux_time=effective_burn_time,
         liquid=lox,
         gas=gn2_ullage,
         initial_liquid_mass=m_lox0,
@@ -642,7 +683,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     fuel_tank = MassFlowRateBasedTank(
         name="RP-1 Tank",
         geometry=rp1_geom,
-        flux_time=burn_time,
+        flux_time=effective_burn_time,
         liquid=rp1,
         gas=gn2_ullage,
         initial_liquid_mass=m_rp10,
@@ -674,7 +715,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         pressurant_tank = MassFlowRateBasedTank(
             name="Pressurant (N₂) Tank",
             geometry=press_geom,
-            flux_time=burn_time,
+            flux_time=effective_burn_time,
             liquid=gn2_pressurant,  # Using "liquid" field for gas (RocketPy limitation)
             gas=gn2_pressurant,
             initial_liquid_mass=m_pressurant,  # All mass starts as "liquid" (actually high-pressure gas)

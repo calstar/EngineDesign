@@ -193,11 +193,18 @@ def run_layer4_flight_simulation(
                     safety_margin = max(target_burn_time * 0.001, 0.01)
                     truncated_burn_time = max(0.1, earliest_cutoff - safety_margin)
 
-            # Run flight simulation with truncated burn time to prevent underfill errors
+            # Run flight simulation
+            # CRITICAL: Pass the ORIGINAL target_burn_time, not truncated_burn_time.
+            # This ensures setup_flight uses the full time range for accurate truncation detection.
+            # The pre-truncation check above was just for validation - setup_flight will do
+            # its own truncation detection with the actual masses, which is more accurate.
+            # Setting config burn_time ensures consistency.
+            config_for_flight.thrust.burn_time = target_burn_time
+            
             sim = run_flight_simulation_func(
                 config_for_flight,
                 pressure_curves,
-                truncated_burn_time,
+                target_burn_time,  # Use original burn_time - setup_flight will handle truncation
             )
 
             success = bool(sim.get("success", False))

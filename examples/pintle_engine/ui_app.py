@@ -38,6 +38,7 @@ from pintle_pipeline.time_series import generate_pressure_profile
 from pintle_models.runner import PintleEngineRunner
 from examples.pintle_engine.interactive_pipeline import solve_for_thrust, solve_for_thrust_and_MR, ThrustSolveError
 from examples.pintle_engine.flight_sim import setup_flight, detect_tank_underfill_time
+from examples.pintle_engine.optimization_layers.copv_flight_helpers import run_flight_simulation
 from examples.pintle_engine.flight_visuals import (
     extract_flight_series,
     plot_flight_results,
@@ -5956,9 +5957,178 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         st.error(f"Edited flight configuration is invalid: {exc}")
         return
 
+    # Option to run exactly the Layer 4 best candidate from the uploaded optimizer YAML
+    use_layer4_best = False
+    layer4_best_payload = None
+    if source == "Dataset (time-varying)" and dataset_source == "Embedded dataset from optimizer YAML config":
+        use_layer4_best = st.checkbox(
+            "Use Layer 4 best candidate (masses, burn time, curves) from uploaded YAML",
+            value=False,
+            help="Runs the exact Layer 4 best iteration using updated_time_results and the stored masses/burn time."
+        )
+        if use_layer4_best:
+            yaml_dict = st.session_state.get("optimizer_yaml_raw_dict") or {}
+            layer4_block = yaml_dict.get("layer4") if isinstance(yaml_dict, dict) else None
+            # Prefer updated_time_results inside layer4.layer3_inputs or layer4; fallback to top-level if present there
+            flight_result = layer4_block.get("flight_sim_result") if isinstance(layer4_block, dict) else None
+            updated_time_results = None
+            if isinstance(layer4_block, dict) and "updated_time_results" in layer4_block:
+                updated_time_results = layer4_block.get("updated_time_results")
+            elif isinstance(layer4_block, dict) and isinstance(layer4_block.get("layer3_inputs"), dict) and "updated_time_results" in layer4_block.get("layer3_inputs"):
+                updated_time_results = layer4_block.get("layer3_inputs").get("updated_time_results")
+            elif isinstance(yaml_dict, dict) and "updated_time_results" in yaml_dict:
+                updated_time_results = yaml_dict.get("updated_time_results")
+            if not (isinstance(flight_result, dict) and isinstance(updated_time_results, dict)):
+                st.error("Layer 4 best candidate not found in uploaded YAML (missing flight_sim_result or updated_time_results).")
+                use_layer4_best = False
+            else:
+                try:
+                    time_array_s = np.asarray(layer4_block.get("layer3_inputs", {}).get("time_array_s") or updated_time_results.get("time"), dtype=float)
+                    thrust_array = np.asarray(updated_time_results.get("F"), dtype=float)
+                    mdot_O_array = np.asarray(updated_time_results.get("mdot_O"), dtype=float)
+                    mdot_F_array = np.asarray(updated_time_results.get("mdot_F"), dtype=float)
+                except Exception as exc:
+                    st.error(f"Invalid updated_time_results arrays: {exc}")
+                    use_layer4_best = False
+                else:
+                    min_len = min(len(time_array_s), len(thrust_array), len(mdot_O_array), len(mdot_F_array))
+                    if min_len < 2:
+                        st.error("updated_time_results arrays are empty or mismatched.")
+                        use_layer4_best = False
+                    else:
+                        time_array_s = time_array_s[:min_len]
+                        thrust_array = thrust_array[:min_len]
+                        mdot_O_array = mdot_O_array[:min_len]
+                        mdot_F_array = mdot_F_array[:min_len]
+                        pressure_curves_best = {
+                            "time": time_array_s,
+                            "thrust": thrust_array,
+                            "mdot_O": mdot_O_array,
+                            "mdot_F": mdot_F_array,
+                        }
+                        layer4_best_payload = {
+                            "pressure_curves": pressure_curves_best,
+                            "adj_lox": float(flight_result.get("adjusted_lox_mass", m_lox)),
+                            "adj_fuel": float(flight_result.get("adjusted_fuel_mass", m_fuel)),
+                            "burn_time": float(flight_result.get("actual_burn_time", burn_time_ds if 'burn_time_ds' in locals() else 0.0)),
+                        }
+                        st.info(
+                            f"Using Layer 4 best candidate: LOX={layer4_best_payload['adj_lox']:.3f} kg, "
+                            f"Fuel={layer4_best_payload['adj_fuel']:.3f} kg, "
+                            f"burn_time={layer4_best_payload['burn_time']:.3f} s. "
+                            "Form masses are overridden while this is enabled."
+                        )
+
     if run_btn:
         # If dataset-driven, build Functions and override burn time
         if source == "Dataset (time-varying)":
+            # Fast path: run exact Layer 4 best candidate if requested
+            if use_layer4_best and layer4_best_payload is not None:
+                pressure_curves = layer4_best_payload["pressure_curves"]
+
+                # Update working masses and burn time to the Layer 4 best candidate
+                if working.get("thrust") is None:
+                    working["thrust"] = {}
+                working["thrust"]["burn_time"] = layer4_best_payload["burn_time"]
+                if working.get("lox_tank") is None:
+                    working["lox_tank"] = {}
+                if working.get("fuel_tank") is None:
+                    working["fuel_tank"] = {}
+                working["lox_tank"]["mass"] = layer4_best_payload["adj_lox"]
+                working["fuel_tank"]["mass"] = layer4_best_payload["adj_fuel"]
+
+                # Re-validate config
+                try:
+                    config_for_flight = PintleEngineConfig(**working)
+                except Exception as exc:
+                    st.error(f"Invalid flight configuration after applying Layer 4 best masses: {exc}")
+                    return
+
+                # Run flight simulation using the same helper as Layer 4
+                with st.spinner("Running flight simulation..."):
+                    try:
+                        result_dict = run_flight_simulation(
+                            config_for_flight,
+                            pressure_curves,
+                            layer4_best_payload["burn_time"],
+                        )
+
+                        if not result_dict.get("success", False):
+                            st.error(f"Flight simulation failed: {result_dict.get('error', 'Unknown error')}")
+                            return
+
+                        apogee = result_dict["apogee"]
+                        max_velocity = result_dict["max_velocity"]
+                        flight_obj = result_dict.get("flight_obj")
+                        trunc_info = result_dict.get("truncation_info", {}) or {}
+                        cutoff_time = trunc_info.get("cutoff_time")
+                        was_truncated = bool(trunc_info.get("truncated", False) and cutoff_time is not None)
+                        elevation = config_for_flight.environment.elevation if config_for_flight.environment else 0.0
+
+                        st.success("Flight simulation completed!")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Apogee AGL", f"{apogee:.1f} m ({apogee * 3.28084:.0f} ft)")
+                        with col2:
+                            st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
+                        if was_truncated:
+                            st.info(f"Burn truncated at {cutoff_time:.3f} s due to {trunc_info.get('reason','tank underfill')}.")
+
+                        # Extract and plot flight data (with elevation subtracted for AGL)
+                        if flight_obj is not None:
+                            flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
+                        else:
+                            flight_time = np.array([])
+                            flight_z = np.array([])
+                            flight_vz = np.array([])
+
+                        # Add truncated data to dataset display (apply cutoff if reported)
+                        t_cur = pressure_curves["time"]
+                        thrust_cur = pressure_curves["thrust"]
+                        mdotO_cur = pressure_curves["mdot_O"]
+                        mdotF_cur = pressure_curves["mdot_F"]
+                        if was_truncated:
+                            mask = t_cur <= cutoff_time + 1e-9
+                            t_cur = t_cur[mask]
+                            thrust_cur = thrust_cur[mask]
+                            mdotO_cur = mdotO_cur[mask]
+                            mdotF_cur = mdotF_cur[mask]
+                            # ensure zero point at cutoff
+                            if t_cur.size == 0 or t_cur[-1] < cutoff_time:
+                                t_cur = np.append(t_cur, cutoff_time)
+                                thrust_cur = np.append(thrust_cur, 0.0)
+                                mdotO_cur = np.append(mdotO_cur, 0.0)
+                                mdotF_cur = np.append(mdotF_cur, 0.0)
+                        truncated_df = pd.DataFrame({
+                            "Time (s)": t_cur,
+                            "Thrust_truncated (N)": thrust_cur,
+                            "mdot_O (kg/s)": mdotO_cur,
+                            "mdot_F (kg/s)": mdotF_cur,
+                        })
+                        if flight_time.size > 0:
+                            truncated_df["Altitude AGL (m)"] = np.interp(
+                                t_cur,
+                                flight_time,
+                                flight_z
+                            )
+                            truncated_df["Vertical Velocity (m/s)"] = np.interp(
+                                t_cur,
+                                flight_time,
+                                flight_vz
+                            )
+                        st.subheader("Truncated Dataset")
+                        st.dataframe(truncated_df)
+
+                        if flight_time.size > 0:
+                            plot_flight_results(flight_time, flight_z, flight_vz)
+                            render_rocket_view(flight_obj)
+                            plot_additional_rocket_plots(flight_obj, flight_time)
+                    except Exception as exc:
+                        st.error(f"Flight simulation failed: {exc}")
+                        import traceback
+                        st.code(traceback.format_exc())
+                return
+
             try:
                 # Convert time column and thrust values
                 t_vals = to_elapsed_seconds(ds_df[time_col])
@@ -6013,83 +6183,14 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
             t_min = float(np.min(t_vals))
             t_vals_normalized = t_vals - t_min
 
-            # For datasets coming from an embedded optimizer YAML (Layer 4 export),
-            # we want to mirror the Layer 4 behavior: pass the full curves into
-            # setup_flight and let it handle tank underfill and truncation.
-            # For all other datasets, keep the existing pre-truncation logic.
-            if dataset_source == "Embedded dataset from optimizer YAML config":
-                thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
-                mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
-                mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
-            else:
-                # Check for tank underfill and truncate dataset if needed
-                m_lox0 = float(m_lox)
-                m_fuel0 = float(m_fuel)
-
-                # Build temporary Functions for underfill detection
-                mdot_lox_temp = build_rp_function(t_vals_normalized, mdot_O_vals)
-                mdot_fuel_temp = build_rp_function(t_vals_normalized, mdot_F_vals)
-
-                # Detect underfill by integrating mdot arrays
-                lox_cutoff = detect_tank_underfill_time(mdot_lox_temp, m_lox0, burn_time_ds)
-                fuel_cutoff = detect_tank_underfill_time(mdot_fuel_temp, m_fuel0, burn_time_ds)
-
-                # Find earliest cutoff
-                cutoff_time = None
-                if lox_cutoff is not None and fuel_cutoff is not None:
-                    cutoff_time = min(lox_cutoff, fuel_cutoff)
-                elif lox_cutoff is not None:
-                    cutoff_time = lox_cutoff
-                elif fuel_cutoff is not None:
-                    cutoff_time = fuel_cutoff
-
-                # Truncate arrays if needed
-                if cutoff_time is not None and cutoff_time < burn_time_ds:
-                    # Find index where time exceeds cutoff
-                    trunc_idx = np.searchsorted(t_vals_normalized, cutoff_time, side="right")
-                    if trunc_idx < len(t_vals_normalized) and trunc_idx > 0:
-                        # Keep points before cutoff
-                        t_before = t_vals_normalized[:trunc_idx]
-                        thrust_before = thrust_vals_SI[:trunc_idx]
-                        mdot_O_before = mdot_O_vals[:trunc_idx]
-                        mdot_F_before = mdot_F_vals[:trunc_idx]
-
-                        # Interpolate values at exact cutoff_time
-                        idx_after = trunc_idx
-                        idx_before = trunc_idx - 1
-
-                        if idx_before >= 0 and idx_after < len(t_vals_normalized):
-                            t0, t1 = t_vals_normalized[idx_before], t_vals_normalized[idx_after]
-                            if t1 > t0:
-                                frac = (cutoff_time - t0) / (t1 - t0)
-                                # Linear interpolation for each array
-                                thrust_at_cutoff = thrust_vals_SI[idx_before] + frac * (thrust_vals_SI[idx_after] - thrust_vals_SI[idx_before])
-                                mdot_O_at_cutoff = mdot_O_vals[idx_before] + frac * (mdot_O_vals[idx_after] - mdot_O_vals[idx_before])
-                                mdot_F_at_cutoff = mdot_F_vals[idx_before] + frac * (mdot_F_vals[idx_after] - mdot_F_vals[idx_before])
-                            else:
-                                thrust_at_cutoff = thrust_vals_SI[idx_before]
-                                mdot_O_at_cutoff = mdot_O_vals[idx_before]
-                                mdot_F_at_cutoff = mdot_F_vals[idx_before]
-                        else:
-                            # Fallback: use the last values before cutoff
-                            thrust_at_cutoff = thrust_before[-1] if len(thrust_before) > 0 else 0.0
-                            mdot_O_at_cutoff = mdot_O_before[-1] if len(mdot_O_before) > 0 else 0.0
-                            mdot_F_at_cutoff = mdot_F_before[-1] if len(mdot_F_before) > 0 else 0.0
-
-                        # Append exact cutoff point and zero point just after for sharp transition
-                        eps = 1e-6
-                        t_vals_normalized = np.concatenate([t_before, [cutoff_time, cutoff_time + eps]])
-                        thrust_vals_SI = np.concatenate([thrust_before, [thrust_at_cutoff, 0.0]])
-                        mdot_O_vals = np.concatenate([mdot_O_before, [mdot_O_at_cutoff, 0.0]])
-                        mdot_F_vals = np.concatenate([mdot_F_before, [mdot_F_at_cutoff, 0.0]])
-
-                        burn_time_ds = float(cutoff_time)
-                        st.info(f"Truncated burn at {cutoff_time:.4f} s due to propellant depletion")
-
-                # Build RocketPy Functions
-                thrust_func = build_rp_function(t_vals_normalized, thrust_vals_SI)
-                mdot_lox_func = build_rp_function(t_vals_normalized, mdot_O_vals)
-                mdot_fuel_func = build_rp_function(t_vals_normalized, mdot_F_vals)
+            # Build pressure_curves dict in the same format Layer 4 uses
+            # This ensures both paths use the exact same data format
+            pressure_curves = {
+                "time": t_vals_normalized,
+                "thrust": thrust_vals_SI,
+                "mdot_O": mdot_O_vals,
+                "mdot_F": mdot_F_vals,
+            }
             
             # Update config with dataset-derived burn time and masses
             if working.get("thrust") is None:
@@ -6103,14 +6204,27 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 st.error(f"Invalid flight configuration after dataset processing: {exc}")
                 return
             
-            # Run flight simulation
+            # Run flight simulation using the SAME function Layer 4 uses
+            # This ensures identical results between Layer 4 and flight sim tab
             with st.spinner("Running flight simulation..."):
                 try:
-                    result = setup_flight(config_for_flight, thrust_func, mdot_lox_func, mdot_fuel_func, plot_results=False)
-                    apogee = result["apogee"]
-                    max_velocity = result["max_velocity"]
-                    flight_obj = result["flight"]
-                    elevation = result.get("elevation", 0.0)
+                    result_dict = run_flight_simulation(
+                        config_for_flight,
+                        pressure_curves,
+                        burn_time_ds,
+                    )
+                    
+                    # Extract results (run_flight_simulation returns a dict with success, apogee, max_velocity, flight_obj)
+                    if not result_dict.get("success", False):
+                        st.error(f"Flight simulation failed: {result_dict.get('error', 'Unknown error')}")
+                        return
+                    
+                    apogee = result_dict["apogee"]
+                    max_velocity = result_dict["max_velocity"]
+                    flight_obj = result_dict.get("flight_obj")
+                    
+                    # Get elevation from config
+                    elevation = config_for_flight.environment.elevation if config_for_flight.environment else 0.0
                     
                     st.success("Flight simulation completed!")
                     col1, col2 = st.columns(2)
@@ -6128,7 +6242,13 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                     })
                     
                     # Extract flight data (with elevation subtracted for AGL)
-                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
+                    if flight_obj is not None:
+                        flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
+                    else:
+                        flight_time = np.array([])
+                        flight_z = np.array([])
+                        flight_vz = np.array([])
+                    
                     if flight_time.size > 0:
                         truncated_df["Altitude AGL (m)"] = np.interp(
                             t_vals_normalized, 
@@ -6172,15 +6292,15 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 mdot_lox_actual = float(m_lox) / float(burn_time) * 0.8
                 mdot_fuel_actual = float(m_fuel) / float(burn_time) * 0.2
             
-            # Build constant functions
+            # Build pressure_curves dict in the same format Layer 4 uses
+            # This ensures both paths use the exact same data format
             times_const = np.array([0.0, float(burn_time)])
-            thrust_const = np.array([thrust_val, thrust_val])
-            mdot_lox_const = np.array([mdot_lox_actual, mdot_lox_actual])
-            mdot_fuel_const = np.array([mdot_fuel_actual, mdot_fuel_actual])
-            
-            thrust_func = build_rp_function(times_const, thrust_const)
-            mdot_lox_func = build_rp_function(times_const, mdot_lox_const)
-            mdot_fuel_func = build_rp_function(times_const, mdot_fuel_const)
+            pressure_curves = {
+                "time": times_const,
+                "thrust": np.array([thrust_val, thrust_val]),
+                "mdot_O": np.array([mdot_lox_actual, mdot_lox_actual]),
+                "mdot_F": np.array([mdot_fuel_actual, mdot_fuel_actual]),
+            }
             
             # Update config
             if working.get("thrust") is None:
@@ -6200,14 +6320,30 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                 st.error(f"Invalid flight configuration: {exc}")
                 return
             
-            # Run flight simulation
+            # Run flight simulation using the SAME function Layer 4 uses
+            # This ensures identical results between Layer 4 and flight sim tab
             with st.spinner("Running flight simulation..."):
                 try:
-                    result = setup_flight(config_for_flight, thrust_func, mdot_lox_func, mdot_fuel_func, plot_results=False)
-                    apogee = result["apogee"]
-                    max_velocity = result["max_velocity"]
-                    flight_obj = result["flight"]
-                    elevation = result.get("elevation", 0.0)
+                    result_dict = run_flight_simulation(
+                        config_for_flight,
+                        pressure_curves,
+                        float(burn_time),
+                    )
+                    
+                    # Extract results
+                    if not result_dict.get("success", False):
+                        st.error(f"Flight simulation failed: {result_dict.get('error', 'Unknown error')}")
+                        return
+                    
+                    apogee = result_dict["apogee"]
+                    max_velocity = result_dict["max_velocity"]
+                    flight_obj = result_dict.get("flight_obj")
+                    trunc_info = result_dict.get("truncation_info", {}) or {}
+                    cutoff_time = trunc_info.get("cutoff_time")
+                    was_truncated = bool(trunc_info.get("truncated", False) and cutoff_time is not None)
+                    
+                    # Get elevation from config
+                    elevation = config_for_flight.environment.elevation if config_for_flight.environment else 0.0
                     
                     st.success("Flight simulation completed!")
                     col1, col2 = st.columns(2)
@@ -6215,9 +6351,16 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
                         st.metric("Apogee AGL", f"{apogee:.1f} m ({apogee * 3.28084:.0f} ft)")
                     with col2:
                         st.metric("Max Velocity", f"{max_velocity:.1f} m/s")
+                    if was_truncated:
+                        st.info(f"Burn truncated at {cutoff_time:.3f} s due to {trunc_info.get('reason','tank underfill')}.")
                     
                     # Extract and plot flight data (with elevation subtracted for AGL)
-                    flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
+                    if flight_obj is not None:
+                        flight_time, flight_z, flight_vz = extract_flight_series(flight_obj, elevation)
+                    else:
+                        flight_time = np.array([])
+                        flight_z = np.array([])
+                        flight_vz = np.array([])
                     if flight_time.size > 0:
                         plot_flight_results(flight_time, flight_z, flight_vz)
                         render_rocket_view(flight_obj)
