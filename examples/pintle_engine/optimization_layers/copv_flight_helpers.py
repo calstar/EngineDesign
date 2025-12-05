@@ -116,15 +116,45 @@ def run_flight_simulation(
         # CRITICAL: Update config's burn_time to match the actual (possibly truncated) burn_time
         # This ensures setup_flight uses the correct burn_time for tank discretization
         # Ensure burn_time is a float, not an interp1d or other object
-        burn_time_float = float(burn_time)
+        if hasattr(burn_time, '__call__'):
+            # burn_time is a callable (interp1d) - this shouldn't happen but handle it
+            burn_time_float = float(burn_time(0))  # Just use the value at t=0 as fallback
+        else:
+            burn_time_float = float(burn_time)
         if hasattr(config_copy, 'thrust') and hasattr(config_copy.thrust, 'burn_time'):
             config_copy.thrust.burn_time = burn_time_float
         
         # Extract arrays and ensure they're numpy arrays (not interp1d objects)
-        time_array = np.asarray(pressure_curves["time"], dtype=float)
-        thrust_array = np.asarray(pressure_curves["thrust"], dtype=float)
-        mdot_O_array = np.asarray(pressure_curves["mdot_O"], dtype=float)
-        mdot_F_array = np.asarray(pressure_curves["mdot_F"], dtype=float)
+        # Handle the case where pressure_curves values might be interp1d objects
+        time_raw = pressure_curves["time"]
+        thrust_raw = pressure_curves["thrust"]
+        mdot_O_raw = pressure_curves["mdot_O"]
+        mdot_F_raw = pressure_curves["mdot_F"]
+        
+        # Helper function to convert callable/interp1d to array
+        def to_array(val, time_samples):
+            """Convert a value (array, callable, or interp1d) to a numpy array."""
+            if val is None:
+                return np.array([], dtype=float)
+            elif hasattr(val, '__call__'):
+                # It's a callable (interp1d), sample it
+                return np.asarray([float(val(t)) for t in time_samples], dtype=float)
+            else:
+                return np.asarray(val, dtype=float)
+        
+        # First, get time array (may need to generate samples if it's callable)
+        if hasattr(time_raw, '__call__'):
+            # Time is callable - generate time samples
+            time_samples = np.linspace(0, burn_time_float, max(100, int(burn_time_float * 100)))
+            time_array = time_samples
+        else:
+            time_array = np.asarray(time_raw, dtype=float)
+            time_samples = time_array
+        
+        # Convert other arrays using the time samples
+        thrust_array = to_array(thrust_raw, time_samples)
+        mdot_O_array = to_array(mdot_O_raw, time_samples)
+        mdot_F_array = to_array(mdot_F_raw, time_samples)
         
         # Ensure arrays are 1D and same length
         time_array = time_array.flatten()
@@ -168,7 +198,7 @@ def run_flight_simulation(
             error_msg = (
                 f"Apogee is suspiciously low ({apogee:.1f}m). "
                 f"Diagnostics: max_thrust={max_thrust:.1f}N, initial_thrust={initial_thrust:.1f}N, "
-                f"lox_mass={lox_mass:.2f}kg, fuel_mass={fuel_mass:.2f}kg, burn_time={burn_time:.2f}s"
+                f"lox_mass={lox_mass:.2f}kg, fuel_mass={fuel_mass:.2f}kg, burn_time={burn_time_float:.2f}s"
             )
             
             return {

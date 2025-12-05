@@ -578,8 +578,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
             
             print(f"  Pressurant (N₂): {m_pressurant:.3f} kg initial, ~{mdot_pressurant_avg:.4f} kg/s avg flow")
 
-    # Convert mdot_lox and mdot_fuel to Functions if they're constants
+    # Convert mdot_lox and mdot_fuel to RocketPy Functions if they're not already
     # (MassFlowRateBasedTank expects Functions)
+    # Handle: RocketPy Function, callable (interp1d), or constant float
     # Use high resolution (500 points/sec) with explicit cutoff points
     if not isinstance(mdot_lox, Function):
         n_samples = max(int(burn_time * 500) + 1, 1000)
@@ -589,7 +590,15 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         critical_times = [effective_burn_time, effective_burn_time + eps]
         times_mdot = np.unique(np.concatenate([times_base, critical_times]))
         times_mdot = times_mdot[times_mdot <= burn_time]
-        mdot_lox_vals = np.array([float(mdot_lox) if t <= effective_burn_time else 0.0 for t in times_mdot])
+        
+        # Check if mdot_lox is callable (e.g., interp1d) or a constant
+        if callable(mdot_lox):
+            # It's callable (interp1d or similar) - evaluate at each time point
+            mdot_lox_vals = np.array([float(mdot_lox(t)) if t <= effective_burn_time else 0.0 for t in times_mdot])
+        else:
+            # It's a constant value
+            mdot_lox_vals = np.array([float(mdot_lox) if t <= effective_burn_time else 0.0 for t in times_mdot])
+        
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
         source = np.column_stack((times_mdot, mdot_lox_vals))
         mdot_lox = Function(source)
@@ -602,7 +611,15 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         critical_times = [effective_burn_time, effective_burn_time + eps]
         times_mdot = np.unique(np.concatenate([times_base, critical_times]))
         times_mdot = times_mdot[times_mdot <= burn_time]
-        mdot_fuel_vals = np.array([float(mdot_fuel) if t <= effective_burn_time else 0.0 for t in times_mdot])
+        
+        # Check if mdot_fuel is callable (e.g., interp1d) or a constant
+        if callable(mdot_fuel):
+            # It's callable (interp1d or similar) - evaluate at each time point
+            mdot_fuel_vals = np.array([float(mdot_fuel(t)) if t <= effective_burn_time else 0.0 for t in times_mdot])
+        else:
+            # It's a constant value
+            mdot_fuel_vals = np.array([float(mdot_fuel) if t <= effective_burn_time else 0.0 for t in times_mdot])
+        
         # RocketPy Function expects 2D array: [[x1, y1], [x2, y2], ...]
         source = np.column_stack((times_mdot, mdot_fuel_vals))
         mdot_fuel = Function(source)

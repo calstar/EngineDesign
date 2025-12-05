@@ -22,6 +22,8 @@ import numpy as np
 import copy
 
 from pintle_pipeline.config_schemas import PintleEngineConfig
+from examples.pintle_engine.flight_sim import detect_tank_underfill_time
+from scipy.interpolate import interp1d
 
 
 def run_layer4_flight_simulation(
@@ -77,16 +79,26 @@ def run_layer4_flight_simulation(
             )
             return result
 
-        # Start from full propellant, then reduce if apogee is too high
+        # Start from full propellant, then adjust bidirectionally to find optimal
         current_lox_mass = initial_lox_mass
         current_fuel_mass = initial_fuel_mass
 
-        mass_reduction_step = 0.05  # 5% reduction per iteration
+        # Adaptive step size for bidirectional search
+        mass_adjustment_step = 0.05  # 5% adjustment per iteration (can be positive or negative)
         max_iterations = 20
         best_error = float("inf")
         best_result: Optional[Dict[str, Any]] = None
         iteration_data = []
         best_iteration_idx: Optional[int] = None
+        
+        # Track search direction and bounds for binary search-like behavior
+        # Keep track of masses that give apogee above and below target
+        lox_mass_above = initial_lox_mass  # Mass that gives apogee > target
+        lox_mass_below = None  # Mass that gives apogee < target
+        fuel_mass_above = initial_fuel_mass
+        fuel_mass_below = None
+        last_apogee = None
+        last_direction = None  # 'up' or 'down'
 
         for i in range(1, max_iterations + 1):
             progress = 0.75 + 0.10 * (i / max_iterations)
@@ -102,18 +114,105 @@ def run_layer4_flight_simulation(
                 f"(target apogee {target_apogee:.0f} m)",
             )
 
-            # Run flight simulation with full curves; it will truncate when tanks are empty
+            # CRITICAL: Detect tank underfill BEFORE running flight sim to prevent errors
+            # Extract mdot arrays from pressure_curves (handle both arrays and interp1d objects)
+            time_array_local = pressure_curves.get("time", time_array)
+            mdot_O_raw = pressure_curves.get("mdot_O")
+            mdot_F_raw = pressure_curves.get("mdot_F")
+            
+            # Convert to arrays if needed (handle interp1d objects by sampling)
+            if time_array_local is not None and hasattr(time_array_local, '__call__'):
+                # It's a callable (interp1d), sample it
+                time_samples = np.linspace(0, target_burn_time, max(100, int(target_burn_time * 100)))
+                time_array_local = np.asarray([float(time_array_local(t)) for t in time_samples], dtype=float)
+            elif time_array_local is not None:
+                time_array_local = np.asarray(time_array_local, dtype=float)
+            else:
+                time_array_local = np.asarray(time_array, dtype=float)
+            
+            if mdot_O_raw is not None and hasattr(mdot_O_raw, '__call__'):
+                # It's a callable (interp1d), sample it using the same time array
+                if not isinstance(time_array_local, np.ndarray) or len(time_array_local) == 0:
+                    time_samples = np.linspace(0, target_burn_time, max(100, int(target_burn_time * 100)))
+                else:
+                    time_samples = time_array_local
+                mdot_O_array = np.asarray([float(mdot_O_raw(t)) for t in time_samples], dtype=float)
+            elif mdot_O_raw is not None:
+                mdot_O_array = np.asarray(mdot_O_raw, dtype=float)
+            else:
+                mdot_O_array = np.array([], dtype=float)
+            
+            if mdot_F_raw is not None and hasattr(mdot_F_raw, '__call__'):
+                # It's a callable (interp1d), sample it using the same time array
+                if not isinstance(time_array_local, np.ndarray) or len(time_array_local) == 0:
+                    time_samples = np.linspace(0, target_burn_time, max(100, int(target_burn_time * 100)))
+                else:
+                    time_samples = time_array_local
+                mdot_F_array = np.asarray([float(mdot_F_raw(t)) for t in time_samples], dtype=float)
+            elif mdot_F_raw is not None:
+                mdot_F_array = np.asarray(mdot_F_raw, dtype=float)
+            else:
+                mdot_F_array = np.array([], dtype=float)
+            
+            # Ensure arrays are same length
+            if len(time_array_local) > 0 and len(mdot_O_array) > 0 and len(mdot_F_array) > 0:
+                min_len = min(len(time_array_local), len(mdot_O_array), len(mdot_F_array))
+                if min_len > 0:
+                    time_array_local = time_array_local[:min_len]
+                    mdot_O_array = mdot_O_array[:min_len]
+                    mdot_F_array = mdot_F_array[:min_len]
+                    
+                    # Create interpolation functions for underfill detection
+                    mdot_O_func = interp1d(time_array_local, mdot_O_array, kind='linear', fill_value=0, bounds_error=False)
+                    mdot_F_func = interp1d(time_array_local, mdot_F_array, kind='linear', fill_value=0, bounds_error=False)
+                    
+                    # Detect underfill times
+                    lox_cutoff = detect_tank_underfill_time(mdot_O_func, current_lox_mass, target_burn_time)
+                    fuel_cutoff = detect_tank_underfill_time(mdot_F_func, current_fuel_mass, target_burn_time)
+                else:
+                    lox_cutoff = None
+                    fuel_cutoff = None
+            else:
+                lox_cutoff = None
+                fuel_cutoff = None
+                
+            # Find earliest cutoff and truncate burn_time slightly (subtract 0.1% or 0.01s, whichever is larger)
+            truncated_burn_time = target_burn_time
+            if lox_cutoff is not None or fuel_cutoff is not None:
+                earliest_cutoff = None
+                if lox_cutoff is not None and fuel_cutoff is not None:
+                    earliest_cutoff = min(lox_cutoff, fuel_cutoff)
+                elif lox_cutoff is not None:
+                    earliest_cutoff = lox_cutoff
+                elif fuel_cutoff is not None:
+                    earliest_cutoff = fuel_cutoff
+                
+                if earliest_cutoff is not None and earliest_cutoff < target_burn_time:
+                    # Truncate slightly before the cutoff to prevent negative mass errors
+                    # Use 0.1% of burn time or 0.01s, whichever is larger, as safety margin
+                    safety_margin = max(target_burn_time * 0.001, 0.01)
+                    truncated_burn_time = max(0.1, earliest_cutoff - safety_margin)
+
+            # Run flight simulation with truncated burn time to prevent underfill errors
             sim = run_flight_simulation_func(
                 config_for_flight,
                 pressure_curves,
-                target_burn_time,
+                truncated_burn_time,
             )
 
             success = bool(sim.get("success", False))
             apogee = float(sim.get("apogee", 0.0) or 0.0)
             max_velocity = float(sim.get("max_velocity", 0.0) or 0.0)
             flight_obj = sim.get("flight_obj", None)
-            actual_burn_time = float(sim.get("flight_time", target_burn_time) or target_burn_time)
+            
+            # Get actual burn time from truncation info if available, otherwise use truncated_burn_time
+            truncation_info = sim.get("truncation_info", {})
+            if truncation_info.get("truncated", False) and "cutoff_time" in truncation_info:
+                # Use the actual cutoff time from flight sim (more accurate)
+                actual_burn_time = float(truncation_info["cutoff_time"])
+            else:
+                # Use the truncated burn time we calculated, or fallback to target
+                actual_burn_time = float(sim.get("flight_time", truncated_burn_time) or truncated_burn_time)
 
             # Basic thrust diagnostics from the pressure_curves input
             thrust_array = pressure_curves.get("thrust")
@@ -165,8 +264,8 @@ def run_layer4_flight_simulation(
                         "error": sim.get("error", ""),
                     }
                 )
-                current_lox_mass = max(0.1, current_lox_mass * (1.0 - mass_reduction_step))
-                current_fuel_mass = max(0.1, current_fuel_mass * (1.0 - mass_reduction_step))
+                current_lox_mass = max(0.1, current_lox_mass * (1.0 - mass_adjustment_step))
+                current_fuel_mass = max(0.1, current_fuel_mass * (1.0 - mass_adjustment_step))
                 continue
 
             # Compute fractional apogee error
@@ -211,29 +310,60 @@ def run_layer4_flight_simulation(
                     "truncation_info": sim.get("truncation_info", {}),
                 }
 
-            # If we're within tolerance, we can stop
+            # If we're within tolerance, we can stop early (but still track for best result)
             if error_frac < apogee_tol:
                 update_progress(
                     "Layer 4: Flight Candidate",
-                    0.85,
+                    progress,
                     f"Apogee {apogee:.0f} m within {error_frac * 100:.1f}% of target "
-                    f"{target_apogee:.0f} m; accepting tank fills.",
+                    f"{target_apogee:.0f} m (iteration {i}/{max_iterations}).",
                 )
-                break
+                # Don't break - continue to see if we can find an even better match
 
-            # If apogee is too high, reduce tank fills and try again
+            # Bidirectional adjustment: increase or decrease masses based on apogee vs target
+            current_direction = None
             if apogee > target_apogee:
-                current_lox_mass = max(0.1, current_lox_mass * (1.0 - mass_reduction_step))
-                current_fuel_mass = max(0.1, current_fuel_mass * (1.0 - mass_reduction_step))
+                # Apogee too high - reduce masses
+                lox_mass_above = current_lox_mass
+                fuel_mass_above = current_fuel_mass
+                
+                # If we have a lower bound, use binary search; otherwise use step reduction
+                if lox_mass_below is not None:
+                    # Binary search between above and below bounds
+                    current_lox_mass = (lox_mass_above + lox_mass_below) / 2.0
+                    current_fuel_mass = (fuel_mass_above + fuel_mass_below) / 2.0
+                else:
+                    # No lower bound yet - reduce by step
+                    current_lox_mass = max(0.1, current_lox_mass * (1.0 - mass_adjustment_step))
+                    current_fuel_mass = max(0.1, current_fuel_mass * (1.0 - mass_adjustment_step))
+                
+                current_direction = 'down'
             else:
-                # Apogee too low – cannot increase beyond initial masses, so stop
-                update_progress(
-                    "Layer 4: Flight Candidate",
-                    0.85,
-                    f"Apogee {apogee:.0f} m is below target {target_apogee:.0f} m; "
-                    "cannot increase tank fills beyond initial values, using best match.",
-                )
-                break
+                # Apogee too low - increase masses
+                lox_mass_below = current_lox_mass
+                fuel_mass_below = current_fuel_mass
+                
+                # If we have an upper bound, use binary search; otherwise use step increase
+                if lox_mass_above is not None and lox_mass_above > current_lox_mass:
+                    # Binary search between above and below bounds
+                    current_lox_mass = (lox_mass_above + lox_mass_below) / 2.0
+                    current_fuel_mass = (fuel_mass_above + fuel_mass_below) / 2.0
+                else:
+                    # No upper bound or already at initial - increase by step (up to initial)
+                    current_lox_mass = min(initial_lox_mass, current_lox_mass * (1.0 + mass_adjustment_step))
+                    current_fuel_mass = min(initial_fuel_mass, current_fuel_mass * (1.0 + mass_adjustment_step))
+                
+                current_direction = 'up'
+            
+            # Prevent oscillation: if we're bouncing back and forth, reduce step size
+            if i > 2 and last_direction is not None:
+                if last_direction != current_direction:
+                    # We're oscillating - reduce step size
+                    mass_adjustment_step *= 0.8
+                    mass_adjustment_step = max(0.01, mass_adjustment_step)  # Don't go below 1%
+            
+            last_direction = current_direction
+            last_apogee = apogee
 
         # Finalize result from the best candidate, if any
         result["iteration_data"] = iteration_data

@@ -5064,8 +5064,78 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
     
     if isinstance(runner, PintleEngineConfig):
         runner = PintleEngineRunner(runner)
+    
     st.header("Flight Simulation")
     st.write("Use engine performance to simulate a basic rocket flight and report apogee and velocity.")
+    
+    # Flight Sim-specific config uploader
+    st.markdown("---")
+    st.subheader("📁 Flight Simulation Configuration")
+    uploaded_flight_config = st.file_uploader(
+        "Upload config file for flight simulation (optional)",
+        type=["yaml", "yml"],
+        key="flight_sim_config_uploader",
+        help="Upload a YAML config file to use specifically for flight simulation. "
+             "This will override the main config for this tab only. Leave empty to use the main config."
+    )
+    
+    # Handle flight sim-specific config upload
+    flight_sim_config_label = None
+    if uploaded_flight_config is not None:
+        try:
+            raw_bytes = uploaded_flight_config.getvalue()
+            config_text = raw_bytes.decode("utf-8")
+            flight_config_dict = yaml.safe_load(config_text)
+            # Validate the config
+            flight_config_obj = PintleEngineConfig(**flight_config_dict)
+            # Store in session state for flight sim only
+            st.session_state["flight_sim_config_dict"] = flight_config_dict
+            st.session_state["flight_sim_config_label"] = uploaded_flight_config.name
+            flight_sim_config_label = uploaded_flight_config.name
+            st.success(f"✅ Loaded flight sim config: **{uploaded_flight_config.name}**")
+        except Exception as exc:
+            st.error(f"Failed to load flight simulation config: {exc}")
+            # Clear invalid config from session state
+            if "flight_sim_config_dict" in st.session_state:
+                del st.session_state["flight_sim_config_dict"]
+            if "flight_sim_config_label" in st.session_state:
+                del st.session_state["flight_sim_config_label"]
+    
+    # Clear flight sim config button
+    if "flight_sim_config_dict" in st.session_state:
+        if st.button("Clear flight sim config (use main config)", key="clear_flight_sim_config"):
+            del st.session_state["flight_sim_config_dict"]
+            if "flight_sim_config_label" in st.session_state:
+                del st.session_state["flight_sim_config_label"]
+            st.rerun()
+    
+    # Determine which config to use: flight sim specific or main config
+    if "flight_sim_config_dict" in st.session_state:
+        # Use flight sim specific config
+        try:
+            config_obj = PintleEngineConfig(**st.session_state["flight_sim_config_dict"])
+            flight_sim_config_label = st.session_state.get("flight_sim_config_label", "Custom Flight Sim Config")
+            st.info(f"📌 Using flight sim config: **{flight_sim_config_label}**")
+            # Create a new runner with the flight sim config
+            runner = PintleEngineRunner(config_obj)
+        except Exception as exc:
+            st.warning(f"Could not load flight sim config from session state: {exc}. Falling back to main config.")
+            # Fall through to use main config
+            if "config_dict" in st.session_state:
+                try:
+                    config_obj = PintleEngineConfig(**st.session_state["config_dict"])
+                except Exception as exc2:
+                    st.warning(f"Could not load main config from session state: {exc2}. Using passed config.")
+    else:
+        # Use main config (pull from session state if available)
+        if "config_dict" in st.session_state:
+            try:
+                config_obj = PintleEngineConfig(**st.session_state["config_dict"])
+            except Exception as exc:
+                st.warning(f"Could not load updated config from session state: {exc}. Using passed config.")
+        # If config_dict is not in session state, use the passed config_obj as fallback
+    
+    st.markdown("---")
 
     source = st.radio("Performance source", ["Tank pressures (constant thrust)", "Dataset (time-varying)"], horizontal=True, key="flight_perf_source")
 
