@@ -209,7 +209,17 @@ def load_default_runner() -> PintleEngineRunner:
 
 
 def get_default_config_dict() -> Dict[str, Any]:
-    config = load_config(str(CONFIG_PATH))
+    # Check if a preset config path is selected (don't cache this - it can change)
+    try:
+        selected_path = st.session_state.get("selected_config_path")
+        if selected_path and Path(selected_path).exists():
+            config_path = selected_path
+        else:
+            config_path = str(CONFIG_PATH)
+    except:
+        config_path = str(CONFIG_PATH)
+    
+    config = load_config(config_path)
     # Use exclude_none=False to preserve all fields including None values
     return config.model_dump(exclude_none=False)
 
@@ -2757,7 +2767,10 @@ def _clear_chamber_design_form_state(config_label: str) -> None:
 def load_config_state(uploaded_file) -> Tuple[PintleEngineConfig, str]:
     if "config_dict" not in st.session_state:
         st.session_state["config_dict"] = get_default_config_dict()
-        st.session_state["config_label"] = str(CONFIG_PATH)
+        # Use selected preset path if available, otherwise default
+        selected_path = st.session_state.get("selected_config_path")
+        config_label = selected_path if selected_path else str(CONFIG_PATH)
+        st.session_state["config_label"] = config_label
 
     if uploaded_file is not None:
         try:
@@ -3268,9 +3281,17 @@ def config_editor(config: PintleEngineConfig) -> PintleEngineConfig:
         ablative_cfg["heat_of_ablation"] = st.number_input("Heat of ablation [J/kg]", min_value=1e6, max_value=1e8, value=float(ablative_cfg.get("heat_of_ablation", 2.5e6)))
         ablative_cfg["thermal_conductivity"] = st.number_input("Ablator conductivity [W/(m·K)]", min_value=0.05, max_value=5.0, value=float(ablative_cfg.get("thermal_conductivity", 0.35)), key="ablative_conductivity")
         ablative_cfg["specific_heat"] = st.number_input("Ablator specific heat [J/(kg·K)]", min_value=200.0, max_value=4000.0, value=float(ablative_cfg.get("specific_heat", 1500.0)), key="ablative_specific_heat")
+        # Get initial thickness value and clamp to valid range to prevent UI errors
+        initial_thickness_raw = float(ablative_cfg.get("initial_thickness", 0.01))
+        # Clamp to valid range (0.001 to 0.05 m) to handle any unit conversion issues
+        initial_thickness_clamped = max(0.001, min(0.05, initial_thickness_raw))
+        if initial_thickness_raw != initial_thickness_clamped:
+            # Value was out of range, update the config
+            ablative_cfg["initial_thickness"] = initial_thickness_clamped
+        
         ablative_cfg["initial_thickness"] = length_number_input(
             "Initial thickness",
-            float(ablative_cfg.get("initial_thickness", 0.01)),
+            initial_thickness_clamped,
             min_m=0.001,
             max_m=0.05,
             step_m=0.001,
@@ -4534,11 +4555,20 @@ def graphite_insert_view(config_obj: PintleEngineConfig, runner: Optional[Pintle
                 key=f"graphite_T_back_{config_label}"
             )
         with col3:
+            # Get initial thickness and clamp to valid range to prevent UI errors
+            initial_thickness_raw = float(graphite_config.get("initial_thickness", 0.005))
+            mechanical_thickness_mm = initial_thickness_raw * 1000.0  # Convert m to mm
+            # Clamp to valid range (0.1 to 10.0 mm) to handle any unit conversion issues
+            mechanical_thickness_clamped = max(0.1, min(10.0, mechanical_thickness_mm))
+            if mechanical_thickness_mm != mechanical_thickness_clamped:
+                # Value was out of range, update the config
+                graphite_config["initial_thickness"] = mechanical_thickness_clamped / 1000.0  # Convert back to m
+            
             mechanical_thickness = st.number_input(
                 "Mechanical Thickness [mm]",
                 min_value=0.1,
                 max_value=10.0,
-                value=float(graphite_config.get("initial_thickness", 0.005)) * 1000.0,
+                value=mechanical_thickness_clamped,
                 step=0.1,
                 help="Minimum thickness for mechanical support, groove, seating",
                 key=f"graphite_t_mech_{config_label}"
@@ -6377,11 +6407,46 @@ def main():
     st.title("Pintle Injector Engine Pipeline")
 
     st.sidebar.header("Configuration")
+    
+    # Config preset selector
+    config_presets = {
+        "LOX/RP-1 (Default)": "config_minimal.yaml",
+        "LOX/Ethanol": "config_lox_ethanol.yaml",
+    }
+    
+    selected_preset = st.sidebar.selectbox(
+        "Propellant Configuration",
+        options=list(config_presets.keys()),
+        index=0,
+        key="config_preset_selector",
+        help="Select a preset propellant configuration or upload a custom config below"
+    )
+    
+    # Update CONFIG_PATH based on selection
+    if selected_preset in config_presets:
+        preset_path = Path(__file__).parent / config_presets[selected_preset]
+        if preset_path.exists():
+            preset_path_str = str(preset_path)
+            # Store selected preset path in session state
+            if "selected_config_path" not in st.session_state or st.session_state.get("selected_config_path") != preset_path_str:
+                st.session_state["selected_config_path"] = preset_path_str
+                # Clear cached runner and config when preset changes
+                if "cached_runner" in st.session_state:
+                    del st.session_state["cached_runner"]
+                if "cached_config_hash" in st.session_state:
+                    del st.session_state["cached_config_hash"]
+                # Reload config from preset
+                if "config_dict" in st.session_state:
+                    del st.session_state["config_dict"]
+    
     uploaded_config = st.sidebar.file_uploader("Upload custom YAML config", type=["yaml", "yml"])
 
     try:
         config_obj, config_label = load_config_state(uploaded_config)
-        st.sidebar.success(f"Using configuration: {config_label}")
+        # Show which propellant combination is active
+        propellant_info = f"{config_obj.combustion.cea.ox_name} / {config_obj.combustion.cea.fuel_name}"
+        st.sidebar.success(f"Using: {propellant_info}")
+        st.sidebar.caption(f"Config: {Path(config_label).name}")
     except ValueError as exc:
         st.sidebar.error(str(exc))
         st.stop()

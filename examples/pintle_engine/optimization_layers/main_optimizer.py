@@ -169,6 +169,9 @@ def run_full_engine_optimization_with_flight_sim(
     
     # Extract pressure curve config
     psi_to_Pa = 6894.76
+    # HARD LIMITS (also used for fallbacks below)
+    max_lox_P_psi = pressure_config.get("max_lox_pressure_psi", 500)
+    max_fuel_P_psi = pressure_config.get("max_fuel_pressure_psi", 500)
     lox_P_start = pressure_config.get("lox_start_psi", 500) * psi_to_Pa
     lox_P_end_ratio = pressure_config.get("lox_end_pct", 0.70)
     fuel_P_start = pressure_config.get("fuel_start_psi", 500) * psi_to_Pa
@@ -364,11 +367,8 @@ def run_full_engine_optimization_with_flight_sim(
         try:
             from .layer2_pressure import run_layer2_pressure
             
-            # Get max pressures from config (these are HARD LIMITS - never exceeded)
-            max_lox_P_psi = pressure_config.get("max_lox_pressure_psi", 500)
-            max_fuel_P_psi = pressure_config.get("max_fuel_pressure_psi", 500)
-            
             # Get rocket mass and tank capacity from config (if available)
+            # Note: max_lox_P_psi and max_fuel_P_psi are already defined above at lines 173-174
             # These are needed for impulse and capacity calculations in layer2_pressure
             rocket_dry_mass_kg = getattr(config_obj.rocket, 'dry_mass_kg', None) if hasattr(config_obj, 'rocket') else None
             max_lox_tank_capacity_kg = getattr(config_obj.rocket, 'lox_tank_capacity_kg', None) if hasattr(config_obj, 'rocket') else None
