@@ -465,14 +465,15 @@ def run_layer1_optimization(
     A_throat_init = np.clip(A_throat_init, 5e-5, 3.0e-3)
     
     # Calculate bounds ensuring injector area < throat area
-    # Use a more relaxed minimum - allow smaller throat areas since injector geometry
-    # is also being optimized and the constraint will naturally prevent throat from
-    # being too small relative to the actual chosen injector geometry
-    max_n_orifices = 20
-    max_d_orifice = 0.004
+    # CRITICAL: Injector bounds must be sized for target mass flow!
+    # For 7000N thrust at Isp≈280s, O/F=2.3: mdot_O≈1.7 kg/s, mdot_F≈0.74 kg/s
+    # Previous bounds (d_orifice up to 4mm, 20 orifices) allowed ~9.5 kg/s LOX flow
+    # which is 5-6× more than needed, causing high Cf due to excess thrust.
+    max_n_orifices = 18  # Reduced from 20
+    max_d_orifice = 0.0025  # Reduced from 0.004 (4mm→2.5mm) - KEY CHANGE for Cf control
     max_LOX_area = max_n_orifices * np.pi * (max_d_orifice / 2) ** 2
-    max_d_pintle = 0.030
-    max_h_gap = 0.0015
+    max_d_pintle = 0.025  # Reduced from 0.030
+    max_h_gap = 0.001  # Reduced from 0.0015
     R_inner_max = max_d_pintle / 2
     R_outer_max = R_inner_max + max_h_gap
     max_fuel_area = np.pi * (R_outer_max ** 2 - R_inner_max ** 2)
@@ -489,22 +490,22 @@ def run_layer1_optimization(
     bounds = [
         (min_A_throat_safe, 3.0e-3),  # [0] A_throat
         (min_Lstar, max_Lstar),     # [1] Lstar
-        (4.0, 20.0),                # [2] expansion_ratio
+        (6.0, 12.0),                # [2] expansion_ratio - tightened for Cf≈1.6 at sea level
         (min_outer_diameter, max_chamber_od),  # [3] outer diameter
-        (0.008, 0.030),             # [4] d_pintle_tip
-        (0.0003, 0.0015),           # [5] h_gap
-        (12, 20),                   # [6] n_orifices
-        (0.001, 0.004),             # [7] d_orifice
+        (0.010, 0.025),             # [4] d_pintle_tip - tightened from (0.008, 0.030)
+        (0.0003, 0.001),            # [5] h_gap - tightened from (0.0003, 0.0015)
+        (10, 18),                   # [6] n_orifices - tightened from (6, 20)
+        (0.0012, 0.0025),           # [7] d_orifice - KEY: tightened from (0.001, 0.004)
         (0.003, 0.020),             # [8] ablative_thickness
         (0.003, 0.015),             # [9] graphite_thickness
         (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),    # [10] P_O_start_psi
         (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [11] P_F_start_psi
     ]
     
-    # Calculate initial guess
-    default_n_orifices = 16
-    default_d_orifice = 0.003
-    default_d_pintle = 0.015
+    # Calculate initial guess - sized for ~1.7 kg/s LOX flow at ΔP≈1.5 MPa
+    default_n_orifices = 14
+    default_d_orifice = 0.002  # 2mm orifices - sized for target mass flow
+    default_d_pintle = 0.016
     default_h_gap = 0.0006
     A_lox_est = default_n_orifices * np.pi * (default_d_orifice / 2) ** 2
     R_inner_est = default_d_pintle / 2
@@ -523,7 +524,7 @@ def run_layer1_optimization(
     x0 = np.array([
         A_throat_init,
         (min_Lstar + max_Lstar) / 2,
-        10.0,
+        8.0,  # eps=8 is near optimal for Cf≈1.6 at sea level
         outer_diameter_init,
         default_d_pintle,
         default_h_gap,
@@ -781,7 +782,7 @@ def run_layer1_optimization(
         # ------------------------------------------------------------------
         # Soft preference for shorter chambers
         # ------------------------------------------------------------------
-        preferred_L_chamber = float(requirements.get("preferred_chamber_length_m", 0.25))
+        preferred_L_chamber = float(requirements.get("preferred_chamber_length_m", 0.35))
         length_penalty = 0.0
         L_chamber_curr = getattr(getattr(config, "chamber", None), "length", None)
         if L_chamber_curr is not None and np.isfinite(L_chamber_curr) and preferred_L_chamber > 0.0:

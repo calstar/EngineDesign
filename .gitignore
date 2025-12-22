@@ -43,3 +43,5 @@ examples/pintle_engine/**/*.pyc
 # Include requirements
 !requirements.txt
 
+.venv/
+
