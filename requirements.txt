@@ -10,3 +10,7 @@ streamlit
 plotly
 ezdxf
 cma
+# FastAPI backend
+fastapi
+uvicorn[standard]
+python-multipart

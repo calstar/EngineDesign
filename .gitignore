@@ -1,47 +1,68 @@
 # .gitignore for Engine Design Repository
-# Ignore everything by default
-*
 
-# Allow git to traverse directories
-!*/
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
 
-# But include pintle engine files
-!pintle_models/
-!pintle_pipeline/
-!examples/pintle_engine/
-!examples/pintle_engine/copv_pressure/
-!chamber/
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
 
-# Within pintle directories, ignore cache and compiled files
-pintle_models/**/__pycache__/
-pintle_models/**/*.pyc
-pintle_pipeline/**/__pycache__/
-pintle_pipeline/**/*.pyc
-examples/pintle_engine/**/__pycache__/
-examples/pintle_engine/**/*.pyc
-**/*.npz
-!cea_cache_LOX_RP1_3D.npz
-**/*.png
-**/*.jpg
-**/*.pdf
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
 
-# But include important pintle source files
-!pintle_models/*.py
-!pintle_pipeline/*.py
-!pintle_pipeline/*.md
-!examples/pintle_engine/*.py
-!examples/pintle_engine/*.yaml
-!examples/pintle_engine/*.md
-!examples/pintle_engine/*.tex
+# Output directory (logs, plots, cache) - all generated files
+output/
+!output/.gitkeep
 
-# Include README in root
+# Individual generated files that might be in root
+*.log
+*.npz
+*.png
+*.jpg
+*.pdf
+*.dxf
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Include important files
 !README.md
-
-# Include .gitignore itself
+!requirements.txt
 !.gitignore
 
-# Include requirements
-!requirements.txt
+# Include all source directories
+!engine/
+!engine/**
+!ui/
+!ui/**
+!copv/
+!copv/**
+!configs/
+!configs/**
+!docs/
+!docs/**
+!scripts/
+!scripts/**
 
-.venv/
-
+# But ignore pycache in source directories
+engine/**/__pycache__/
+ui/**/__pycache__/
+copv/**/__pycache__/
+scripts/**/__pycache__/

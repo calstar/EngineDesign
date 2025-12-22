@@ -1,37 +1,176 @@
-# Pintle Injector Liquid Rocket Engine Pipeline
+# Pintle Injector Liquid Rocket Engine Design Pipeline
 
-A comprehensive physics-based simulation pipeline that takes tank pressures as input and solves for chamber pressure, mass flow rates, and thrust output. The pipeline models the complete flow path from tank to nozzle, including feed system losses, injector flow, spray physics, combustion, and nozzle expansion.
+A comprehensive physics-based simulation and **multi-layer optimization pipeline** for LOX/RP-1 pintle injector rocket engines. Takes tank pressures as input and solves for chamber pressure, mass flow rates, thrust, and all performance parameters.
 
 ## Overview
 
-**Input:** Tank pressures (LOX and RP-1)  
-**Output:** Thrust, mass flow rates, chamber pressure, and all performance parameters
+**Core Principle:** Chamber pressure (Pc) is **never** an input — it's always **solved** from tank pressures by balancing supply and demand.
 
-**Key Features:**
-- Chamber pressure (Pc) is **never** an input - it's always **solved** from tank pressures by balancing supply and demand.
-- Modular injector architecture: pintle (LOX axial / fuel annulus), shear-coaxial, and impinging doublet models with their own flow and spray physics.
-- Independent cooling models: regenerative channels, film cooling films, and ablative liners can be evaluated separately or in combination.
-- **Time-varying ablative geometry:** Tracks recession and updates chamber volume, throat area, and L* over time for accurate performance predictions.
+**Key Capabilities:**
+- Full flow path simulation: tank → feed system → injector → combustion → nozzle → thrust
+- Multi-layer optimization for complete engine design (geometry, pressure curves, thermal protection)
+- Time-varying analysis with ablative recession tracking
+- Stability analysis (chugging, acoustic, feed-system coupling)
+- Flight simulation validation via RocketPy integration
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph inputs [Inputs]
+        TankP[Tank Pressures<br/>LOX + RP-1]
+        Config[YAML Config<br/>configs/default.yaml]
+    end
+
+    subgraph core [Core Modules]
+        Runner[PintleEngineRunner<br/>engine/core/runner.py]
+        Solver[ChamberSolver<br/>engine/core/chamber_solver.py]
+        CEA[CEA Cache<br/>engine/pipeline/cea_cache.py]
+    end
+
+    subgraph physics [Physics Models]
+        Feed[Feed System Losses]
+        Injector[Injector Flow]
+        Spray[Spray Physics]
+        Nozzle[Nozzle Thrust]
+        Thermal[Thermal Protection<br/>Ablative + Graphite]
+    end
+
+    subgraph optimizer [Optimization Layers]
+        L0[Layer 0: Geometry Pre-opt]
+        L1[Layer 1: Static Optimization]
+        L2[Layer 2: Pressure Curves + Thermal]
+        L3[Layer 3: Thermal Sizing]
+        L4[Layer 4: Flight Validation]
+    end
+
+    subgraph outputs [Outputs]
+        Thrust[Thrust, Isp, Pc]
+        Curves[Pressure Curves]
+        Design[Optimized Design YAML]
+    end
+
+    TankP --> Runner
+    Config --> Runner
+    Runner --> Solver
+    Solver --> CEA
+    Runner --> Feed
+    Runner --> Injector
+    Runner --> Spray
+    Runner --> Nozzle
+    Runner --> Thermal
+
+    L0 --> L1
+    L1 --> L2
+    L2 --> L3
+    L3 --> L4
+
+    Runner --> Thrust
+    L4 --> Curves
+    L4 --> Design
+```
+
+## Multi-Layer Optimization Pipeline
+
+The optimizer in `engine/optimizer/` runs 5 layers sequentially:
+
+| Layer | Name | Purpose | Key File |
+|-------|------|---------|----------|
+| 0 | Pre-Optimization | Coupled pintle + chamber geometry sizing | `CoupledPintleChamberOptimizer` |
+| 1 | Static Optimization | Geometry + initial pressure curves, static hot-fire validation | `layers/layer1_static_optimization.py` |
+| 2 | Burn Candidate | Time-series pressure curve optimization + thermal protection seeds | `layers/layer2_pressure.py`, `layers/layer2_burn_candidate.py` |
+| 3 | Thermal Sizing | Final ablative/graphite thickness optimization | `layers/layer3_thermal_protection.py` |
+| 4 | Flight Validation | RocketPy trajectory simulation, tank fill iteration | `layers/layer4_flight_simulation.py` |
+
+### Entry Point
+
+The main orchestrator is `run_full_engine_optimization_with_flight_sim()` in:
+```
+engine/optimizer/main_optimizer.py
+```
+
+## Directory Structure
+
+```
+EngineDesign/
+├── engine/                      # Main engine package
+│   ├── core/                    # Core physics models
+│   │   ├── runner.py            # Main pipeline orchestrator
+│   │   ├── chamber_solver.py    # Pc solver (supply = demand)
+│   │   ├── chamber_geometry.py  # Chamber sizing calculations
+│   │   ├── nozzle.py            # Thrust calculation
+│   │   ├── spray.py             # Spray physics (J, SMD, Weber)
+│   │   ├── discharge.py         # Dynamic Cd model
+│   │   ├── geometry.py          # Injector geometry
+│   │   └── injectors/           # Injector type implementations
+│   │
+│   ├── pipeline/                # Pipeline infrastructure
+│   │   ├── config_schemas.py    # Pydantic validation
+│   │   ├── cea_cache.py         # CEA thermochemistry caching
+│   │   ├── io.py                # Config loading/saving
+│   │   ├── time_varying_solver.py
+│   │   ├── thermal/             # Thermal protection models
+│   │   │   ├── ablative_cooling.py
+│   │   │   ├── graphite_cooling.py
+│   │   │   └── regen_cooling.py
+│   │   └── stability/           # Stability analysis
+│   │       ├── analysis.py
+│   │       └── coupling.py
+│   │
+│   └── optimizer/               # Optimization layers
+│       ├── main_optimizer.py    # Main orchestrator
+│       ├── layers/              # Individual layer implementations
+│       └── views/               # UI components for optimizer
+│
+├── ui/                          # Streamlit UI
+│   ├── app.py                   # Main entry point
+│   ├── flight_sim.py            # Flight simulation
+│   └── flight_visuals.py        # Visualization helpers
+│
+├── copv/                        # COPV pressure calculations
+│   ├── copv_solve.py
+│   └── n2_Z_lookup.csv
+│
+├── configs/                     # Configuration files
+│   └── default.yaml             # Base engine configuration
+│
+├── output/                      # Generated files (gitignored)
+│   ├── logs/                    # Optimization logs
+│   ├── plots/                   # Generated plots
+│   └── cache/                   # CEA cache files
+│
+├── docs/                        # Documentation
+│   ├── pipeline_status.md
+│   └── quick_reference.md
+│
+├── scripts/                     # Utility scripts
+│   ├── simple_example.py
+│   └── run_full_pipeline.py
+│
+├── README.md
+├── requirements.txt
+└── .gitignore
+```
 
 ## Quick Start
 
-### 1. Installation
+### Installation
 
 ```bash
-# Install required packages
 pip install -r requirements.txt
 ```
 
-### 2. Basic Usage
+**Dependencies:** numpy, scipy, pandas, matplotlib, pydantic, PyYAML, rocketcea, rocketpy, streamlit, plotly, ezdxf, cma
+
+### Basic Usage
 
 ```python
 from pathlib import Path
-from pintle_pipeline.io import load_config
-from pintle_models.runner import PintleEngineRunner
+from engine.pipeline.io import load_config
+from engine.core.runner import PintleEngineRunner
 
 # Load configuration
-config_path = Path("examples/pintle_engine/config_minimal.yaml")
-config = load_config(str(config_path))
+config = load_config("configs/default.yaml")
 
 # Initialize runner
 runner = PintleEngineRunner(config)
@@ -48,318 +187,106 @@ print(f"Mass Flow: {results['mdot_total']:.3f} kg/s")
 print(f"Mixture Ratio: {results['MR']:.2f}")
 ```
 
-### 3. Run Example Scripts
+### Run the UI
+
+```bash
+streamlit run ui/app.py
+```
+
+The Streamlit UI provides:
+- Forward solver: Tank pressures → Performance
+- Inverse solvers: Target thrust/O/F → Required tank pressures
+- Full engine optimizer with multi-layer pipeline
+- Time-series analysis and visualization
+- Export optimized configurations
+
+### Example Scripts
 
 ```bash
 # Run full pipeline analysis
-cd examples/pintle_engine
-python run_full_pipeline.py
+python scripts/run_full_pipeline.py
 
-# Generate all performance plots
-python run_all_plots.py
-
-# Interactive CLI (forward & inverse modes)
-python interactive_pipeline.py
-
-# Streamlit UI (forward & inverse modes, time-series analysis)
-streamlit run ui_app.py
-
-# Streamlit UI features:
-#  - Edit key configuration parameters from the sidebar
-#  - Upload alternate YAML configs
-#  - Forward solver: Tank pressures → Performance
-#  - Inverse solvers:
-#    * Thrust only: Find tank pressures for target thrust (1D, scales baseline)
-#    * Thrust + O/F: Find tank pressures for target thrust AND O/F ratio (2D, independent pressures)
-#  - Time-series designer (analytic profiles, CSV upload, blowdown curves)
-#  - Custom plot builder (select any variables and chart style, including heatmaps & contours)
-#  - Built-in dashboards for cooling, thrust, Pc, mdot, MR, etc.
-#  - Dynamic unit selection (psi/kPa/MPa for pressure, mm/m for length, kg/s for mass flow)
-#  - Efficiency coupling controls (mixture, cooling, turbulence) with adjustable floors
+# Simple example
+python scripts/simple_example.py
 
 # Pressure sweep (2D grid)
-python pressure_sweep_example.py
-
-# Validate against Huzel & Huang data
-python validate_chamber_intrinsics.py
-```
-
-## Pipeline Workflow
-
-The pipeline follows this sequence:
-
-```
-1. INPUT: Tank Pressures (P_tank_O, P_tank_F)
-   ↓
-2. Feed System Losses
-   - Calculate pressure drops from tank to injector
-   - Includes pipe friction, fittings, and regenerative cooling (fuel only)
-   ↓
-3. Injector Flow
-   - Calculate mass flow rates through pintle injector
-   - LOX: Axial flow through N orifices
-   - Fuel: Radial flow through annulus gap
-   - Dynamic discharge coefficients (Reynolds-dependent)
-   ↓
-4. Spray Physics
-   - Calculate momentum flux ratio (J)
-   - Validate atomization (Weber numbers, Sauter mean diameter)
-   - Check evaporation length constraints
-   ↓
-5. Chamber Solver
-   - Balance mass flow supply (from injectors) = demand (from combustion)
-   - Solve for equilibrium chamber pressure Pc
-   - Uses iterative root-finding (brentq)
-   ↓
-6. Combustion
-   - Get thermochemical properties from CEA (c*, Tc, gamma, etc.)
-   - Apply chamber-driven corrections (L*-based efficiency)
-   - Account for finite chamber volume effects
-   ↓
-7. Nozzle Expansion
-   - Calculate exit conditions (pressure, temperature, velocity)
-   - Solve supersonic area-Mach relation
-   - Calculate thrust: F = mdot × v_exit + (P_exit - Pa) × A_exit
-   ↓
-8. OUTPUT: Thrust, Isp, and all performance metrics
+python scripts/pressure_sweep.py
 ```
 
 ## Configuration
 
-All engine parameters are defined in `examples/pintle_engine/config_minimal.yaml`. Key sections:
+Engine parameters are defined in YAML. Key sections of `configs/default.yaml`:
 
-### Fluid Properties
-- LOX: density, viscosity, surface tension
-- RP-1: density, viscosity, surface tension
+```yaml
+fluids:
+  oxidizer: { name: LOX, density: 1140.0, ... }
+  fuel: { name: RP-1, density: 780.0, ... }
 
-### Pintle Geometry
-- **LOX**: Number of orifices, diameter, angle
-- **Fuel**: Pintle tip diameter, gap height
+injector:
+  type: pintle
+  geometry:
+    lox: { n_orifices: 12, d_orifice: 0.003, ... }
+    fuel: { d_pintle_tip: 0.015, h_gap: 0.0005, ... }
 
-### Feed System
-- Pipe diameters, lengths, loss coefficients
-- Regenerative cooling (optional): channel dimensions, number of channels
+feed_system:
+  oxidizer: { K0: 2.0, ... }
+  fuel: { K0: 2.0, ... }
+
+combustion:
+  cea: { oxName: LOX, fuelName: RP-1, ... }
+  efficiency: { ... }
+
+chamber:
+  A_throat: 0.0005
+  Lstar: 1.0
+  ...
+
+nozzle:
+  expansion_ratio: 4.0
+  ...
+
+ablative_cooling:
+  enabled: true
+  initial_thickness: 0.008
+  ...
+
+graphite_insert:
+  enabled: true
+  initial_thickness: 0.005
+  ...
+```
+
+## Key Physics
+
+### Chamber Solver
+Root-finding: `supply(Pc) - demand(Pc) = 0`
+- **Supply:** Mass flow from injectors (depends on P_tank - Pc)
+- **Demand:** Mass flow required by combustion (depends on Pc, MR, c*)
 
 ### Discharge Coefficients
-- Dynamic model: `Cd(Re) = Cd_∞ - a_Re/√Re`
-- Optional pressure and temperature corrections
+Dynamic model: `Cd(Re) = Cd_∞ - a_Re/√Re`
 
-### Combustion
-- CEA propellant names and conditions
-- L*-based efficiency model
-- Chamber volume and throat area
+### Combustion Efficiency
+L*-based: `η_c* = 1 - C × e^(-K×L*)`
 
-### Nozzle
-- Expansion ratio, exit area
-- Ambient pressure
+### Nozzle Thrust
+`F = ṁ × v_exit + (P_exit - P_ambient) × A_exit`
 
-## Key Physics Models
-
-### 1. Feed System Losses
-Generalized model: `Δp_feed = K_eff(P) × (ρ/2) × (ṁ/(ρ×A_hyd))²`
-
-### 2. Cooling Models (Optional)
-#### Regenerative Cooling (Channels)
-Models pressure drop through:
-- Inlet pipe
-- Manifold split (into N parallel channels)
-- Parallel cooling channels (friction + entrance/exit losses)
-- Manifold merge
-- Outlet pipe
-
-Dynamic discharge coefficients are applied to channel entrance and exit losses.
-
-#### Film Cooling
-- Allocates a configurable fraction of fuel mass flow to a wall film.
-- Effectiveness controls the heat-flux reduction factor without altering injector hydraulics.
-
-#### Ablative Cooling
-- Energy balance between imposed heat flux and ablator recession rate.
-- Supports radiative relief and surface temperature constraints.
-
-### 3. Injector Flow
-Standard orifice flow: `ṁ = Cd × A × √(2 × ρ × Δp)`
-
-- **LOX**: Axial flow through N orifices
-- **Fuel**: Radial flow through annulus gap
-- Dynamic Cd varies with Reynolds number
-
-### 4. Spray Physics
-- Momentum flux ratio: `J = (ρ_O × u_O²) / (ρ_F × u_F²)`
-- Spray angle: `tan(θ/2) = k × J^n`
-- Weber numbers for atomization validation
-- Sauter Mean Diameter (SMD) for droplet size
-- Evaporation length constraints
-
-### 5. Chamber Solver
-Root-finding problem: `supply(Pc) - demand(Pc) = 0`
-
-- **Supply**: Mass flow from injectors (depends on P_tank - Pc)
-- **Demand**: Mass flow required by combustion (depends on Pc, MR, c*)
-
-Solves iteratively using `brentq` method.
-
-### 6. Combustion Efficiency
-L*-based correction: `η_c* = 1 - C × e^(-K×L*)`
-
-Where `L* = V_chamber / A_throat` (characteristic length)
-
-### 7. Nozzle Thrust
-High-fidelity calculation:
-- Momentum thrust: `ṁ × v_exit`
-- Pressure thrust: `(P_exit - Pa) × A_exit`
-- Exit conditions solved from supersonic area-Mach relation
-
-## Example Scripts
-
-### `run_full_pipeline.py`
-Complete performance analysis at a single operating point. Shows:
-- Chamber performance (Pc, mdot, MR, thrust, Isp)
-- Injector performance (pressure drops, velocities, Cd)
-- Spray diagnostics (J, θ, Weber numbers, SMD)
-- Comparison to target specifications
-
-### `comprehensive_performance_plots.py`
-Generates 16-panel dashboard showing all performance metrics and 2D pressure sweep plots.
-
-### `pressure_sweep_example.py`
-Evaluates engine performance across a 2D grid of tank pressures (200-1200 psi). Creates contour plots of:
-- Thrust
-- Chamber pressure
-- Mixture ratio
-- Specific impulse
-- Mass flow
-- Characteristic velocity
-
-### `validate_chamber_intrinsics.py`
-Validates combustion properties (Tc, c*, gamma) against Huzel & Huang reference data.
-
-### `compare_ideal_vs_actual.py`
-Compares CEA ideal (infinite-area equilibrium) vs. actual chamber-driven performance.
-
-### `chamber_3d_plots.py`
-Creates 3D visualizations of chamber behavior across pressure ranges.
-
-## Output Interpretation
-
-### Key Metrics
-
-- **Thrust [N]**: Total engine thrust (momentum + pressure)
-- **Specific Impulse [s]**: `Isp = F / (ṁ × g₀)`
-- **Chamber Pressure [Pa]**: Solved equilibrium pressure
-- **Mass Flow [kg/s]**: Total propellant flow rate
-- **Mixture Ratio (O/F)**: Oxidizer-to-fuel mass ratio
-- **c* [m/s]**: Characteristic velocity (actual, accounting for efficiency)
-- **Exit Velocity [m/s]**: Nozzle exit velocity
-- **Exit Pressure [Pa]**: Nozzle exit pressure
-
-### Spray Diagnostics
-
-- **J**: Momentum flux ratio (affects spray angle)
-- **θ**: Spray angle [degrees]
-- **We_O, We_F**: Weber numbers (atomization quality)
-- **D32_O, D32_F**: Sauter Mean Diameter [μm] (droplet size)
-- **x***: Evaporation length [mm] (mixing quality)
-
-### Pressure Breakdown
-
-For each propellant:
-- `P_tank`: Tank pressure (input)
-- `Δp_feed`: Feed system pressure loss
-- `Δp_regen`: Regenerative cooling pressure loss (fuel only)
-- `P_injector`: Pressure at injector inlet
-- `Δp_injector`: Pressure drop across injector
-- `Pc`: Chamber pressure (solved)
-
-## File Structure
-
-```
-pintle_models/          # Core engine models
-  ├── chamber_solver.py    # Solves for Pc (supply = demand)
-  ├── closure.py           # Iterative flow solver with spray constraints
-  ├── discharge.py         # Dynamic Cd model
-  ├── geometry.py          # Injector geometry calculations
-  ├── nozzle.py            # Thrust calculation
-  ├── runner.py            # Main pipeline orchestrator
-  └── spray.py             # Spray physics models
-
-pintle_pipeline/        # Pipeline infrastructure
-  ├── cea_cache.py         # CEA data caching and interpolation
-  ├── combustion_eff.py    # L*-based efficiency models
-  ├── config_schemas.py    # Pydantic validation schemas
-  ├── feed_loss.py         # Feed system pressure loss model
-  ├── io.py                # Configuration loading
-  ├── regen_cooling.py     # Regenerative cooling model
-  └── visualization.py     # Plotting utilities
-
-examples/pintle_engine/  # Example scripts and configs
-  ├── config_minimal.yaml      # Engine configuration
-  ├── run_full_pipeline.py     # Complete analysis
-  ├── comprehensive_performance_plots.py  # 16-panel dashboard
-  ├── pressure_sweep_example.py          # 2D pressure sweeps
-  ├── validate_chamber_intrinsics.py     # Validation plots
-  ├── compare_ideal_vs_actual.py         # CEA comparison
-  ├── chamber_3d_plots.py                # 3D visualizations
-  └── pintle_engine_physics.tex           # LaTeX physics documentation
-```
-
-## Important Notes
-
-1. **Chamber Pressure is Solved, Not Input**: The pipeline solves for Pc by balancing supply and demand. Never input Pc directly.
-
-2. **Tank Pressures are Inputs**: Provide `P_tank_O` and `P_tank_F` in Pascals (or convert from psi: `P_Pa = P_psi × 6894.76`).
-
-3. **CEA Cache**: First run builds a cache file (`cea_cache_LOX_RP1.npz`). This is slow but only happens once.
-   - Cache metadata is checked automatically. If you change propellants, mixture range, or expansion ratio, the cache is rebuilt for you.
-
-4. **Cooling Models**: Regenerative, film, and ablative cooling are independent. Enable only what you need in `config_minimal.yaml`.
-
-5. **Dynamic Discharge Coefficients**: Cd varies with Reynolds number. The model is `Cd(Re) = Cd_∞ - a_Re/√Re`, with optional pressure and temperature corrections.
-
-6. **Spray Constraints**: The pipeline validates spray quality (Weber numbers, evaporation length). If constraints are violated, Cd is reduced to enforce minimum requirements.
-
-## Troubleshooting
-
-### Solver Fails
-- Check that tank pressures are high enough (Pc must be < P_tank)
-- Verify injector geometry is reasonable
-- Check that feed losses aren't too high
-
-### Unrealistic Results
-- Verify fluid properties (density, viscosity)
-- Check injector geometry (areas, diameters)
-- Review discharge coefficients
-- Validate against known operating points
-
-### Performance Doesn't Match Expectations
-- Check mixture ratio (MR) - it affects c* significantly
-- Verify chamber-driven corrections (L*, efficiency)
-- Review nozzle expansion ratio
-- Check spray constraints (may be reducing Cd)
-
-### L* Changes Don't Affect Performance
-If changing the characteristic length (L*) in the UI doesn't visibly change thrust or Isp, this is likely due to **efficiency coupling floors**. The combustion efficiency model includes three coupling factors:
-- **Mixture efficiency**: Based on spray quality (SMD, evaporation length, Weber number)
-- **Cooling efficiency**: Based on heat removed by cooling systems
-- **Turbulence efficiency**: Based on injector and chamber turbulence intensity
-
-Each coupling has a **floor** (minimum efficiency) that prevents the total efficiency from dropping below a certain value. For example, if `mixture_efficiency_floor = 0.25`, the mixture efficiency will never be less than 25%, even if spray quality is poor.
-
-**Solution:**
-1. In the UI, navigate to "Combustion & Efficiency" section
-2. Look for "Efficiency Floors" (now prominently displayed)
-3. Lower the floors (e.g., to 0.0) to remove the clamping effect
-4. Or disable the coupling entirely by unchecking "Mixture coupling", "Cooling coupling", or "Turbulence coupling"
-
-This will allow L* changes to have a more visible impact on performance. The default floors (0.25-0.30) are conservative and represent physically realistic lower bounds for well-designed engines.
+### Stability Analysis
+- Chugging margin
+- Acoustic modes
+- Feed-system coupling
+- Combined stability score (0-1)
 
 ## References
 
-- Huzel & Huang: "Design of Liquid Propellant Rocket Engines" (chamber intrinsics validation)
-- Sutton & Biblarz: "Rocket Propulsion Elements" (combustion efficiency, nozzle theory)
-- Lefebvre: "Atomization and Sprays" (spray physics, SMD correlations)
+- Huzel & Huang: "Design of Liquid Propellant Rocket Engines"
+- Sutton & Biblarz: "Rocket Propulsion Elements"
+- Lefebvre: "Atomization and Sprays"
 
-## License
+## Related Documentation
 
-See repository for license information.
-
+See the `docs/` folder for additional documentation:
+- `docs/pipeline_status.md` - Detailed implementation status
+- `docs/layer_requirements.md` - Layer interface requirements
+- `docs/quick_reference.md` - Quick reference guide
