@@ -18,7 +18,6 @@ class EvaluateRequest(BaseModel):
     """Request body for forward evaluation."""
     lox_pressure_psi: float = Field(..., gt=0, description="LOX tank pressure in psi")
     fuel_pressure_psi: float = Field(..., gt=0, description="Fuel tank pressure in psi")
-    ambient_pressure_pa: float = Field(default=101325.0, gt=0, description="Ambient pressure in Pa")
 
 
 def convert_numpy(obj):
@@ -41,7 +40,9 @@ def convert_numpy(obj):
 async def evaluate(request: EvaluateRequest):
     """Run forward evaluation: tank pressures -> performance.
     
-    Takes LOX and fuel tank pressures in psi, returns thrust, Isp, Pc, etc.
+    Takes LOX and fuel tank pressures in psi, returns the full results from runner.evaluate().
+    Ambient pressure is computed automatically by the runner from the config's environment elevation.
+    The results dict is passed through directly (with numpy conversion) - same format as Streamlit UI uses.
     """
     if not app_state.has_config():
         raise HTTPException(
@@ -54,43 +55,25 @@ async def evaluate(request: EvaluateRequest):
     P_tank_F = request.fuel_pressure_psi * PSI_TO_PA
     
     try:
-        results = app_state.runner.evaluate(
-            P_tank_O, 
-            P_tank_F, 
-            P_ambient=request.ambient_pressure_pa
-        )
+        # Get raw results from runner - ambient pressure computed from config elevation
+        results = app_state.runner.evaluate(P_tank_O, P_tank_F)
         
-        # Extract key metrics for the response
-        response = {
+        # Convert numpy types to JSON-serializable and return directly
+        # Frontend uses the same field names as runner.py outputs
+        # P_ambient and elevation are now included in results from runner
+        return {
             "status": "success",
             "inputs": {
                 "lox_pressure_psi": request.lox_pressure_psi,
                 "fuel_pressure_psi": request.fuel_pressure_psi,
-                "ambient_pressure_pa": request.ambient_pressure_pa,
+                "ambient_pressure_pa": results.get("P_ambient", 101325.0),
+                "elevation_m": results.get("elevation", 0.0),
             },
-            "performance": {
-                "thrust_N": results["F"],
-                "thrust_kN": results["F"] / 1000.0,
-                "Isp_s": results["Isp"],
-                "chamber_pressure_Pa": results["Pc"],
-                "chamber_pressure_psi": results["Pc"] * PA_TO_PSI,
-                "mdot_total_kg_s": results["mdot_total"],
-                "mdot_oxidizer_kg_s": results["mdot_O"],
-                "mdot_fuel_kg_s": results["mdot_F"],
-                "mixture_ratio": results["MR"],
-                "cstar_actual_m_s": results["cstar_actual"],
-                "exit_velocity_m_s": results["v_exit"],
-                "exit_pressure_Pa": results["P_exit"],
-            },
-            # Include full results for advanced use (converted from numpy)
-            "full_results": convert_numpy(results),
+            "results": convert_numpy(results),
         }
-        
-        return response
         
     except Exception as e:
         raise HTTPException(
             status_code=500, 
             detail=f"Evaluation failed: {str(e)}"
         )
-

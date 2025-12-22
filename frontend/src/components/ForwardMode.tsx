@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { evaluate } from '../api/client';
-import type { PerformanceMetrics, EngineConfig } from '../api/client';
+import type { RunnerResults, EngineConfig } from '../api/client';
 import { ResultsDisplay } from './ResultsDisplay';
 
 interface ForwardModeProps {
@@ -10,15 +10,14 @@ interface ForwardModeProps {
 export function ForwardMode({ config }: ForwardModeProps) {
   const [loxPressure, setLoxPressure] = useState<string>('1305');
   const [fuelPressure, setFuelPressure] = useState<string>('974');
-  const [ambientPressure, setAmbientPressure] = useState<string>('101325');
-  const [results, setResults] = useState<PerformanceMetrics | null>(null);
+  const [results, setResults] = useState<RunnerResults | null>(null);
+  const [ambientPressure, setAmbientPressure] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handleEvaluate = useCallback(async () => {
     const lox = parseFloat(loxPressure);
     const fuel = parseFloat(fuelPressure);
-    const ambient = parseFloat(ambientPressure);
 
     if (isNaN(lox) || lox <= 0) {
       setError('LOX pressure must be a positive number');
@@ -28,10 +27,6 @@ export function ForwardMode({ config }: ForwardModeProps) {
       setError('Fuel pressure must be a positive number');
       return;
     }
-    if (isNaN(ambient) || ambient <= 0) {
-      setError('Ambient pressure must be a positive number');
-      return;
-    }
 
     setIsLoading(true);
     setError(null);
@@ -39,7 +34,6 @@ export function ForwardMode({ config }: ForwardModeProps) {
     const result = await evaluate({
       lox_pressure_psi: lox,
       fuel_pressure_psi: fuel,
-      ambient_pressure_pa: ambient,
     });
 
     setIsLoading(false);
@@ -47,10 +41,14 @@ export function ForwardMode({ config }: ForwardModeProps) {
     if (result.error) {
       setError(result.error);
       setResults(null);
+      setAmbientPressure(null);
     } else if (result.data) {
-      setResults(result.data.performance);
+      // Results come directly from runner.evaluate() - same format as Streamlit UI
+      setResults(result.data.results);
+      // Store ambient pressure from response (computed from config elevation)
+      setAmbientPressure(result.data.inputs.ambient_pressure_pa);
     }
-  }, [loxPressure, fuelPressure, ambientPressure]);
+  }, [loxPressure, fuelPressure]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -78,7 +76,7 @@ export function ForwardMode({ config }: ForwardModeProps) {
       <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
         <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Tank Pressures</h3>
         
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* LOX Pressure */}
           <div>
             <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
@@ -118,26 +116,6 @@ export function ForwardMode({ config }: ForwardModeProps) {
               </span>
             </div>
           </div>
-
-          {/* Ambient Pressure */}
-          <div>
-            <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
-              Ambient Pressure
-            </label>
-            <div className="relative">
-              <input
-                type="number"
-                value={ambientPressure}
-                onChange={(e) => setAmbientPressure(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="101325"
-                className="w-full px-4 py-3 pr-12 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
-              />
-              <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] text-sm">
-                Pa
-              </span>
-            </div>
-          </div>
         </div>
 
         {/* Evaluate button */}
@@ -171,11 +149,7 @@ export function ForwardMode({ config }: ForwardModeProps) {
       </div>
 
       {/* Results section */}
-      <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
-        <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Performance Results</h3>
-        <ResultsDisplay results={results} isLoading={isLoading} />
-      </div>
+      <ResultsDisplay results={results} isLoading={isLoading} targetExitPressure={ambientPressure} />
     </div>
   );
 }
-

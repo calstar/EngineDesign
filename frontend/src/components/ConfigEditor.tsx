@@ -106,6 +106,42 @@ const FIELD_LABELS: Record<string, string> = {
   fuel_name: 'Fuel Name',
   cache_file: 'Cache File',
   n_points: 'Grid Points',
+  // LOX Tank
+  lox_h: 'LOX Tank Height (m)',
+  lox_radius: 'LOX Tank Radius (m)',
+  ox_tank_pos: 'LOX Tank Position (m)',
+  // Fuel Tank
+  rp1_h: 'RP-1 Tank Height (m)',
+  rp1_radius: 'RP-1 Tank Radius (m)',
+  fuel_tank_pos: 'Fuel Tank Position (m)',
+  // Pressurant Tank
+  press_h: 'Pressurant Tank Height (m)',
+  press_radius: 'Pressurant Tank Radius (m)',
+  pres_tank_pos: 'Pressurant Tank Position (m)',
+  dry_mass: 'Dry Mass (kg)',
+  initial_gas_mass: 'Initial Gas Mass (kg)',
+  free_volume_L: 'Free Volume (L)',
+  // Rocket
+  mass: 'Mass (kg)',
+  cm_wo_motor: 'CM Without Motor (m)',
+  copv_dry_mass: 'COPV Dry Mass (kg)',
+  lox_tank_structure_mass: 'LOX Tank Structure Mass (kg)',
+  fuel_tank_structure_mass: 'Fuel Tank Structure Mass (kg)',
+  propulsion_dry_mass: 'Propulsion Dry Mass (kg)',
+  propulsion_cm_offset: 'Propulsion CM Offset (m)',
+  engine_cm_offset: 'Engine CM Offset (m)',
+  motor_position: 'Motor Position (m)',
+  inertia: 'Inertia (kg·m²)',
+  // Fins
+  fins: 'Fins',
+  strakes: 'Strakes',
+  no_fins: 'Number of Fins',
+  root_chord: 'Root Chord (m)',
+  tip_chord: 'Tip Chord (m)',
+  fin_span: 'Fin Span (m)',
+  fin_position: 'Fin Position (m)',
+  // Environment
+  date: 'Date',
 };
 
 function getFieldLabel(key: string): string {

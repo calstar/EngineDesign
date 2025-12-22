@@ -25,6 +25,37 @@ from engine.pipeline.thermal.graphite_cooling import (
 from engine.pipeline.constants import DEFAULT_GAMMA_ND
 
 
+def compute_ambient_pressure_from_elevation(elevation_m: float) -> float:
+    """Compute ambient pressure from elevation using standard atmosphere model.
+    
+    Uses the barometric formula:
+    P = P0 * exp(-M*g*h/(R*T0))
+    
+    Parameters:
+    -----------
+    elevation_m : float
+        Elevation above sea level [m]
+    
+    Returns:
+    --------
+    float
+        Ambient pressure [Pa]
+    
+    Reference values:
+        P0 = 101325 Pa (sea level pressure)
+        M = 0.0289644 kg/mol (molar mass of dry air)
+        g = 9.80665 m/s² (standard gravity)
+        R = 8.31447 J/(mol·K) (universal gas constant)
+        T0 = 288.15 K (sea level temperature, 15°C)
+    """
+    P0 = 101325.0  # Pa
+    M = 0.0289644  # kg/mol
+    g = 9.80665    # m/s²
+    R = 8.31447    # J/(mol·K)
+    T0 = 288.15    # K
+    return P0 * np.exp(-M * g * elevation_m / (R * T0))
+
+
 class PintleEngineRunner:
     """Main pipeline runner - orchestrates full tank pressure to thrust calculation"""
     
@@ -47,6 +78,37 @@ class PintleEngineRunner:
         # Initialize chamber solver
         self.solver = ChamberSolver(config, self.cea_cache)
     
+    def _get_ambient_pressure(self, P_ambient: Optional[float] = None) -> float:
+        """Get ambient pressure, computing from config elevation if not provided.
+        
+        Parameters:
+        -----------
+        P_ambient : float, optional
+            Explicit ambient pressure [Pa]. If None, computed from config.
+        
+        Returns:
+        --------
+        float
+            Ambient pressure [Pa]
+        """
+        if P_ambient is not None:
+            return P_ambient
+        
+        # Compute from config environment elevation if available
+        if hasattr(self.config, 'environment') and self.config.environment is not None:
+            elevation = getattr(self.config.environment, 'elevation', None)
+            if elevation is not None and elevation >= 0:
+                return compute_ambient_pressure_from_elevation(elevation)
+        
+        # Default to sea level
+        return 101325.0
+    
+    def _get_elevation(self) -> float:
+        """Get elevation from config, or 0.0 if not available."""
+        if hasattr(self.config, 'environment') and self.config.environment is not None:
+            return getattr(self.config.environment, 'elevation', 0.0) or 0.0
+        return 0.0
+    
     def evaluate(
         self,
         P_tank_O: float,
@@ -66,9 +128,8 @@ class PintleEngineRunner:
         Pc_guess : float, optional
             Initial guess for chamber pressure [Pa]
         P_ambient : float, optional
-            Ambient pressure [Pa]. If None, defaults to sea level (101325 Pa).
-            This is used for thrust calculation and should match the target exit pressure
-            for accurate performance evaluation.
+            Ambient pressure [Pa]. If None, computed from config environment
+            elevation using standard atmosphere model.
         
         Returns:
         --------
@@ -81,8 +142,14 @@ class PintleEngineRunner:
             - F: Thrust [N]
             - Isp: Specific impulse [s]
             - cstar_actual: Actual characteristic velocity [m/s]
+            - P_ambient: Ambient pressure used [Pa]
+            - elevation: Elevation from config [m]
             - diagnostics: Detailed diagnostics dict
         """
+        # Get ambient pressure (from config elevation if not provided)
+        Pa = self._get_ambient_pressure(P_ambient)
+        elevation = self._get_elevation()
+        
         # Solve for chamber pressure
         Pc, diagnostics = self.solver.solve(P_tank_O, P_tank_F, Pc_guess)
         
@@ -96,17 +163,14 @@ class PintleEngineRunner:
         # Calculate current expansion ratio (for 3D CEA cache)
         eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
         
-        # Use ambient pressure for CEA evaluation if provided, otherwise use sea level
-        Pa_for_cea = P_ambient if P_ambient is not None else 101325.0
-        cea_props = self.cea_cache.eval(MR, Pc, Pa_for_cea, eps_current)
+        # Use computed ambient pressure for CEA evaluation
+        cea_props = self.cea_cache.eval(MR, Pc, Pa, eps_current)
         cstar_actual = diagnostics["cstar_actual"]
         gamma = diagnostics["gamma"]
         R = diagnostics["R"]
         Tc = diagnostics["Tc"]
         
-        # Calculate thrust
-        # Use provided ambient pressure or default to sea level (101325 Pa)
-        Pa = P_ambient if P_ambient is not None else 101325.0  # Pa - Ambient pressure
+        # Calculate thrust using computed ambient pressure
         
         # Calculate current expansion ratio (for 3D CEA cache)
         eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
@@ -266,6 +330,8 @@ class PintleEngineRunner:
             "pressure_profile": pressure_profile,
             "chamber_intrinsics": chamber_intrinsics,
             "injector_pressure": injector_pressure_diagnostics,
+            "P_ambient": Pa,  # Ambient pressure used for thrust calculation
+            "elevation": elevation,  # Elevation from config (0 if not set)
             "diagnostics": diagnostics,
         }
         
