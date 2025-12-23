@@ -442,11 +442,13 @@ class CoupledPintleChamberOptimizer:
     
     def _extract_chamber_params(self, config: PintleEngineConfig) -> Dict[str, float]:
         """Extract chamber geometry parameters for convergence checking."""
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        cg = ensure_chamber_geometry(config)
         return {
-            "A_throat": config.chamber.A_throat,
-            "A_exit": config.nozzle.A_exit,
-            "Lstar": config.chamber.Lstar,
-            "chamber_diameter": config.chamber.chamber_inner_diameter if hasattr(config.chamber, 'chamber_inner_diameter') else np.sqrt(4.0 * config.chamber.volume / (np.pi * config.chamber.length)),
+            "A_throat": cg.A_throat,
+            "A_exit": cg.A_exit,
+            "Lstar": cg.Lstar,
+            "chamber_diameter": cg.chamber_diameter,
         }
     
     def _calculate_relative_change(

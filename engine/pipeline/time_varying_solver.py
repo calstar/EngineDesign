@@ -19,7 +19,7 @@ from dataclasses import dataclass
 import numpy as np
 import copy
 
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, ensure_chamber_geometry, ChamberGeometryConfig
 from engine.core.chamber_solver import ChamberSolver
 from engine.core.nozzle import calculate_thrust
 from engine.pipeline.reaction_chemistry import (
@@ -150,11 +150,14 @@ class TimeVaryingCoupledSolver:
         self.config = config
         self.cea_cache = cea_cache
         
+        # Ensure chamber_geometry exists
+        cg = ensure_chamber_geometry(config)
+        
         # Store initial geometry
-        self.V_chamber_initial = config.chamber.volume
-        self.A_throat_initial = config.chamber.A_throat
-        self.A_exit_initial = config.nozzle.A_exit
-        self.L_chamber = config.chamber.length if config.chamber.length else 0.18
+        self.V_chamber_initial = cg.volume
+        self.A_throat_initial = cg.A_throat
+        self.A_exit_initial = cg.A_exit
+        self.L_chamber = cg.length if cg.length else 0.18
         # FIXED: Add safety checks for sqrt operations
         self.D_chamber_initial = np.sqrt(max(0, 4 * self.V_chamber_initial / (np.pi * self.L_chamber))) if self.L_chamber > 0 else 0.1
         self.D_throat_initial = np.sqrt(max(0, 4 * self.A_throat_initial / np.pi)) if self.A_throat_initial > 0 else 0.015
@@ -231,13 +234,30 @@ class TimeVaryingCoupledSolver:
         
         # Update config with current geometry
         config_current = copy.deepcopy(self.config)
-        config_current.chamber.volume = V_chamber
-        config_current.chamber.A_throat = A_throat
-        config_current.nozzle.A_throat = A_throat  # Keep synchronized
-        config_current.nozzle.A_exit = A_exit
+        
+        # Ensure chamber_geometry exists in current config
+        if config_current.chamber_geometry is None:
+            # Create from legacy sections if they exist
+            cg = ensure_chamber_geometry(config_current)
+        else:
+            cg = config_current.chamber_geometry
+        
+        # Update chamber_geometry with current geometry
+        cg.volume = V_chamber
+        cg.A_throat = A_throat
+        cg.A_exit = A_exit
+        cg.expansion_ratio = A_exit / A_throat if A_throat > 0 else cg.expansion_ratio
+        
+        # Also update legacy sections if they exist (for backward compatibility)
+        if config_current.chamber is not None:
+            config_current.chamber.volume = V_chamber
+            config_current.chamber.A_throat = A_throat
+        if config_current.nozzle is not None:
+            config_current.nozzle.A_throat = A_throat
+            config_current.nozzle.A_exit = A_exit
         
         # Calculate current L*
-        Lstar = V_chamber / A_throat if A_throat > 0 else self.config.chamber.Lstar
+        Lstar = V_chamber / A_throat if A_throat > 0 else cg.Lstar
         
         # Update chamber solver with current geometry
         solver = ChamberSolver(config_current, self.cea_cache)
@@ -512,7 +532,8 @@ class TimeVaryingCoupledSolver:
         )
         
         # Calculate new expansion ratio
-        eps_new = A_exit_new / A_throat_new if A_throat_new > 0 else self.config.nozzle.expansion_ratio
+        cg = ensure_chamber_geometry(self.config)
+        eps_new = A_exit_new / A_throat_new if A_throat_new > 0 else cg.expansion_ratio
         Lstar_new = V_chamber_new / A_throat_new if A_throat_new > 0 else Lstar
         
         # Calculate thrust with shifting equilibrium

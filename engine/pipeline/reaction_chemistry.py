@@ -703,12 +703,15 @@ def calculate_shifting_equilibrium_gamma(
     # Get actual geometry from cea_cache if available
     if cea_cache is not None and hasattr(cea_cache, 'config'):
         # Try to get throat diameter from config
-        if hasattr(cea_cache.config, 'chamber') and hasattr(cea_cache.config.chamber, 'A_throat'):
-            A_throat = cea_cache.config.chamber.A_throat
-            D_throat = np.sqrt(4.0 * A_throat / np.pi)
-        elif hasattr(cea_cache.config, 'nozzle') and hasattr(cea_cache.config.nozzle, 'A_throat'):
-            A_throat = cea_cache.config.nozzle.A_throat
-            D_throat = np.sqrt(4.0 * A_throat / np.pi)
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        try:
+            cg = ensure_chamber_geometry(cea_cache.config)
+            if cg.A_throat:
+                A_throat = cg.A_throat
+                D_throat = np.sqrt(4.0 * A_throat / np.pi)
+            else:
+                raise ValueError("A_throat not available")
+        except (ValueError, AttributeError):
         else:
             # Fallback: estimate from pressure ratio (isentropic area ratio)
             # A/A* = (1/M) * [(2/(γ+1)) * (1 + (γ-1)/2 * M²)]^((γ+1)/(2(γ-1)))

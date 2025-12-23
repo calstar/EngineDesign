@@ -17,7 +17,7 @@ from __future__ import annotations
 from typing import Dict, Any, Optional, List, Tuple, Callable
 import numpy as np
 from scipy.optimize import minimize, differential_evolution, Bounds
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, ensure_chamber_geometry
 from engine.core.runner import PintleEngineRunner
 
 
@@ -291,29 +291,55 @@ class ComprehensivePintleOptimizer:
                 config.injector.geometry.lox.d_orifice = float(d_orifice)
                 config.injector.geometry.lox.theta_orifice = float(theta_orifice)
         
-        # Update chamber
-        config.chamber.A_throat = float(A_throat)
-        config.chamber.volume = Lstar * A_throat
-        config.chamber.Lstar = float(Lstar)
-        config.chamber.chamber_inner_diameter = float(D_chamber)
+        # Ensure chamber_geometry exists
+        if config.chamber_geometry is None:
+            cg = ensure_chamber_geometry(config)
+        else:
+            cg = config.chamber_geometry
+        
+        volume = Lstar * A_throat
+        
+        # Update chamber_geometry
+        cg.A_throat = float(A_throat)
+        cg.volume = volume
+        cg.Lstar = float(Lstar)
+        cg.chamber_diameter = float(D_chamber)
+        
+        # Also update legacy chamber if it exists
+        if config.chamber is not None:
+            config.chamber.A_throat = float(A_throat)
+            config.chamber.volume = volume
+            config.chamber.Lstar = float(Lstar)
+            config.chamber.chamber_inner_diameter = float(D_chamber)
         
         # Calculate chamber length
         A_chamber = np.pi * (D_chamber / 2.0) ** 2
         if A_chamber > 0:
-            config.chamber.length = config.chamber.volume / A_chamber
+            length = volume / A_chamber
         else:
-            config.chamber.length = 0.25
+            length = 0.25
         
-        # Update nozzle
-        config.nozzle.A_throat = float(A_throat)
-        config.nozzle.A_exit = float(A_exit)
-        config.nozzle.expansion_ratio = A_exit / A_throat if A_throat > 0 else 1.0
+        cg.length = length
+        if config.chamber is not None:
+            config.chamber.length = length
+        
+        # Update nozzle geometry
         D_exit = np.sqrt(4.0 * A_exit / np.pi) if A_exit > 0 else 0.0
-        config.nozzle.exit_diameter = D_exit
+        expansion_ratio = A_exit / A_throat if A_throat > 0 else 1.0
+        
+        cg.A_exit = float(A_exit)
+        cg.exit_diameter = D_exit
+        cg.expansion_ratio = expansion_ratio
+        
+        if config.nozzle is not None:
+            config.nozzle.A_throat = float(A_throat)
+            config.nozzle.A_exit = float(A_exit)
+            config.nozzle.expansion_ratio = expansion_ratio
+            config.nozzle.exit_diameter = D_exit
         
         # Update CEA cache expansion ratio
         if hasattr(config.combustion, 'cea'):
-            config.combustion.cea.expansion_ratio = config.nozzle.expansion_ratio
+            config.combustion.cea.expansion_ratio = expansion_ratio
         
         return config
 

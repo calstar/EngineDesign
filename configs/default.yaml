@@ -232,21 +232,50 @@ combustion:
     use_advanced_model: true
     use_finite_rate_chemistry: true
     use_shifting_equilibrium: true
-chamber:
-  volume: 0.001244586
-  A_throat: 0.001037155
-  length: 0.1423623
-  Lstar: 1.11  # Mid-range between min (0.95) and max (1.27)
-  chamber_inner_diameter: 0.12065
-  design_pressure: 4481594.0
-  design_thrust: 7000.0
-  design_force_coefficient: 1.505989588378393
-nozzle:
-  A_throat: 0.001037155
-  A_exit: 0.00810732
-  expansion_ratio: 7.8169
-  exit_diameter: 0.101
-  efficiency: 0.95
+# =============================================================================
+# CHAMBER GEOMETRY - All inputs for solve_chamber_geometry_with_cea
+# =============================================================================
+chamber_geometry:
+  # Design requirements
+  design_pressure: 4481594.0      # Pc [Pa] - target chamber pressure
+  design_thrust: 7000.0           # F [N] - target thrust
+  design_MR: 2.55                 # O/F mixture ratio at design point
+  
+  # Chamber dimensions
+  chamber_diameter: 0.12065       # Inner chamber diameter [m]
+  Lstar: 1.11                     # Characteristic length [m] (0.95-1.27 for LOX/RP-1)
+  
+  # Nozzle dimensions
+  exit_diameter: 0.101            # Nozzle exit diameter [m]
+  expansion_ratio: 7.8169         # Area ratio (A_exit / A_throat)
+  nozzle_efficiency: 0.95         # Nozzle efficiency (0.94-0.98 typical)
+  
+  # Solver outputs (computed by solve_chamber_geometry_with_cea)
+  # These are populated after running the solver
+  A_throat: 0.001037155           # Throat area [m²] - SOLVED
+  A_exit: 0.00810732              # Exit area [m²] - SOLVED  
+  volume: 0.001244586             # Chamber volume [m³] - SOLVED
+  length: 0.1423623               # Chamber length [m] - SOLVED
+  Cf: 1.505989588378393           # Thrust coefficient - SOLVED
+
+# # Legacy sections (for backward compatibility with existing code)
+# chamber:
+#   volume: 0.001244586
+#   A_throat: 0.001037155
+#   length: 0.1423623
+#   Lstar: 1.11
+#   chamber_inner_diameter: 0.12065
+#   exit_diameter: 0.101
+#   design_pressure: 4481594.0
+#   design_thrust: 7000.0
+#   design_MR: 2.55
+#   design_force_coefficient: 1.505989588378393
+# nozzle:
+#   A_throat: 0.001037155
+#   A_exit: 0.00810732
+#   expansion_ratio: 7.8169
+#   exit_diameter: 0.101
+#   efficiency: 0.95
 solver:
   method: brentq
   Pc_bounds:

@@ -4,7 +4,7 @@ import numpy as np
 from scipy.optimize import brentq, newton
 from typing import Tuple, Dict, Any, List
 
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, ensure_chamber_geometry
 from engine.pipeline.combustion_eff import eta_cstar, calculate_Lstar
 from engine.pipeline.cea_cache import CEACache
 from engine.pipeline.thermal.film_cooling import compute_film_cooling
@@ -36,11 +36,14 @@ class ChamberSolver:
         self.config = config
         self.cea_cache = cea_cache
         
+        # Ensure chamber_geometry exists
+        cg = ensure_chamber_geometry(config)
+        
         # Calculate L* once (use config value if provided, otherwise calculate)
         self.Lstar = calculate_Lstar(
-            config.chamber.volume,
-            config.chamber.A_throat,
-            Lstar_override=config.chamber.Lstar
+            cg.volume,
+            cg.A_throat,
+            Lstar_override=cg.Lstar
         )
         self.injector_diameter = self._infer_injector_diameter()
         
@@ -115,7 +118,8 @@ class ChamberSolver:
         # Get CEA properties (IDEAL - infinite area equilibrium)
         # For 3D cache, use default expansion ratio from config (doesn't affect chamber properties much)
         try:
-            eps_default = self.config.nozzle.expansion_ratio if hasattr(self.config, 'nozzle') else None
+            cg = ensure_chamber_geometry(self.config)
+            eps_default = cg.expansion_ratio
             cea_props = self.cea_cache.eval(MR, Pc_val, 101325.0, eps_default)
         except Exception as e:
             # Log the error for debugging but return NaN to signal failure
@@ -173,8 +177,9 @@ class ChamberSolver:
         
         # Demand: mdot = Pc * At / c*_actual
         # This uses the chamber-driven c*, not the ideal CEA value
+        cg = ensure_chamber_geometry(self.config)
         mdot_demand, demand_valid = NumericalStability.safe_divide(
-            Pc_val * self.config.chamber.A_throat,
+            Pc_val * cg.A_throat,
             cstar_actual,
             0.0,
             "mdot_demand"
@@ -322,7 +327,8 @@ class ChamberSolver:
                         
                         # Get demand at Pc_max
                         MR_test = mdot_O_test / mdot_F_test if mdot_F_test > 0 else np.inf
-                        eps_default = self.config.nozzle.expansion_ratio if hasattr(self.config, 'nozzle') else None
+                        cg = ensure_chamber_geometry(self.config)
+                        eps_default = cg.expansion_ratio
                         cea_props_test = self.cea_cache.eval(MR_test, Pc_max, 101325.0, eps_default)
                         cstar_ideal_test = cea_props_test.get("cstar_ideal", 0.0)
                         
@@ -335,7 +341,8 @@ class ChamberSolver:
                             cooling_efficiency=diag_test.get("cooling_efficiency", 1.0),
                         )
                         cstar_actual_test = eta_test * cstar_ideal_test
-                        mdot_demand_test = (Pc_max * self.config.chamber.A_throat) / cstar_actual_test if cstar_actual_test > 0 else np.inf
+                        cg = ensure_chamber_geometry(self.config)
+                        mdot_demand_test = (Pc_max * cg.A_throat) / cstar_actual_test if cstar_actual_test > 0 else np.inf
                         
                         # Calculate what Pc would balance (extrapolate)
                         # residual = supply - demand
@@ -349,7 +356,8 @@ class ChamberSolver:
                         if mdot_demand_test > 0 and mdot_supply_test > mdot_demand_test:
                             # We need more Pc to increase demand
                             # mdot_demand = Pc * At / c*, so Pc_needed = mdot_supply * c* / At
-                            Pc_estimate = mdot_supply_test * cstar_actual_test / self.config.chamber.A_throat
+                            cg = ensure_chamber_geometry(self.config)
+                            Pc_estimate = mdot_supply_test * cstar_actual_test / cg.A_throat
                             
                             # raise ValueError(
                             #     f"No solution: Supply > Demand at all Pc. "
@@ -477,7 +485,8 @@ class ChamberSolver:
         
         # Use current expansion ratio for 3D cache
         # FIXED: Add safety check for division by zero
-        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat if self.config.chamber.A_throat > 0 else 10.0
+        cg = ensure_chamber_geometry(self.config)
+        eps_current = cg.A_exit / cg.A_throat if cg.A_throat and cg.A_exit and cg.A_throat > 0 else cg.expansion_ratio
         cea_props = self.cea_cache.eval(MR, Pc_val, 101325.0, eps_current)
         
         # Calculate reaction progress through chamber (if finite-rate chemistry enabled)
@@ -510,7 +519,8 @@ class ChamberSolver:
                 # NOT L* / sqrt(gamma * R * T) which is a time scale related to sound speed, not residence time!
                 rho_chamber = Pc_val / (cea_props["R"] * cea_props["Tc"]) if cea_props["R"] > 0 and cea_props["Tc"] > 0 else 1.0
                 # Use actual mdot_total from closure (already calculated above at line 530)
-                tau_residence_correct = self.Lstar * rho_chamber * self.config.chamber.A_throat / mdot_total if mdot_total > 0 else 0.001
+                cg = ensure_chamber_geometry(self.config)
+                tau_residence_correct = self.Lstar * rho_chamber * cg.A_throat / mdot_total if mdot_total > 0 else 0.001
                 reaction_progress = {
                     "progress_throat": 1.0,  # Assume equilibrium
                     "tau_residence": tau_residence_correct,  # FIXED: Use correct residence time formula
@@ -570,9 +580,10 @@ class ChamberSolver:
         # The previous formula with gamma * sqrt(...) was incorrect
         g0 = 9.80665
         Cf_ideal = cea_props.get("Cf_ideal", 1.5)  # Get from CEA, default to typical value
-        Cf_actual = self.config.nozzle.efficiency * Cf_ideal  # Account for nozzle efficiency
+        cg = ensure_chamber_geometry(self.config)
+        Cf_actual = cg.nozzle_efficiency * Cf_ideal  # Account for nozzle efficiency
         # Use correct formula: Isp = Cf * Pc * At / (mdot * g0)
-        Isp = (Cf_actual * Pc_val * self.config.chamber.A_throat) / (mdot_total * g0) if mdot_total > 0 else 0.0
+        Isp = (Cf_actual * Pc_val * cg.A_throat) / (mdot_total * g0) if mdot_total > 0 else 0.0
         
         # Validate engine state (use effective temperature after cooling)
         validation_results = validate_engine_state(
@@ -815,7 +826,7 @@ class ChamberSolver:
             "R": R,
             "M": cea_props.get("M"),  # Molecular weight [kg/kmol] for viscosity calculation
             "chamber_area": geometry["area_cross"],
-            "A_throat": config.chamber.A_throat,
+            "A_throat": ensure_chamber_geometry(config).A_throat,
             "chamber_length": geometry["length"],
             "turbulence_intensity": turbulence_intensity_calc,
         }

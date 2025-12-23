@@ -43,16 +43,18 @@ MR_range = np.linspace(MR_min, MR_max, 30)
 R_UNIVERSAL = 8314.462618  # J/(kmol·K)
 
 # Calculate L* for chamber-driven corrections (use config value if provided)
+from engine.pipeline.config_schemas import ensure_chamber_geometry
+cg = ensure_chamber_geometry(config)
 Lstar = calculate_Lstar(
-    config.chamber.volume,
-    config.chamber.A_throat,
-    Lstar_override=config.chamber.Lstar
+    cg.volume,
+    cg.A_throat,
+    Lstar_override=cg.Lstar
 )
 print(f"L* = {Lstar:.3f} m (for chamber-driven corrections)")
-if config.chamber.Lstar is not None:
-    print(f"  (Using L* from config: {config.chamber.Lstar:.3f} m)")
+if cg.Lstar is not None:
+    print(f"  (Using L* from config: {cg.Lstar:.3f} m)")
 else:
-    print(f"  (Calculated from V={config.chamber.volume:.6f} m³, At={config.chamber.A_throat:.6f} m²)")
+    print(f"  (Calculated from V={cg.volume:.6f} m³, At={cg.A_throat:.6f} m²)")
 
 # Storage for results at different chamber pressures
 results_by_Pc = {}

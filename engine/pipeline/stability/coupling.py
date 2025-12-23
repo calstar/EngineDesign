@@ -74,12 +74,13 @@ def calculate_pintle_chugging_coupling(
     # Larger pintle tip = more fuel flow area = different coupling
     # Typical chamber diameter ~0.1-0.2 m, pintle tip ~0.01-0.02 m
     # Coupling factor: f_coupling ∝ (d_pintle / D_chamber)
-    if hasattr(config, 'chamber'):
-        # Estimate chamber diameter from volume and length
-        V_chamber = config.chamber.volume
-        L_chamber = config.chamber.length if hasattr(config.chamber, 'length') else 0.2
-        D_chamber = np.sqrt(4 * V_chamber / (np.pi * L_chamber))
-    else:
+    from engine.pipeline.config_schemas import ensure_chamber_geometry
+    try:
+        cg = ensure_chamber_geometry(config)
+        V_chamber = cg.volume
+        L_chamber = cg.length if cg.length else 0.2
+        D_chamber = np.sqrt(4 * V_chamber / (np.pi * L_chamber)) if L_chamber > 0 else cg.chamber_diameter
+    except (ValueError, AttributeError):
         D_chamber = 0.1  # Default
     
     pintle_ratio = d_pintle_tip / D_chamber if D_chamber > 0 else 0.1

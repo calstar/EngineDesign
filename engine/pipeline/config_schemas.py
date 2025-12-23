@@ -368,6 +368,33 @@ class CombustionConfig(BaseModel):
     efficiency: CombustionEfficiencyConfig = Field(default_factory=CombustionEfficiencyConfig)
 
 
+class ChamberGeometryConfig(BaseModel):
+    """
+    Unified chamber geometry configuration for solve_chamber_geometry_with_cea.
+    Groups all design inputs (chamber + nozzle) in one place.
+    """
+    # Design requirements
+    design_pressure: float = Field(gt=0, description="Target chamber pressure Pc [Pa]")
+    design_thrust: float = Field(gt=0, description="Target thrust F [N]")
+    design_MR: float = Field(gt=0, description="Design mixture ratio O/F")
+    
+    # Chamber dimensions
+    chamber_diameter: float = Field(gt=0, description="Inner chamber diameter [m]")
+    Lstar: float = Field(gt=0, description="Characteristic length [m] (0.95-1.27 for LOX/RP-1)")
+    
+    # Nozzle dimensions
+    exit_diameter: float = Field(gt=0, description="Nozzle exit diameter [m]")
+    expansion_ratio: float = Field(gt=1, description="Area ratio A_exit/A_throat")
+    nozzle_efficiency: float = Field(default=0.95, ge=0, le=1, description="Nozzle efficiency (0.94-0.98)")
+    
+    # Solver outputs (populated after running solver)
+    A_throat: Optional[float] = Field(default=None, gt=0, description="Throat area [m²] - SOLVED")
+    A_exit: Optional[float] = Field(default=None, gt=0, description="Exit area [m²] - SOLVED")
+    volume: Optional[float] = Field(default=None, gt=0, description="Chamber volume [m³] - SOLVED")
+    length: Optional[float] = Field(default=None, gt=0, description="Chamber length [m] - SOLVED")
+    Cf: Optional[float] = Field(default=None, gt=0, description="Thrust coefficient - SOLVED")
+
+
 class ChamberConfig(BaseModel):
     """Chamber geometry configuration"""
     volume: float = Field(gt=0, description="Chamber volume [m³]")
@@ -379,10 +406,13 @@ class ChamberConfig(BaseModel):
         description="Characteristic length [m] = V_chamber / A_throat. If not specified, calculated from volume and A_throat."
     )
     chamber_inner_diameter: Optional[float] = Field(default=None, gt=0, description="Chamber inner diameter [m]")
-    # Design parameters (optional, used for geometry generation)
-    design_pressure: Optional[float] = Field(default=None, gt=0, description="Design chamber pressure [Pa] used for geometry calculation")
-    design_thrust: Optional[float] = Field(default=None, gt=0, description="Design thrust [N] used for geometry calculation")
-    design_force_coefficient: Optional[float] = Field(default=None, gt=0, description="Design force coefficient used for geometry calculation")
+    exit_diameter: Optional[float] = Field(default=None, gt=0, description="Nozzle exit diameter [m] for geometry solver")
+    
+    # Design parameters for solve_chamber_geometry_with_cea
+    design_pressure: Optional[float] = Field(default=None, gt=0, description="Design chamber pressure [Pa] (Pc_design)")
+    design_thrust: Optional[float] = Field(default=None, gt=0, description="Design thrust [N] (F_design)")
+    design_MR: Optional[float] = Field(default=None, gt=0, description="Design mixture ratio O/F for CEA solver")
+    design_force_coefficient: Optional[float] = Field(default=None, gt=0, description="Solved thrust coefficient Cf (output from solver)")
 
 
 class NozzleConfig(BaseModel):
@@ -549,8 +579,11 @@ class PintleEngineConfig(BaseModel):
     discharge: dict[str, DischargeConfig]  # "oxidizer" and "fuel"
     spray: SprayConfig = Field(default_factory=SprayConfig)
     combustion: CombustionConfig = Field(default_factory=CombustionConfig)
-    chamber: ChamberConfig
-    nozzle: NozzleConfig
+    # Chamber geometry - unified section for solve_chamber_geometry_with_cea
+    chamber_geometry: Optional[ChamberGeometryConfig] = Field(default=None, description="Unified chamber geometry config (design inputs + solver outputs)")
+    # Legacy chamber/nozzle sections (for backward compatibility - optional if chamber_geometry is provided)
+    chamber: Optional[ChamberConfig] = Field(default=None, description="Legacy chamber config (use chamber_geometry instead)")
+    nozzle: Optional[NozzleConfig] = Field(default=None, description="Legacy nozzle config (use chamber_geometry instead)")
     solver: SolverConfig = Field(default_factory=SolverConfig)
     # Flight simulation fields (optional)
     lox_tank: Optional[LOXTankConfig] = Field(default=None, description="LOX tank configuration for flight simulation")
@@ -570,4 +603,78 @@ class PintleEngineConfig(BaseModel):
 
     class Config:
         extra = "allow"  # Reject unknown fields
+
+
+def ensure_chamber_geometry(config: PintleEngineConfig) -> ChamberGeometryConfig:
+    """
+    Ensure chamber_geometry exists, creating from legacy sections if needed.
+    
+    This helper function provides backward compatibility by creating chamber_geometry
+    from legacy chamber/nozzle sections if chamber_geometry doesn't exist.
+    
+    Parameters:
+    -----------
+    config : PintleEngineConfig
+        Configuration object
+        
+    Returns:
+    --------
+    ChamberGeometryConfig
+        The chamber_geometry config (created if needed)
+        
+    Raises:
+    -------
+    ValueError
+        If neither chamber_geometry nor legacy sections exist
+    """
+    if config.chamber_geometry is not None:
+        return config.chamber_geometry
+    
+    # Create from legacy sections if they exist
+    if config.chamber is None or config.nozzle is None:
+        raise ValueError(
+            "Must provide either 'chamber_geometry' section or both 'chamber' and 'nozzle' sections"
+        )
+    
+    # Create chamber_geometry from legacy sections
+    chamber = config.chamber
+    nozzle = config.nozzle
+    
+    # Get design parameters (use defaults if not in legacy sections)
+    design_pressure = getattr(chamber, 'design_pressure', 2.0e6)
+    design_thrust = getattr(chamber, 'design_thrust', 5000.0)
+    design_MR = getattr(chamber, 'design_MR', 2.55)
+    
+    # Get dimensions
+    chamber_diameter = getattr(chamber, 'chamber_inner_diameter', 0.08)
+    Lstar = getattr(chamber, 'Lstar', 1.0)
+    exit_diameter = getattr(chamber, 'exit_diameter', None) or getattr(nozzle, 'exit_diameter', 0.1)
+    expansion_ratio = getattr(nozzle, 'expansion_ratio', 8.0)
+    nozzle_efficiency = getattr(nozzle, 'efficiency', 0.95)
+    
+    # Get solved outputs (if available)
+    A_throat = getattr(chamber, 'A_throat', None) or getattr(nozzle, 'A_throat', None)
+    A_exit = getattr(nozzle, 'A_exit', None)
+    volume = getattr(chamber, 'volume', None)
+    length = getattr(chamber, 'length', None)
+    Cf = getattr(chamber, 'design_force_coefficient', None)
+    
+    # Create and assign chamber_geometry
+    config.chamber_geometry = ChamberGeometryConfig(
+        design_pressure=design_pressure,
+        design_thrust=design_thrust,
+        design_MR=design_MR,
+        chamber_diameter=chamber_diameter,
+        Lstar=Lstar,
+        exit_diameter=exit_diameter,
+        expansion_ratio=expansion_ratio,
+        nozzle_efficiency=nozzle_efficiency,
+        A_throat=A_throat,
+        A_exit=A_exit,
+        volume=volume,
+        length=length,
+        Cf=Cf,
+    )
+    
+    return config.chamber_geometry
 

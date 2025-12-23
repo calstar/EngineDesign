@@ -4,10 +4,12 @@ import { ConfigEditor } from './components/ConfigEditor';
 import { ForwardMode } from './components/ForwardMode';
 import { TimeSeriesMode } from './components/TimeSeriesMode';
 import { CustomPlotter } from './components/CustomPlotter';
+import { FlightSimulation } from './components/FlightSimulation';
+import { ChamberGeometry } from './components/ChamberGeometry';
 import { getConfig, getHealth } from './api/client';
 import type { EngineConfig } from './api/client';
 
-type Tab = 'forward' | 'timeseries' | 'plotter' | 'config';
+type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'config';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('forward');
@@ -104,6 +106,26 @@ function App() {
               Custom Plotter
             </button>
             <button
+              onClick={() => setActiveTab('flight')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'flight'
+                  ? 'border-orange-500 text-orange-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Flight Simulation
+            </button>
+            <button
+              onClick={() => setActiveTab('geometry')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'geometry'
+                  ? 'border-rose-500 text-rose-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Chamber Geometry
+            </button>
+            <button
               onClick={() => setActiveTab('config')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === 'config'
@@ -160,6 +182,30 @@ function App() {
 
         {activeTab === 'plotter' && (
           <CustomPlotter />
+        )}
+
+        {activeTab === 'flight' && (
+          <div className="space-y-6">
+            {!config && (
+              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
+                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
+              </div>
+            )}
+            <FlightSimulation config={config} />
+          </div>
+        )}
+
+        {activeTab === 'geometry' && (
+          <div className="space-y-6">
+            {!config && (
+              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
+                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
+              </div>
+            )}
+            <ChamberGeometry config={config} />
+          </div>
         )}
 
         {activeTab === 'config' && (

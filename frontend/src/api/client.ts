@@ -417,3 +417,153 @@ export async function previewCurve(
     body: JSON.stringify(params),
   });
 }
+
+
+// ============================================================================
+// Flight Simulation Types and API
+// ============================================================================
+
+export interface FlightEnvironmentConfig {
+  latitude: number;
+  longitude: number;
+  elevation: number;
+  date: [number, number, number, number]; // [year, month, day, hour]
+}
+
+export interface FlightFinsConfig {
+  no_fins: number;
+  root_chord: number;
+  tip_chord: number;
+  fin_span: number;
+  fin_position: number;
+}
+
+export interface FlightRocketConfig {
+  airframe_mass: number;
+  engine_mass: number;
+  lox_tank_structure_mass: number;
+  fuel_tank_structure_mass: number;
+  radius: number;
+  rocket_length: number;
+  motor_position: number;
+  inertia: [number, number, number]; // [Ixx, Iyy, Izz]
+  fins?: FlightFinsConfig;
+}
+
+export interface FlightTankConfig {
+  mass: number;
+  height: number;
+  radius: number;
+  position: number;
+}
+
+export type FlightSourceType = 'timeseries';
+
+export interface FlightSimRequest {
+  // Time-series data (required)
+  time_array: number[];
+  thrust_array: number[];
+  mdot_O_array: number[];
+  mdot_F_array: number[];
+  
+  // Propellant configuration
+  lox_mass_kg: number;
+  fuel_mass_kg: number;
+  
+  // Tank geometry (optional)
+  lox_tank?: FlightTankConfig;
+  fuel_tank?: FlightTankConfig;
+  
+  // Environment configuration
+  environment?: FlightEnvironmentConfig;
+  
+  // Rocket configuration
+  rocket?: FlightRocketConfig;
+}
+
+export interface FlightTrajectory {
+  time: number[];
+  altitude: number[];
+  velocity: number[];
+}
+
+export interface FlightTruncationInfo {
+  truncated: boolean;
+  cutoff_time?: number;
+  reason?: string;
+}
+
+export interface FlightSimResponse {
+  status: string;
+  apogee_m: number;
+  apogee_ft: number;
+  max_velocity_m_s: number;
+  flight_time_s: number;
+  trajectory?: FlightTrajectory;
+  truncation?: FlightTruncationInfo;
+  thrust_curve?: {
+    time: number[];
+    thrust_N: number[];
+  };
+  rocket_diagram?: string;  // Base64-encoded PNG
+  error?: string;
+}
+
+export interface RocketPyCheckResponse {
+  available: boolean;
+  message: string;
+  install_hint?: string;
+}
+
+// Flight simulation API functions
+export async function runFlightSimulation(
+  params: FlightSimRequest
+): Promise<ApiResponse<FlightSimResponse>> {
+  return request<FlightSimResponse>('/flight/simulate', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function checkRocketPy(): Promise<ApiResponse<RocketPyCheckResponse>> {
+  return request<RocketPyCheckResponse>('/flight/check');
+}
+
+
+// ============================================================================
+// Chamber Geometry Types and API
+// ============================================================================
+
+export interface ChamberGeometryResponse {
+  positions: number[];
+  R_gas: number[];
+  R_ablative_outer: number[];
+  R_graphite_outer: number[];
+  R_stainless: number[];
+  throat_position: number;
+  graphite_start: number;
+  graphite_end: number;
+  D_chamber: number;
+  D_throat: number;
+  D_exit: number;
+  L_chamber: number;
+  L_nozzle: number;
+  expansion_ratio: number;
+  ablative_enabled: boolean;
+  graphite_enabled: boolean;
+  // Rao bell nozzle contour
+  nozzle_x: number[];
+  nozzle_y: number[];
+  nozzle_method: string;
+  // Chamber contour from CEA solver
+  chamber_contour_x: number[];
+  chamber_contour_y: number[];
+  // Solver results
+  Cf: number | null;
+  Cf_ideal: number | null;
+  A_throat_solved: number | null;
+}
+
+export async function getChamberGeometry(): Promise<ApiResponse<ChamberGeometryResponse>> {
+  return request<ChamberGeometryResponse>('/geometry');
+}

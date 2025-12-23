@@ -11,7 +11,7 @@ This module provides a comprehensive optimization system that:
 import numpy as np
 from typing import Dict, Any, Optional, List, Tuple, Callable
 from scipy.optimize import minimize, differential_evolution, Bounds
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, ensure_chamber_geometry, ChamberGeometryConfig
 from engine.core.runner import PintleEngineRunner
 from engine.pipeline.system_diagnostics import SystemDiagnostics
 
@@ -174,13 +174,14 @@ class ChamberOptimizer:
         )
         
         # Extract optimized parameters for display
+        cg = ensure_chamber_geometry(optimized_config)
         optimized_params = {
-            "A_throat": optimized_config.chamber.A_throat,
-            "A_exit": optimized_config.nozzle.A_exit,
-            "Lstar": optimized_config.chamber.Lstar,
-            "chamber_diameter": optimized_config.chamber.chamber_inner_diameter if hasattr(optimized_config.chamber, 'chamber_inner_diameter') else np.sqrt(4.0 * optimized_config.chamber.volume / (np.pi * optimized_config.chamber.length)),
-            "chamber_length": optimized_config.chamber.length,
-            "expansion_ratio": optimized_config.nozzle.expansion_ratio,
+            "A_throat": cg.A_throat,
+            "A_exit": cg.A_exit,
+            "Lstar": cg.Lstar,
+            "chamber_diameter": cg.chamber_diameter,
+            "chamber_length": cg.length,
+            "expansion_ratio": cg.expansion_ratio,
         }
         
         return {
@@ -444,30 +445,50 @@ class ChamberOptimizer:
         
         A_throat, A_exit, Lstar, chamber_diameter = x[0], x[1], x[2], x[3]
         
-        # Update chamber
-        config.chamber.A_throat = A_throat
-        config.chamber.volume = Lstar * A_throat  # V = L* * A_throat
-        config.chamber.Lstar = Lstar
-        config.chamber.chamber_inner_diameter = chamber_diameter
+        # Ensure chamber_geometry exists
+        if config.chamber_geometry is None:
+            cg = ensure_chamber_geometry(config)
+        else:
+            cg = config.chamber_geometry
         
         # Calculate chamber length from volume and diameter
+        volume = Lstar * A_throat  # V = L* * A_throat
         A_chamber = np.pi * (chamber_diameter / 2.0) ** 2
         if A_chamber > 0:
-            config.chamber.length = config.chamber.volume / A_chamber
+            length = volume / A_chamber
         else:
-            config.chamber.length = 0.25  # Default fallback
+            length = 0.25  # Default fallback
         
-        # Update nozzle
-        config.nozzle.A_throat = A_throat
-        config.nozzle.A_exit = A_exit
-        config.nozzle.expansion_ratio = A_exit / A_throat if A_throat > 0 else 1.0
         # Calculate exit diameter
         D_exit = np.sqrt(4.0 * A_exit / np.pi) if A_exit > 0 else 0.0
-        config.nozzle.exit_diameter = D_exit
+        expansion_ratio = A_exit / A_throat if A_throat > 0 else 1.0
+        
+        # Update chamber_geometry
+        cg.A_throat = A_throat
+        cg.A_exit = A_exit
+        cg.volume = volume
+        cg.length = length
+        cg.Lstar = Lstar
+        cg.chamber_diameter = chamber_diameter
+        cg.exit_diameter = D_exit
+        cg.expansion_ratio = expansion_ratio
+        
+        # Also update legacy sections if they exist (for backward compatibility)
+        if config.chamber is not None:
+            config.chamber.A_throat = A_throat
+            config.chamber.volume = volume
+            config.chamber.Lstar = Lstar
+            config.chamber.chamber_inner_diameter = chamber_diameter
+            config.chamber.length = length
+        if config.nozzle is not None:
+            config.nozzle.A_throat = A_throat
+            config.nozzle.A_exit = A_exit
+            config.nozzle.expansion_ratio = expansion_ratio
+            config.nozzle.exit_diameter = D_exit
         
         # Update CEA cache expansion ratio
         if hasattr(config.combustion, 'cea'):
-            config.combustion.cea.expansion_ratio = config.nozzle.expansion_ratio
+            config.combustion.cea.expansion_ratio = expansion_ratio
         
         # Update regen cooling chamber diameter if enabled
         if config.regen_cooling is not None and config.regen_cooling.enabled:

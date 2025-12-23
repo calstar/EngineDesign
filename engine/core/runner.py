@@ -4,7 +4,7 @@ import numpy as np
 from typing import Dict, Any, Optional, Union
 import copy
 
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, ensure_chamber_geometry
 from engine.pipeline.cea_cache import CEACache
 from engine.core.chamber_solver import ChamberSolver
 from engine.core.nozzle import calculate_thrust
@@ -159,9 +159,12 @@ class PintleEngineRunner:
         mdot_total = mdot_O + mdot_F
         MR = diagnostics["MR"]
         
+        # Ensure chamber_geometry exists
+        cg = ensure_chamber_geometry(self.config)
+        
         # Get CEA properties for nozzle calculation
         # Calculate current expansion ratio (for 3D CEA cache)
-        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
+        eps_current = cg.A_exit / cg.A_throat if cg.A_exit and cg.A_throat else cg.expansion_ratio
         
         # Use computed ambient pressure for CEA evaluation
         cea_props = self.cea_cache.eval(MR, Pc, Pa, eps_current)
@@ -173,24 +176,34 @@ class PintleEngineRunner:
         # Calculate thrust using computed ambient pressure
         
         # Calculate current expansion ratio (for 3D CEA cache)
-        eps_current = self.config.nozzle.A_exit / self.config.chamber.A_throat
+        eps_current = cg.A_exit / cg.A_throat if cg.A_exit and cg.A_throat else cg.expansion_ratio
         
         # Check if shifting equilibrium is enabled
         use_shifting = getattr(self.config.combustion.efficiency, 'use_shifting_equilibrium', True)
         reaction_progress = diagnostics.get("reaction_progress", None)
+        
+        # Create temporary NozzleConfig from chamber_geometry for calculate_thrust
+        from engine.pipeline.config_schemas import NozzleConfig
+        temp_nozzle_config = NozzleConfig(
+            A_throat=cg.A_throat or (cg.A_exit / cg.expansion_ratio if cg.A_exit and cg.expansion_ratio else 1e-4),
+            A_exit=cg.A_exit or (cg.A_throat * cg.expansion_ratio if cg.A_throat and cg.expansion_ratio else 1e-3),
+            expansion_ratio=cg.expansion_ratio,
+            exit_diameter=cg.exit_diameter,
+            efficiency=cg.nozzle_efficiency,
+        )
         
         thrust_results = calculate_thrust(
             Pc,
             MR,
             mdot_total,
             self.cea_cache,
-            self.config.nozzle,
+            temp_nozzle_config,
             Pa,
             eps=eps_current,  # Pass current expansion ratio
             reaction_progress=reaction_progress,  # Pass reaction progress for shifting equilibrium
             use_shifting_equilibrium=use_shifting,
             config=self.config,
-            A_throat=self.config.chamber.A_throat,  # CRITICAL: Use actual chamber throat area
+            A_throat=cg.A_throat,  # CRITICAL: Use actual chamber throat area
         )
         
         F = thrust_results["F"]
@@ -220,7 +233,7 @@ class PintleEngineRunner:
                 gamma=gamma,
                 R=R,
                 Tc=Tc,
-                A_throat=self.config.chamber.A_throat,
+                A_throat=cg.A_throat,
                 n_points=30,
             )
         except Exception as e:
@@ -236,8 +249,8 @@ class PintleEngineRunner:
                 mdot_total=mdot_total,
                 gamma=gamma,
                 R=R,
-                V_chamber=self.config.chamber.volume,
-                A_throat=self.config.chamber.A_throat,
+                V_chamber=cg.volume,
+                A_throat=cg.A_throat,
                 Lstar=self.solver.Lstar,
                 MR=MR,
             )
@@ -313,8 +326,8 @@ class PintleEngineRunner:
             "Cf_theoretical": Cf_theoretical,
             "temperature_profile": temperature_profile,
             "eps": eps_current,  # Expansion ratio (for 3D CEA cache)
-            "A_throat": self.config.chamber.A_throat,
-            "A_exit": self.config.nozzle.A_exit,
+            "A_throat": cg.A_throat,
+            "A_exit": cg.A_exit,
             "cstar_actual": cstar_actual,
             "cstar_ideal": diagnostics["cstar_ideal"],
             "eta_cstar": diagnostics["eta_cstar"],
@@ -542,11 +555,14 @@ class PintleEngineRunner:
             "diagnostics": [],
         }
         
+        # Ensure chamber_geometry exists
+        cg = ensure_chamber_geometry(self.config)
+        
         # Initial geometry
-        V_chamber_initial = self.config.chamber.volume
-        A_throat_initial = self.config.chamber.A_throat
-        A_exit_initial = self.config.nozzle.A_exit
-        L_chamber = self.config.chamber.length if self.config.chamber.length else 0.18
+        V_chamber_initial = cg.volume
+        A_throat_initial = cg.A_throat
+        A_exit_initial = cg.A_exit
+        L_chamber = cg.length if cg.length else 0.18
         # FIXED: Add safety checks for sqrt operations
         D_chamber_initial = np.sqrt(max(0, 4 * V_chamber_initial / (np.pi * L_chamber))) if L_chamber > 0 else 0.1
         D_throat_initial = np.sqrt(max(0, 4 * A_throat_initial / np.pi)) if A_throat_initial > 0 else 0.015

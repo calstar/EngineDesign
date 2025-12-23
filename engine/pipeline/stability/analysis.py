@@ -349,9 +349,11 @@ def comprehensive_stability_analysis(
         - Lstar: characteristic length [m]
     """
     # Chamber geometry
-    V_chamber = float(config.chamber.volume)
-    A_throat = float(config.chamber.A_throat)
-    Lstar = V_chamber / A_throat if A_throat > 0.0 else 1.0
+    from engine.pipeline.config_schemas import ensure_chamber_geometry
+    cg = ensure_chamber_geometry(config)
+    V_chamber = float(cg.volume)
+    A_throat = float(cg.A_throat)
+    Lstar = V_chamber / A_throat if A_throat > 0.0 else cg.Lstar
 
     # Estimate chamber dimensions
     L_chamber = getattr(config.chamber, "length", 0.18) or 0.18

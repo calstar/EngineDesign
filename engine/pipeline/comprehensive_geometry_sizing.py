@@ -20,6 +20,7 @@ from .config_schemas import (
     AblativeCoolingConfig,
     GraphiteInsertConfig,
     StainlessSteelCaseConfig,
+    ensure_chamber_geometry,
 )
 from engine.pipeline.thermal.ablative_sizing import size_ablative_system
 from engine.pipeline.thermal.graphite_geometry import size_graphite_insert as size_graphite_geom
@@ -114,8 +115,9 @@ def size_complete_geometry(
         recession_rate_for_sizing = 1e-8  # Negligible - graphite doesn't ablate
         
         # Get throat diameter from config or calculate
-        if hasattr(config, "chamber") and hasattr(config.chamber, "A_throat"):
-            A_throat = config.chamber.A_throat
+        cg = ensure_chamber_geometry(config)
+        if cg.A_throat:
+            A_throat = cg.A_throat
             D_throat = np.sqrt(4.0 * A_throat / np.pi)
         else:
             # Estimate from typical expansion ratio
@@ -144,14 +146,14 @@ def size_complete_geometry(
         results["graphite_sizing"] = {"initial_thickness": 0.0, "meets_requirements": True}
     
     # 3. Calculate complete geometry
-    # Get geometry from config.chamber (not config.combustion)
-    if hasattr(config, "chamber"):
-        V_chamber = config.chamber.volume
-        A_throat = config.chamber.A_throat
-        L_chamber = config.chamber.length if config.chamber.length else (config.chamber.volume / config.chamber.A_throat if config.chamber.A_throat > 0 else 0.18)
-        
-        # Calculate diameters
-        if L_chamber > 0:
+    # Get geometry from chamber_geometry
+    cg = ensure_chamber_geometry(config)
+    V_chamber = cg.volume
+    A_throat = cg.A_throat
+    L_chamber = cg.length if cg.length else (cg.volume / cg.A_throat if cg.A_throat and cg.A_throat > 0 else 0.18)
+    
+    # Calculate diameters
+    if L_chamber > 0:
             D_chamber_initial = np.sqrt(4.0 * V_chamber / (np.pi * L_chamber))
         else:
             D_chamber_initial = np.sqrt(4.0 * V_chamber / np.pi)  # Assume cylindrical

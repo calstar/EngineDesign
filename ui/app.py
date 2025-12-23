@@ -1028,7 +1028,9 @@ def compute_timeseries_dataframe(
                 if "A_throat" in results:
                     throat_area = float(results["A_throat"][i])
                 else:
-                    throat_area = runner.config.chamber.A_throat if hasattr(runner.config, 'chamber') else 0.000857892
+                    from engine.pipeline.config_schemas import ensure_chamber_geometry
+                    cg = ensure_chamber_geometry(runner.config)
+                    throat_area = cg.A_throat if cg.A_throat else 0.000857892
                 
                 # Estimate chamber heat flux
                 if ablative and ablative.get("enabled", False):
@@ -2564,25 +2566,16 @@ def timeseries_view(runner: PintleEngineRunner, config_label: str) -> None:
                             st.warning("⚠️ No recession data found. Using zero recession.")
                         
                         # Get initial diameters (calculate if not in config)
-                        if hasattr(runner.config.chamber, 'D_chamber_initial'):
-                            D_chamber_initial = runner.config.chamber.D_chamber_initial
-                        else:
-                            # Calculate from volume and length
-                            V_chamber = runner.config.chamber.volume
-                            L_chamber = runner.config.chamber.length if runner.config.chamber.length else 0.18
-                            D_chamber_initial = np.sqrt(4.0 * V_chamber / (np.pi * L_chamber))
+                        from engine.pipeline.config_schemas import ensure_chamber_geometry
+                        cg = ensure_chamber_geometry(runner.config)
                         
-                        if hasattr(runner.config.chamber, 'D_throat_initial'):
-                            D_throat_initial = runner.config.chamber.D_throat_initial
-                        else:
-                            # Calculate from throat area
-                            A_throat = runner.config.chamber.A_throat
-                            D_throat_initial = np.sqrt(4.0 * A_throat / np.pi)
+                        # Calculate from chamber_geometry
+                        V_chamber = cg.volume
+                        L_chamber = cg.length if cg.length else 0.18
+                        D_chamber_initial = np.sqrt(4.0 * V_chamber / (np.pi * L_chamber)) if L_chamber > 0 else cg.chamber_diameter
                         
-                        if hasattr(runner.config.chamber, 'L_chamber'):
-                            L_chamber = runner.config.chamber.L_chamber
-                        else:
-                            L_chamber = runner.config.chamber.length if runner.config.chamber.length else 0.18
+                        A_throat = cg.A_throat
+                        D_throat_initial = np.sqrt(4.0 * A_throat / np.pi) if A_throat else 0.015
                         
                         with st.spinner("Creating recession animation..."):
                             try:
@@ -3940,7 +3933,12 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
                 with st.spinner("Calculating chamber geometry with CEA solver (this may take a moment)..."):
                     try:
                         # Get nozzle efficiency from config to use corrected Cf
-                        nozzle_efficiency = runner.config.nozzle.efficiency if runner and runner.config else 0.98
+                        from engine.pipeline.config_schemas import ensure_chamber_geometry
+                        if runner and runner.config:
+                            cg = ensure_chamber_geometry(runner.config)
+                            nozzle_efficiency = cg.nozzle_efficiency
+                        else:
+                            nozzle_efficiency = 0.98
                         pts, table_data, total_chamber_length, solver_info = solve_chamber_geometry_with_cea(
                             pc_design=pc_design_metric,
                             thrust_design=thrust_design_metric,

@@ -375,7 +375,9 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     # Nozzle exit area (only used for visualization, not trajectory)
     # Note: When providing a thrust curve, RocketPy doesn't use nozzle params for simulation.
     # A_exit is only used to calculate nozzle_radius for the rocket drawing.
-    A_e = config.nozzle.A_exit
+    from engine.pipeline.config_schemas import ensure_chamber_geometry
+    cg = ensure_chamber_geometry(config)
+    A_e = cg.A_exit
     
     # Check for required flight simulation config fields
     if not config.environment:

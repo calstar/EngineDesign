@@ -142,19 +142,14 @@ def create_layer1_apply_x_to_config(
         
         L_chamber = np.clip(L_chamber, 0.005, 1.0)
         
-        config.chamber.A_throat = A_throat
-        config.chamber.volume = V_chamber
-        config.chamber.Lstar = Lstar
-        config.chamber.length = L_chamber
-        # Only store inner diameter on the chamber config; outer diameter is an
-        # optimization variable but not part of the pydantic ChamberConfig schema.
-        setattr(config.chamber, 'chamber_inner_diameter', D_chamber_inner)
-        if hasattr(config.chamber, 'contraction_ratio'):
-            config.chamber.contraction_ratio = contraction_ratio
-        if hasattr(config.chamber, 'A_chamber'):
-            config.chamber.A_chamber = A_chamber
+        # Ensure chamber_geometry exists
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        if config.chamber_geometry is None:
+            cg = ensure_chamber_geometry(config)
+        else:
+            cg = config.chamber_geometry
         
-        # Nozzle
+        # Nozzle calculations
         A_exit = A_throat * expansion_ratio
         if A_exit < 0:
             A_exit = A_throat * 10.0
@@ -167,11 +162,33 @@ def create_layer1_apply_x_to_config(
             else:
                 expansion_ratio = 10.0
         
-        config.nozzle.A_throat = A_throat
-        config.nozzle.A_exit = A_exit
-        config.nozzle.expansion_ratio = expansion_ratio
-        if hasattr(config.nozzle, 'exit_diameter'):
-            config.nozzle.exit_diameter = D_exit
+        # Update chamber_geometry
+        cg.A_throat = A_throat
+        cg.volume = V_chamber
+        cg.Lstar = Lstar
+        cg.length = L_chamber
+        cg.chamber_diameter = D_chamber_inner
+        cg.A_exit = A_exit
+        cg.exit_diameter = D_exit
+        cg.expansion_ratio = expansion_ratio
+        
+        # Also update legacy sections if they exist (for backward compatibility)
+        if config.chamber is not None:
+            config.chamber.A_throat = A_throat
+            config.chamber.volume = V_chamber
+            config.chamber.Lstar = Lstar
+            config.chamber.length = L_chamber
+            setattr(config.chamber, 'chamber_inner_diameter', D_chamber_inner)
+            if hasattr(config.chamber, 'contraction_ratio'):
+                config.chamber.contraction_ratio = contraction_ratio
+            if hasattr(config.chamber, 'A_chamber'):
+                config.chamber.A_chamber = A_chamber
+        if config.nozzle is not None:
+            config.nozzle.A_throat = A_throat
+            config.nozzle.A_exit = A_exit
+            config.nozzle.expansion_ratio = expansion_ratio
+            if hasattr(config.nozzle, 'exit_diameter'):
+                config.nozzle.exit_diameter = D_exit
         
         if hasattr(config.combustion, 'cea'):
             config.combustion.cea.expansion_ratio = expansion_ratio
@@ -603,7 +620,9 @@ def run_layer1_optimization(
         config, P_O_start_psi_from_x, P_F_start_psi_from_x = apply_x_to_config(x, config_base)
         
         # Check constraints before evaluation
-        A_throat_check = config.chamber.A_throat
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        cg = ensure_chamber_geometry(config)
+        A_throat_check = cg.A_throat
         if hasattr(config, 'injector') and config.injector.type == "pintle":
             geom = config.injector.geometry
             A_lox_injector = geom.lox.n_orifices * np.pi * (geom.lox.d_orifice / 2) ** 2

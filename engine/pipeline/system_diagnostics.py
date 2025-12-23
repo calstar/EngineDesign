@@ -47,7 +47,9 @@ class SystemDiagnostics:
         M_exit = engine_results.get("M_exit", 0.0)
         
         # Diagnose each component
-        results["cf_analysis"] = self._diagnose_cf(Cf_actual, Cf_ideal, Cf_theoretical, F, Pc, self.config.chamber.A_throat)
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        cg = ensure_chamber_geometry(self.config)
+        results["cf_analysis"] = self._diagnose_cf(Cf_actual, Cf_ideal, Cf_theoretical, F, Pc, cg.A_throat)
         results["velocity_analysis"] = self._diagnose_velocity(v_exit, T_exit, P_exit, M_exit, engine_results)
         results["feed_system_analysis"] = self._diagnose_feed_system(P_tank_O, P_tank_F, engine_results)
         results["chamber_dynamics"] = self._diagnose_chamber_dynamics(engine_results)

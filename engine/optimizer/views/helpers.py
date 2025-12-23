@@ -565,9 +565,11 @@ def _show_engine_validation_checks(
     })
     
     # L* check
+    from engine.pipeline.config_schemas import ensure_chamber_geometry
+    cg = ensure_chamber_geometry(config)
     min_lstar = requirements.get("min_Lstar", 0.95)
     max_lstar = requirements.get("max_Lstar", 1.27)
-    actual_lstar = config.chamber.Lstar
+    actual_lstar = cg.Lstar
     lstar_ok = min_lstar <= actual_lstar <= max_lstar
     checks.append({
         "Check": "L* Constraint",
@@ -613,7 +615,7 @@ def _show_engine_validation_checks(
     
     # Geometry checks
     max_chamber_od = requirements.get("max_chamber_outer_diameter", 0.15)
-    actual_chamber_d = config.chamber.chamber_inner_diameter if hasattr(config.chamber, 'chamber_inner_diameter') and config.chamber.chamber_inner_diameter else np.sqrt(4.0 * config.chamber.volume / (np.pi * config.chamber.length))
+    actual_chamber_d = cg.chamber_diameter
     checks.append({
         "Check": "Chamber Diameter",
         "Target": f"< {max_chamber_od*1000:.0f} mm",
@@ -973,13 +975,15 @@ def _display_optimized_parameters(optimization_results: Dict[str, Any], config: 
     
     if not opt_params:
         # Extract from config
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        cg = ensure_chamber_geometry(config)
         opt_params = {
-            "A_throat": config.chamber.A_throat,
-            "A_exit": config.nozzle.A_exit,
-            "Lstar": config.chamber.Lstar,
-            "chamber_diameter": config.chamber.chamber_inner_diameter if hasattr(config.chamber, 'chamber_inner_diameter') else np.sqrt(4.0 * config.chamber.volume / (np.pi * config.chamber.length)),
-            "chamber_length": config.chamber.length,
-            "expansion_ratio": config.nozzle.expansion_ratio,
+            "A_throat": cg.A_throat,
+            "A_exit": cg.A_exit,
+            "Lstar": cg.Lstar,
+            "chamber_diameter": cg.chamber_diameter,
+            "chamber_length": cg.length,
+            "expansion_ratio": cg.expansion_ratio,
         }
     
     # Pintle parameters
