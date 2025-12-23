@@ -2,10 +2,12 @@ import { useState, useEffect } from 'react';
 import { ConfigUpload } from './components/ConfigUpload';
 import { ConfigEditor } from './components/ConfigEditor';
 import { ForwardMode } from './components/ForwardMode';
+import { TimeSeriesMode } from './components/TimeSeriesMode';
+import { CustomPlotter } from './components/CustomPlotter';
 import { getConfig, getHealth } from './api/client';
 import type { EngineConfig } from './api/client';
 
-type Tab = 'forward' | 'config';
+type Tab = 'forward' | 'timeseries' | 'plotter' | 'config';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('forward');
@@ -82,6 +84,26 @@ function App() {
               Forward Mode
             </button>
             <button
+              onClick={() => setActiveTab('timeseries')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'timeseries'
+                  ? 'border-purple-500 text-purple-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Time-Series Analysis
+            </button>
+            <button
+              onClick={() => setActiveTab('plotter')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'plotter'
+                  ? 'border-emerald-500 text-emerald-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Custom Plotter
+            </button>
+            <button
               onClick={() => setActiveTab('config')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === 'config'
@@ -122,6 +144,22 @@ function App() {
             )}
             <ForwardMode config={config} />
           </div>
+        )}
+
+        {activeTab === 'timeseries' && (
+          <div className="space-y-6">
+            {!config && (
+              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
+                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
+              </div>
+            )}
+            <TimeSeriesMode config={config} />
+          </div>
+        )}
+
+        {activeTab === 'plotter' && (
+          <CustomPlotter />
         )}
 
         {activeTab === 'config' && (

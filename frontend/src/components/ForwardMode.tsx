@@ -8,8 +8,8 @@ interface ForwardModeProps {
 }
 
 export function ForwardMode({ config }: ForwardModeProps) {
-  const [loxPressure, setLoxPressure] = useState<string>('1305');
-  const [fuelPressure, setFuelPressure] = useState<string>('974');
+  const [loxPressure, setLoxPressure] = useState<string>('750');
+  const [fuelPressure, setFuelPressure] = useState<string>('600');
   const [results, setResults] = useState<RunnerResults | null>(null);
   const [ambientPressure, setAmbientPressure] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -88,7 +88,7 @@ export function ForwardMode({ config }: ForwardModeProps) {
                 value={loxPressure}
                 onChange={(e) => setLoxPressure(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="1305"
+                placeholder="750"
                 className="w-full px-4 py-3 pr-12 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
               />
               <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] text-sm">
@@ -108,7 +108,7 @@ export function ForwardMode({ config }: ForwardModeProps) {
                 value={fuelPressure}
                 onChange={(e) => setFuelPressure(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="974"
+                placeholder="600"
                 className="w-full px-4 py-3 pr-12 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-colors"
               />
               <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[var(--color-text-secondary)] text-sm">

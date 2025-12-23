@@ -447,6 +447,7 @@ class PressTankConfig(BaseModel):
     For gaseous nitrogen (GN2) pressurization system.
     - dry_mass: COPV tank structure mass (walls, fittings)
     - initial_gas_mass: Initial N2 gas mass from COPV sizing
+    - free_volume_L: COPV free internal volume in liters
     """
     press_h: float = Field(gt=0, description="Pressurant tank height (internal cylindrical length) [m]")
     press_radius: float = Field(gt=0, description="Pressurant tank internal radius [m]")
@@ -454,6 +455,7 @@ class PressTankConfig(BaseModel):
     dry_mass: Optional[float] = Field(default=None, gt=0, description="COPV tank structure mass (tank walls only, no gas) [kg]")
     initial_gas_mass: Optional[float] = Field(default=None, gt=0, description="Initial N2 pressurant gas mass [kg] (from COPV sizing)")
     mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Use initial_gas_mass instead")
+    free_volume_L: Optional[float] = Field(default=4.5, gt=0, description="COPV free internal volume [L]")
 
 
 class FinsConfig(BaseModel):

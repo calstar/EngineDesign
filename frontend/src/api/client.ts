@@ -262,3 +262,158 @@ export async function evaluate(params: EvaluateRequest): Promise<ApiResponse<Eva
 export async function getHealth(): Promise<ApiResponse<{ status: string; config_loaded: boolean }>> {
   return request('/health');
 }
+
+
+// ============================================================================
+// Time-Series Types and API
+// ============================================================================
+
+export type ProfileType = 'linear' | 'exponential' | 'power';
+export type SegmentType = 'blowdown' | 'linear';
+
+// Profile parameters for simple generation
+export interface ProfileParams {
+  start_pressure_psi: number;
+  end_pressure_psi: number;
+  profile_type: ProfileType;
+  decay_constant?: number;  // For exponential
+  power?: number;           // For power
+}
+
+// Request for simple profile generation
+export interface GenerateProfileRequest {
+  duration_s: number;
+  n_steps: number;
+  lox_profile: ProfileParams;
+  fuel_profile: ProfileParams;
+}
+
+// Pressure segment for segment-based curve building
+export interface PressureSegment {
+  length_ratio: number;      // Fraction of total time (0-1)
+  type: SegmentType;
+  start_pressure_psi: number;
+  end_pressure_psi: number;
+  k: number;                 // Blowdown decay constant (0.1-3.0)
+}
+
+// Request for segment-based generation
+export interface SegmentsRequest {
+  duration_s: number;
+  n_points: number;
+  lox_segments: PressureSegment[];
+  fuel_segments: PressureSegment[];
+}
+
+// Time-series data returned from the API
+export interface TimeSeriesData {
+  time: number[];
+  P_tank_O_psi: number[];
+  P_tank_F_psi: number[];
+  Pc_psi: number[];
+  thrust_kN: number[];
+  Isp_s: number[];
+  MR: number[];
+  mdot_O_kg_s: number[];
+  mdot_F_kg_s: number[];
+  mdot_total_kg_s: number[];
+  cstar_actual_m_s: number[];
+  gamma: number[];
+  Cd_O?: number[];
+  Cd_F?: number[];
+  // Optional fields for additional plots
+  delta_P_injector_O_psi?: number[];
+  delta_P_injector_F_psi?: number[];
+  Lstar_mm?: number[];
+  recession_rate_ablative_um_s?: number[];
+  recession_rate_graphite_thermal_um_s?: number[];
+  recession_rate_graphite_oxidation_um_s?: number[];
+  recession_cumulative_ablative_mm?: number[];
+  recession_cumulative_graphite_thermal_mm?: number[];
+  recession_cumulative_graphite_oxidation_mm?: number[];
+  recession_cumulative_chamber_um?: number[];
+  recession_cumulative_throat_um?: number[];
+  V_chamber_m3?: number[];
+  A_throat_m2?: number[];
+  V_chamber_initial_m3?: number;
+  A_throat_initial_m2?: number;
+  // COPV pressure trace
+  copv_pressure_psi?: number[];
+  // Correlation matrix data
+  correlation_matrix?: number[][];
+  correlation_labels?: string[];
+}
+
+// Summary statistics
+export interface TimeSeriesSummary {
+  avg_thrust_kN: number;
+  peak_thrust_kN: number;
+  min_thrust_kN: number;
+  avg_Pc_psi: number;
+  peak_Pc_psi: number;
+  avg_Isp_s: number;
+  total_impulse_kNs: number;
+  total_propellant_kg: number;
+  burn_time_s: number;
+  // COPV summary metrics
+  copv_initial_pressure_psi?: number;
+  copv_initial_mass_kg?: number;
+  copv_min_margin_psi?: number;
+  copv_volume_L?: number;
+}
+
+// Response for generate endpoint
+export interface GenerateProfileResponse {
+  status: string;
+  data: TimeSeriesData;
+  summary: TimeSeriesSummary;
+}
+
+// Response for segments endpoint
+export interface SegmentsResponse {
+  status: string;
+  data: TimeSeriesData;
+  summary: TimeSeriesSummary;
+  lox_curve_preview: number[];
+  fuel_curve_preview: number[];
+}
+
+// Preview request for real-time curve visualization
+export interface PreviewCurveRequest {
+  n_points: number;
+  segments: PressureSegment[];
+}
+
+// Preview response
+export interface PreviewCurveResponse {
+  curve_psi: number[];
+  normalized_time: number[];
+}
+
+// Time-series API functions
+export async function generateTimeseries(
+  params: GenerateProfileRequest
+): Promise<ApiResponse<GenerateProfileResponse>> {
+  return request<GenerateProfileResponse>('/timeseries/generate', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function generateFromSegments(
+  params: SegmentsRequest
+): Promise<ApiResponse<SegmentsResponse>> {
+  return request<SegmentsResponse>('/timeseries/from-segments', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function previewCurve(
+  params: PreviewCurveRequest
+): Promise<ApiResponse<PreviewCurveResponse>> {
+  return request<PreviewCurveResponse>('/timeseries/preview-curve', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}

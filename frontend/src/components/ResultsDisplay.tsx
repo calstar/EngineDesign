@@ -173,7 +173,18 @@ export function ResultsDisplay({ results, isLoading, targetExitPressure }: Resul
           <SmallMetric label="Total Mass Flow" value={formatNumber(results.mdot_total, 3)} unit="kg/s" />
           <SmallMetric label="Oxidizer Flow" value={formatNumber(results.mdot_O, 3)} unit="kg/s" colorClass="text-cyan-400" />
           <SmallMetric label="Fuel Flow" value={formatNumber(results.mdot_F, 3)} unit="kg/s" colorClass="text-orange-400" />
-          <SmallMetric label="c* (Actual)" value={formatNumber(results.cstar_actual, 1)} unit="m/s" />
+          {/* c* with ideal display */}
+          <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+            <div className="text-xs text-[var(--color-text-secondary)] mb-1">c* (Actual)</div>
+            <div className="text-lg font-semibold text-[var(--color-text-primary)]">
+              {formatNumber(results.cstar_actual, 1)} <span className="text-sm font-normal text-[var(--color-text-secondary)]">m/s</span>
+              {results.cstar_ideal && (
+                <span className="text-xs font-normal text-[var(--color-text-secondary)] ml-1">
+                  (Ideal: {formatNumber(results.cstar_ideal, 1)})
+                </span>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* Nozzle/exit metrics */}
@@ -192,7 +203,18 @@ export function ResultsDisplay({ results, isLoading, targetExitPressure }: Resul
               )}
             </div>
           </div>
-          <SmallMetric label="Cf (Actual)" value={formatNumber(results.Cf_actual, 4)} unit="" colorClass="text-green-400" />
+          {/* Cf with ideal display */}
+          <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+            <div className="text-xs text-[var(--color-text-secondary)] mb-1">Cf (Actual)</div>
+            <div className="text-lg font-semibold text-green-400">
+              {formatNumber(results.Cf_actual, 4)}
+              {results.Cf_ideal && (
+                <span className="text-xs font-normal text-[var(--color-text-secondary)] ml-1">
+                  (Ideal: {formatNumber(results.Cf_ideal, 4)})
+                </span>
+              )}
+            </div>
+          </div>
         </div>
       </Section>
 
@@ -267,11 +289,6 @@ export function ResultsDisplay({ results, isLoading, targetExitPressure }: Resul
             </div>
             <div className="space-y-3">
               <div className="text-sm font-medium text-[var(--color-text-secondary)] mb-2">Efficiency</div>
-              <SmallMetric 
-                label="c* Ideal" 
-                value={formatNumber(results.cstar_ideal, 1)} 
-                unit="m/s" 
-              />
               <SmallMetric 
                 label="η c*" 
                 value={formatNumber(results.eta_cstar, 3)} 
