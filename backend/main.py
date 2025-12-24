@@ -17,7 +17,7 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from backend.routers import config, evaluate, timeseries, flight, geometry
+from backend.routers import config, evaluate, timeseries, flight, geometry, optimizer
 from backend.state import app_state
 from engine.pipeline.io import load_config
 
@@ -68,6 +68,7 @@ app.include_router(evaluate.router)
 app.include_router(timeseries.router)
 app.include_router(flight.router)
 app.include_router(geometry.router)
+app.include_router(optimizer.router)
 
 
 @app.get("/")

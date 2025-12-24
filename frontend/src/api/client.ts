@@ -567,3 +567,207 @@ export interface ChamberGeometryResponse {
 export async function getChamberGeometry(): Promise<ApiResponse<ChamberGeometryResponse>> {
   return request<ChamberGeometryResponse>('/geometry');
 }
+
+
+// ============================================================================
+// Optimizer Types and API
+// ============================================================================
+
+export interface DesignRequirements {
+  // Performance targets
+  target_thrust: number;
+  target_apogee?: number;
+  optimal_of_ratio: number;
+  target_burn_time: number;
+  
+  // Tank pressures
+  max_lox_tank_pressure_psi: number;
+  max_fuel_tank_pressure_psi: number;
+  max_P_tank_O?: number;
+  max_P_tank_F?: number;
+  
+  // Geometry constraints
+  max_engine_length: number;
+  max_chamber_outer_diameter: number;
+  max_nozzle_exit_diameter: number;
+  
+  // L* constraints
+  min_Lstar: number;
+  max_Lstar: number;
+  
+  // Stability requirements (new comprehensive analysis)
+  min_stability_score: number;
+  require_stable_state: boolean;
+  stability_margin_handicap: number;
+  
+  // Stability requirements (legacy margins)
+  min_stability_margin: number;
+  chugging_margin_min: number;
+  acoustic_margin_min: number;
+  feed_stability_min: number;
+  
+  // Tank capacities
+  lox_tank_capacity_kg?: number;
+  fuel_tank_capacity_kg?: number;
+  
+  // COPV
+  copv_free_volume_L?: number;
+  copv_free_volume_m3?: number;
+}
+
+export interface DesignRequirementsResponse {
+  requirements: DesignRequirements | null;
+}
+
+export interface SaveDesignRequirementsResponse {
+  status: string;
+  message: string;
+  requirements: DesignRequirements;
+}
+
+export interface Layer1Settings {
+  max_iterations: number;
+  thrust_tolerance: number;
+  target_burn_time?: number;
+}
+
+export interface Layer1StatusResponse {
+  running: boolean;
+  progress: number;
+  stage: string;
+  message: string;
+  has_results: boolean;
+  error: string | null;
+}
+
+export interface Layer1ProgressEvent {
+  type: 'status' | 'progress' | 'complete' | 'error';
+  progress?: number;
+  stage?: string;
+  message?: string;
+  results?: Layer1Results;
+  error?: string;
+  traceback?: string;
+}
+
+export interface Layer1Results {
+  performance: {
+    // Core performance
+    F?: number;           // Thrust [N]
+    MR?: number;          // O/F ratio
+    Isp?: number;         // Specific impulse [s]
+    Pc?: number;          // Chamber pressure [Pa]
+    P_exit?: number;      // Exit pressure [Pa]
+    Cf?: number;          // Thrust coefficient
+    Cf_actual?: number;   // Actual thrust coefficient
+    eta_cstar?: number;   // c* efficiency
+    mdot_total?: number;  // Total mass flow [kg/s]
+    mdot_O?: number;      // Oxidizer mass flow [kg/s]
+    mdot_F?: number;      // Fuel mass flow [kg/s]
+    
+    // Tank pressures
+    P_O_start_psi?: number;  // LOX tank pressure [psi]
+    P_F_start_psi?: number;  // Fuel tank pressure [psi]
+    
+    // Stability
+    stability_results?: {
+      stability_score?: number;
+      stability_state?: string;
+      chugging_margin?: number;
+      acoustic_margin?: number;
+      feed_margin?: number;
+      is_stable?: boolean;
+    };
+    
+    // Validation
+    thrust_check_passed?: boolean;
+    of_check_passed?: boolean;
+    stability_check_passed?: boolean;
+    pressure_candidate_valid?: boolean;
+    failure_reasons?: string[];
+    
+    // Additional fields
+    [key: string]: unknown;
+  };
+  validation: Record<string, unknown>;
+  geometry: Record<string, unknown>;
+  objective_history: Array<{
+    iteration: number;
+    objective: number;
+    best_objective: number;
+  }>;
+}
+
+export interface Layer1ResultsResponse {
+  status: string;
+  results: Layer1Results;
+}
+
+// Optimizer API functions
+export async function saveDesignRequirements(
+  requirements: DesignRequirements
+): Promise<ApiResponse<SaveDesignRequirementsResponse>> {
+  return request<SaveDesignRequirementsResponse>('/optimizer/design-requirements', {
+    method: 'POST',
+    body: JSON.stringify({ requirements }),
+  });
+}
+
+export async function getDesignRequirements(): Promise<ApiResponse<DesignRequirementsResponse>> {
+  return request<DesignRequirementsResponse>('/optimizer/design-requirements');
+}
+
+export async function getLayer1Status(): Promise<ApiResponse<Layer1StatusResponse>> {
+  return request<Layer1StatusResponse>('/optimizer/layer1/status');
+}
+
+export async function getLayer1Results(): Promise<ApiResponse<Layer1ResultsResponse>> {
+  return request<Layer1ResultsResponse>('/optimizer/layer1/results');
+}
+
+/**
+ * Run Layer 1 optimization with Server-Sent Events for real-time progress updates.
+ * Returns an EventSource that emits progress events.
+ */
+export function runLayer1Optimization(
+  settings: Layer1Settings,
+  onProgress: (event: Layer1ProgressEvent) => void,
+  onError: (error: string) => void
+): EventSource {
+  const params = new URLSearchParams({
+    max_iterations: settings.max_iterations.toString(),
+    thrust_tolerance: settings.thrust_tolerance.toString(),
+  });
+  
+  if (settings.target_burn_time) {
+    params.append('target_burn_time', settings.target_burn_time.toString());
+  }
+  
+  const url = `${API_BASE}/optimizer/layer1?${params.toString()}`;
+  
+  const eventSource = new EventSource(url);
+  
+  eventSource.onmessage = (event) => {
+    try {
+      const data: Layer1ProgressEvent = JSON.parse(event.data);
+      onProgress(data);
+      
+      // Close connection on completion or error
+      if (data.type === 'complete' || data.type === 'error') {
+        eventSource.close();
+      }
+    } catch (err) {
+      console.error('Error parsing SSE event:', err);
+      onError(err instanceof Error ? err.message : 'Failed to parse progress event');
+      eventSource.close();
+    }
+  };
+  
+  eventSource.onerror = (err) => {
+    console.error('SSE connection error:', err);
+    onError('Connection to server lost');
+    eventSource.close();
+  };
+  
+  return eventSource;
+}

@@ -597,14 +597,25 @@ class PintleEngineRunner:
                 Pa = P_ambient if P_ambient is not None else 101325.0  # Ambient pressure
                 
                 # Calculate current expansion ratio (for 3D CEA cache)
-                eps_current = config_copy.nozzle.A_exit / config_copy.chamber.A_throat
+                cg = config_copy.chamber_geometry
+                eps_current = cg.A_exit / cg.A_throat
+                
+                # Create a temporary NozzleConfig for backward compatibility with calculate_thrust
+                from engine.pipeline.config_schemas import NozzleConfig
+                nozzle_cfg = NozzleConfig(
+                    A_throat=cg.A_throat,
+                    A_exit=cg.A_exit,
+                    expansion_ratio=cg.expansion_ratio,
+                    exit_diameter=cg.exit_diameter,
+                    efficiency=cg.nozzle_efficiency
+                )
                 
                 thrust_results = calculate_thrust(
                     Pc,
                     diagnostics["MR"],
                     diagnostics["mdot_total"],
                     self.cea_cache,
-                    config_copy.nozzle,
+                    nozzle_cfg,
                     Pa,
                     eps=eps_current  # Pass current expansion ratio
                 )
@@ -642,9 +653,9 @@ class PintleEngineRunner:
                 
                 # Store current geometry
                 results["Lstar"][i] = solver_temp.Lstar
-                results["V_chamber"][i] = config_copy.chamber.volume
-                results["A_throat"][i] = config_copy.chamber.A_throat
-                results["A_exit"][i] = config_copy.nozzle.A_exit
+                results["V_chamber"][i] = cg.volume
+                results["A_throat"][i] = cg.A_throat
+                results["A_exit"][i] = cg.A_exit
                 results["eps"][i] = eps_current  # Store expansion ratio
                 results["recession_chamber"][i] = cumulative_recession_chamber
                 results["recession_throat"][i] = cumulative_recession_throat
@@ -694,7 +705,7 @@ class PintleEngineRunner:
                             throat_temperature=Tc * 0.85,  # Approximate throat temperature
                             gas_temperature=Tc,
                             graphite_config=graphite_cfg,
-                            throat_area=config_copy.chamber.A_throat,
+                            throat_area=cg.A_throat,
                             pressure=Pc,
                         )
                         
@@ -771,12 +782,12 @@ class PintleEngineRunner:
                     )
                     
                     # Update config for next iteration
-                    config_copy.chamber.volume = V_new
-                    config_copy.chamber.A_throat = A_throat_new
+                    config_copy.chamber_geometry.volume = V_new
+                    config_copy.chamber_geometry.A_throat = A_throat_new
                     
                     # Update L* if specified
-                    if config_copy.chamber.Lstar is not None:
-                        config_copy.chamber.Lstar = V_new / A_throat_new
+                    if config_copy.chamber_geometry.Lstar is not None:
+                        config_copy.chamber_geometry.Lstar = V_new / A_throat_new
                     
                     # Update nozzle exit geometry if nozzle is ablative
                     if ablative_cfg and ablative_cfg.enabled and ablative_cfg.nozzle_ablative:
@@ -793,7 +804,7 @@ class PintleEngineRunner:
                         )
                         
                         # Update nozzle config
-                        config_copy.nozzle.A_exit = A_exit_new
+                        config_copy.chamber_geometry.A_exit = A_exit_new
                         
                         # Expansion ratio will be recalculated on next iteration
                 

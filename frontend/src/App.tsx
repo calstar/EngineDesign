@@ -6,10 +6,11 @@ import { TimeSeriesMode } from './components/TimeSeriesMode';
 import { CustomPlotter } from './components/CustomPlotter';
 import { FlightSimulation } from './components/FlightSimulation';
 import { ChamberGeometry } from './components/ChamberGeometry';
+import { Optimizer } from './components/Optimizer';
 import { getConfig, getHealth } from './api/client';
 import type { EngineConfig } from './api/client';
 
-type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'config';
+type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'optimizer' | 'config';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('forward');
@@ -126,6 +127,16 @@ function App() {
               Chamber Geometry
             </button>
             <button
+              onClick={() => setActiveTab('optimizer')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'optimizer'
+                  ? 'border-yellow-500 text-yellow-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Optimizer
+            </button>
+            <button
               onClick={() => setActiveTab('config')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === 'config'
@@ -205,6 +216,18 @@ function App() {
               </div>
             )}
             <ChamberGeometry config={config} />
+          </div>
+        )}
+
+        {activeTab === 'optimizer' && (
+          <div className="space-y-6">
+            {!config && (
+              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
+                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
+              </div>
+            )}
+            <Optimizer config={config} />
           </div>
         )}
 

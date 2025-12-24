@@ -566,6 +566,49 @@ class ThrustConfig(BaseModel):
     burn_time: float = Field(gt=0, description="Burn time [s]")
 
 
+class DesignRequirementsConfig(BaseModel):
+    """Design requirements for optimizer"""
+    # Performance targets
+    target_thrust: float = Field(default=7000.0, gt=0, description="Target peak thrust [N]")
+    target_apogee: Optional[float] = Field(default=3048.0, gt=0, description="Target apogee above ground level [m]")
+    optimal_of_ratio: float = Field(default=2.3, gt=0, description="Target oxidizer-to-fuel mixture ratio")
+    target_burn_time: float = Field(default=10.0, gt=0, description="Target burn time [s]")
+    
+    # Tank pressures
+    max_lox_tank_pressure_psi: float = Field(default=700.0, gt=0, description="Maximum LOX tank pressure [psi]")
+    max_fuel_tank_pressure_psi: float = Field(default=850.0, gt=0, description="Maximum fuel tank pressure [psi]")
+    max_P_tank_O: Optional[float] = Field(default=None, gt=0, description="Maximum LOX tank pressure [Pa] (auto-converted from psi if None)")
+    max_P_tank_F: Optional[float] = Field(default=None, gt=0, description="Maximum fuel tank pressure [Pa] (auto-converted from psi if None)")
+    
+    # Geometry constraints
+    max_engine_length: float = Field(default=0.5, gt=0, description="Maximum total engine length (chamber + nozzle) [m]")
+    max_chamber_outer_diameter: float = Field(default=0.15, gt=0, description="Maximum chamber outer diameter [m]")
+    max_nozzle_exit_diameter: float = Field(default=0.101, gt=0, description="Maximum nozzle exit diameter [m]")
+    
+    # L* constraints
+    min_Lstar: float = Field(default=0.95, gt=0, description="Minimum characteristic length [m]")
+    max_Lstar: float = Field(default=1.27, gt=0, description="Maximum characteristic length [m]")
+    
+    # Stability requirements (new comprehensive analysis)
+    min_stability_score: float = Field(default=0.75, ge=0, le=1, description="Minimum stability score (0-1)")
+    require_stable_state: bool = Field(default=True, description="Require 'stable' state (not just 'marginal')")
+    stability_margin_handicap: float = Field(default=0.0, ge=0, le=1, description="Stability requirement relaxation factor (0=strict, 1=any)")
+    
+    # Stability requirements (legacy margins)
+    min_stability_margin: float = Field(default=1.2, gt=0, description="Legacy minimum overall stability margin")
+    chugging_margin_min: float = Field(default=0.2, ge=0, description="Minimum chugging stability margin")
+    acoustic_margin_min: float = Field(default=0.1, ge=0, description="Minimum acoustic stability margin")
+    feed_stability_min: float = Field(default=0.15, ge=0, description="Minimum feed system stability margin")
+    
+    # Tank capacities (for optimizer bounds)
+    lox_tank_capacity_kg: Optional[float] = Field(default=None, gt=0, description="LOX tank capacity [kg]")
+    fuel_tank_capacity_kg: Optional[float] = Field(default=None, gt=0, description="Fuel tank capacity [kg]")
+    
+    # COPV
+    copv_free_volume_L: Optional[float] = Field(default=4.5, gt=0, description="COPV free internal volume [L]")
+    copv_free_volume_m3: Optional[float] = Field(default=None, gt=0, description="COPV free volume [m³] (auto-converted from L if None)")
+
+
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
     fluids: dict[str, FluidConfig]
@@ -592,6 +635,7 @@ class PintleEngineConfig(BaseModel):
     rocket: Optional[RocketConfig] = Field(default=None, description="Rocket configuration for flight simulation")
     environment: Optional[EnvironmentConfig] = Field(default=None, description="Environment configuration for flight simulation")
     thrust: Optional[ThrustConfig] = Field(default=None, description="Thrust configuration for flight simulation")
+    design_requirements: Optional[DesignRequirementsConfig] = Field(default=None, description="Design requirements for optimizer")
 
     @field_validator("feed_system", "discharge")
     @classmethod

@@ -103,18 +103,13 @@ def create_layer1_apply_x_to_config(
         h_gap = float(np.clip(x[5], bounds[5][0], bounds[5][1]))
         n_orifices = int(round(np.clip(x[6], bounds[6][0], bounds[6][1])))
         d_orifice = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
-        # NOTE: Indices 8 and 9 in `x` were previously used for ablative and graphite
-        # thickness optimization. Layer 1 is now strictly geometry + initial tank
-        # pressure only, so we intentionally ignore these values here to keep the
-        # optimizer dimensionality stable while removing thermal‑protection coupling.
-        ablative_thickness = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
-        graphite_thickness = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         
         # CRITICAL: Extract initial pressures (absolute values in psi).
         # These are the ONLY pressure‑related quantities optimized at
         # this layer; no time‑varying curves or segments are created.
-        P_O_start_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
-        P_F_start_psi = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
+        # Note: Ablative/graphite thickness handled in downstream layers (Layer 2/3).
+        P_O_start_psi = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        P_F_start_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         
         # Chamber geometry
         V_chamber = Lstar * A_throat
@@ -463,12 +458,6 @@ def run_layer1_optimization(
     if hasattr(config_base, 'combustion') and hasattr(config_base.combustion, 'efficiency'):
         config_base.combustion.efficiency.use_turbulence_coupling = True
     
-    # Get initial ablative/graphite thicknesses
-    ablative_cfg = config_base.ablative_cooling if hasattr(config_base, 'ablative_cooling') and config_base.ablative_cooling else None
-    graphite_cfg = config_base.graphite_insert if hasattr(config_base, 'graphite_insert') and config_base.graphite_insert else None
-    ablative_init = ablative_cfg.initial_thickness if ablative_cfg and ablative_cfg.enabled else 0.008
-    graphite_init = graphite_cfg.initial_thickness if graphite_cfg and graphite_cfg.enabled else 0.006
-    
     # Calculate initial A_throat guess
     Pc_est_psi = 580.0
     Pc_est = Pc_est_psi * psi_to_Pa
@@ -508,10 +497,8 @@ def run_layer1_optimization(
         (0.0003, 0.001),            # [5] h_gap - tightened from (0.0003, 0.0015)
         (10, 18),                   # [6] n_orifices - tightened from (6, 20)
         (0.0012, 0.0025),           # [7] d_orifice - KEY: tightened from (0.001, 0.004)
-        (0.003, 0.020),             # [8] ablative_thickness
-        (0.003, 0.015),             # [9] graphite_thickness
-        (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),    # [10] P_O_start_psi
-        (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [11] P_F_start_psi
+        (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),    # [8] P_O_start_psi
+        (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [9] P_F_start_psi
     ]
     
     # Calculate initial guess - sized for ~1.7 kg/s LOX flow at ΔP≈1.5 MPa
@@ -542,8 +529,6 @@ def run_layer1_optimization(
         default_h_gap,
         default_n_orifices,
         default_d_orifice,
-        np.clip(ablative_init, 0.003, 0.020),
-        np.clip(graphite_init, 0.003, 0.015),
         P_O_start_init,
         P_F_start_init,
     ])
@@ -664,9 +649,9 @@ def run_layer1_optimization(
         
         test_runner = PintleEngineRunner(config_runner)
         
-        # Use x[10] and x[11] directly as pressures
-        P_O_psi = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
-        P_F_psi = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
+        # Use x[8] and x[9] directly as pressures
+        P_O_psi = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        P_F_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         P_O_test = P_O_psi * psi_to_Pa
         P_F_test = P_F_psi * psi_to_Pa
         
@@ -927,10 +912,8 @@ def run_layer1_optimization(
         h_gap_curr = float(np.clip(x[5], bounds[5][0], bounds[5][1]))
         n_orifices_curr = int(round(np.clip(x[6], bounds[6][0], bounds[6][1])))
         d_orifice_curr = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
-        ablative_thickness_curr = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
-        graphite_thickness_curr = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
-        P_O_start_psi_hist = float(np.clip(x[10], bounds[10][0], bounds[10][1]))
-        P_F_start_psi_hist = float(np.clip(x[11], bounds[11][0], bounds[11][1]))
+        P_O_start_psi_hist = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
+        P_F_start_psi_hist = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
         
         D_inner_curr = D_outer_curr - TOTAL_WALL_THICKNESS_M
         if D_inner_curr <= 0:
@@ -955,8 +938,6 @@ def run_layer1_optimization(
             "h_gap": h_gap_curr,
             "n_orifices": n_orifices_curr,
             "d_orifice": d_orifice_curr,
-            "ablative_thickness": ablative_thickness_curr,
-            "graphite_thickness": graphite_thickness_curr,
             "P_O_start_psi": P_O_start_psi_hist,
             "P_F_start_psi": P_F_start_psi_hist,
             # Performance metrics
@@ -1261,12 +1242,12 @@ def run_layer1_optimization(
     if "best_pressures" in opt_state and opt_state["best_pressures"] is not None:
         P_O_initial, P_F_initial = opt_state["best_pressures"]
     else:
-        if best_x is not None and len(best_x) > 10:
-            P_O_initial = float(np.clip(best_x[10], bounds[10][0], bounds[10][1])) * psi_to_Pa
+        if best_x is not None and len(best_x) > 8:
+            P_O_initial = float(np.clip(best_x[8], bounds[8][0], bounds[8][1])) * psi_to_Pa
         else:
             P_O_initial = max_lox_P_psi * psi_to_Pa * 0.95
-        if best_x is not None and len(best_x) > 11:
-            P_F_initial = float(np.clip(best_x[11], bounds[11][0], bounds[11][1])) * psi_to_Pa
+        if best_x is not None and len(best_x) > 9:
+            P_F_initial = float(np.clip(best_x[9], bounds[9][0], bounds[9][1])) * psi_to_Pa
         else:
             P_F_initial = max_fuel_P_psi * psi_to_Pa * 0.95
     
@@ -1309,6 +1290,19 @@ def run_layer1_optimization(
                 initial_performance["Isp"] = eval_results["Isp"]
             if "Pc" in eval_results:
                 initial_performance["Pc"] = eval_results["Pc"]
+            # Copy mass flow rates and efficiency metrics
+            if "mdot_total" in eval_results:
+                initial_performance["mdot_total"] = eval_results["mdot_total"]
+            if "mdot_O" in eval_results:
+                initial_performance["mdot_O"] = eval_results["mdot_O"]
+            if "mdot_F" in eval_results:
+                initial_performance["mdot_F"] = eval_results["mdot_F"]
+            if "eta_cstar" in eval_results:
+                initial_performance["eta_cstar"] = eval_results["eta_cstar"]
+            if "cstar_actual" in eval_results:
+                initial_performance["cstar_actual"] = eval_results["cstar_actual"]
+            if "cstar_ideal" in eval_results:
+                initial_performance["cstar_ideal"] = eval_results["cstar_ideal"]
         except Exception:
             # If re-evaluation fails, calculate Cf from available data
             F_val = initial_performance.get("F", 0)
@@ -1425,11 +1419,15 @@ def run_layer1_optimization(
     final_performance["of_check_passed"] = of_check_passed
     final_performance["stability_check_passed"] = stability_check_passed
     final_performance["failure_reasons"] = failure_reasons
+    # Add individual stability margins at root level for easy access
+    final_performance["chugging_margin"] = chugging_margin
+    final_performance["acoustic_margin"] = acoustic_margin
+    final_performance["feed_margin"] = feed_margin
     
     # Extract optimized pressures
-    if len(best_x) > 10:
-        P_O_start_optimized_psi = float(np.clip(best_x[10], bounds[10][0], bounds[10][1]))
-        P_F_start_optimized_psi = float(np.clip(best_x[11], bounds[11][0], bounds[11][1]))
+    if len(best_x) >= 10:
+        P_O_start_optimized_psi = float(np.clip(best_x[8], bounds[8][0], bounds[8][1]))
+        P_F_start_optimized_psi = float(np.clip(best_x[9], bounds[9][0], bounds[9][1]))
         final_performance["P_O_start_psi"] = P_O_start_optimized_psi
         final_performance["P_F_start_psi"] = P_F_start_optimized_psi
         final_performance["P_O_start_ratio"] = P_O_start_optimized_psi / max_lox_P_psi if max_lox_P_psi > 0 else 0.0

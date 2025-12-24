@@ -834,9 +834,9 @@ def calculate_thrust(
         try:
             # Get Lstar from config if available
             Lstar = None
-            if config is not None and hasattr(config, 'chamber'):
-                V_chamber = getattr(config.chamber, 'volume', None)
-                A_throat = getattr(config.chamber, 'A_throat', None)
+            if config is not None and hasattr(config, 'chamber_geometry'):
+                V_chamber = getattr(config.chamber_geometry, 'volume', None)
+                A_throat = getattr(config.chamber_geometry, 'A_throat', None)
                 if V_chamber is not None and A_throat is not None and A_throat > 0:
                     Lstar = V_chamber / A_throat
             

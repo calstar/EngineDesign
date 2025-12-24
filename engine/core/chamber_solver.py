@@ -364,7 +364,7 @@ class ChamberSolver:
                             #     f"Residual at Pc_min: {residual_min:.4f} kg/s, at Pc_max: {residual_max:.4f} kg/s. "
                             #     f"\nDiagnostics at Pc_max ({Pc_max/1e6:.2f} MPa):"
                             #     f"\n  - Supply: {mdot_supply_test:.4f} kg/s (mdot_O={mdot_O_test:.4f}, mdot_F={mdot_F_test:.4f})"
-                            #     f"\n  - Demand: {mdot_demand_test:.4f} kg/s (c*_actual={cstar_actual_test:.1f} m/s, At={self.config.chamber.A_throat*1e6:.2f} mm²)"
+                            #     f"\n  - Demand: {mdot_demand_test:.4f} kg/s (c*_actual={cstar_actual_test:.1f} m/s, At={self.config.chamber_geometry.A_throat*1e6:.2f} mm²)"
                             #     f"\n  - Estimated Pc needed: {Pc_estimate/1e6:.2f} MPa (vs Pc_max={Pc_max/1e6:.2f} MPa)"
                             #     f"\nPossible fixes:"
                             #     f"\n  1. Reduce injector orifice areas (currently oversized)"
@@ -489,6 +489,9 @@ class ChamberSolver:
         eps_current = cg.A_exit / cg.A_throat if cg.A_throat and cg.A_exit and cg.A_throat > 0 else cg.expansion_ratio
         cea_props = self.cea_cache.eval(MR, Pc_val, 101325.0, eps_current)
         
+        # Calculate total mass flow rate (needed for various calculations below)
+        mdot_total = mdot_O + mdot_F
+        
         # Calculate reaction progress through chamber (if finite-rate chemistry enabled)
         reaction_progress = None
         if getattr(self.config.combustion.efficiency, 'use_finite_rate_chemistry', True):
@@ -518,7 +521,7 @@ class ChamberSolver:
                 # tau = V_chamber * rho / mdot_total = L* * rho * A_throat / mdot_total
                 # NOT L* / sqrt(gamma * R * T) which is a time scale related to sound speed, not residence time!
                 rho_chamber = Pc_val / (cea_props["R"] * cea_props["Tc"]) if cea_props["R"] > 0 and cea_props["Tc"] > 0 else 1.0
-                # Use actual mdot_total from closure (already calculated above at line 530)
+                # Use actual mdot_total from closure (calculated above)
                 cg = ensure_chamber_geometry(self.config)
                 tau_residence_correct = self.Lstar * rho_chamber * cg.A_throat / mdot_total if mdot_total > 0 else 0.001
                 reaction_progress = {
@@ -539,7 +542,6 @@ class ChamberSolver:
         # Use advanced combustion efficiency model if enabled
         use_advanced = getattr(self.config.combustion.efficiency, 'use_advanced_model', True)
         advanced_params = None
-        mdot_total = mdot_O + mdot_F
         
         if use_advanced:
             geometry = self._get_chamber_geometry()
@@ -929,7 +931,7 @@ class ChamberSolver:
         return float(max(diameter, 1e-5))
 
     def _get_chamber_geometry(self) -> Dict[str, float]:
-        chamber_cfg = self.config.chamber
+        chamber_cfg = self.config.chamber_geometry
         regen_cfg = self.config.regen_cooling
 
         # Use chamber.length if provided (this is the physical chamber length, NOT L*)
