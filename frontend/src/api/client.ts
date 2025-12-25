@@ -702,6 +702,7 @@ export interface Layer1Results {
     objective: number;
     best_objective: number;
   }>;
+  iteration_history?: Array<Record<string, unknown>>;
 }
 
 export interface Layer1ResultsResponse {

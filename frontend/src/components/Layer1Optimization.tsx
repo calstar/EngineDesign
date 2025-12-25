@@ -96,6 +96,141 @@ function ValidationCard({ label, passed }: { label: string; passed: boolean | un
   );
 }
 
+// Helper component for geometry results table
+function GeometryTable({ geometry }: { geometry: Record<string, any> }) {
+  const params = [
+    { key: 'A_throat', label: 'Throat Area', unit: 'mm²', scale: 1e6, decimals: 2 },
+    { key: 'Lstar', label: 'Characteristic Length (L*)', unit: 'mm', scale: 1000, decimals: 1 },
+    { key: 'chamber_length', label: 'Chamber Length', unit: 'mm', scale: 1000, decimals: 1 },
+    { key: 'chamber_diameter', label: 'Chamber Inner Diameter', unit: 'mm', scale: 1000, decimals: 1 },
+    { key: 'A_exit', label: 'Exit Area', unit: 'mm²', scale: 1e6, decimals: 2 },
+    { key: 'expansion_ratio', label: 'Expansion Ratio', unit: '', scale: 1, decimals: 2 },
+    { key: 'd_pintle_tip', label: 'Pintle Tip Diameter', unit: 'mm', scale: 1000, decimals: 2 },
+    { key: 'h_gap', label: 'Pintle Gap Height', unit: 'mm', scale: 1000, decimals: 3 },
+    { key: 'n_orifices', label: 'Number of Orifices', unit: '', scale: 1, decimals: 0 },
+    { key: 'd_orifice', label: 'Orifice Diameter', unit: 'mm', scale: 1000, decimals: 3 },
+  ];
+
+  return (
+    <div className="bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg overflow-hidden">
+      <table className="w-full text-sm text-left text-[var(--color-text-primary)]">
+        <thead className="text-xs text-[var(--color-text-secondary)] uppercase bg-[var(--color-bg-secondary)] border-b border-[var(--color-border)]">
+          <tr>
+            <th className="px-4 py-3 font-semibold">Parameter</th>
+            <th className="px-4 py-3 font-semibold text-right">Value</th>
+            <th className="px-4 py-3 font-semibold">Unit</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-[var(--color-border)]">
+          {params.map((p) => {
+            const val = geometry[p.key];
+            if (val === undefined || val === null) return null;
+            const displayVal = typeof val === 'number' ? (val * p.scale).toFixed(p.decimals) : val;
+            return (
+              <tr key={p.key} className="hover:bg-blue-500/5 transition-colors">
+                <td className="px-4 py-2.5 text-[var(--color-text-secondary)]">{p.label}</td>
+                <td className="px-4 py-2.5 text-right font-mono font-medium text-blue-400">{displayVal}</td>
+                <td className="px-4 py-2.5 text-xs text-[var(--color-text-secondary)]">{p.unit}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Helper component for parameter convergence plots
+function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Array<Record<string, unknown>> }) {
+  // Extract parameter data
+  const getVar = (h: Record<string, unknown>, key: string, xIdx: number, defaultVal: number, scale: number = 1.0): number => {
+    if (h[key] !== undefined && h[key] !== null && typeof h[key] === 'number') {
+      return (h[key] as number) * scale;
+    } else if (h.x && Array.isArray(h.x) && h.x.length > xIdx && typeof h.x[xIdx] === 'number') {
+      return (h.x[xIdx] as number) * scale;
+    }
+    return defaultVal * scale;
+  };
+
+  const iterations = iterationHistory.map((h, i) => (h.iteration as number | undefined) ?? i);
+  
+  // Parameter definitions: [key, label, unit, xIndex, default, scale]
+  const parameters = [
+    ['A_throat', 'Throat Area', 'mm²', 0, 0.001, 1e6],
+    ['Lstar', 'L*', 'mm', 1, 1.0, 1000],
+    ['expansion_ratio', 'Expansion Ratio', '', 2, 10.0, 1.0],
+    ['D_chamber_outer', 'Chamber Outer Diameter', 'mm', 3, 0.1, 1000],
+    ['D_chamber_inner', 'Chamber Inner Diameter', 'mm', 3, 0.1, 1000],
+    ['d_pintle_tip', 'Pintle Tip Diameter', 'mm', 4, 0.015, 1000],
+    ['h_gap', 'Gap Height', 'mm', 5, 0.0006, 1000],
+    ['n_orifices', 'Number of Orifices', '', 6, 16, 1.0],
+    ['d_orifice', 'Orifice Diameter', 'mm', 7, 0.003, 1000],
+    ['P_O_start_psi', 'LOX Tank Pressure', 'psi', 8, 500, 1.0],
+    ['P_F_start_psi', 'Fuel Tank Pressure', 'psi', 9, 600, 1.0],
+  ] as const;
+
+  // Extract data for each parameter
+  const plotData = iterations.map((iter, idx) => {
+    const h = iterationHistory[idx];
+    const point: Record<string, number | string> = { iteration: iter };
+    parameters.forEach(([key, , , xIdx, defaultVal, scale]) => {
+      if (key === 'D_chamber_inner') {
+        // Special handling for inner diameter (derived from outer)
+        const outer = getVar(h, 'D_chamber_outer', 3, 0.1, 1.0);
+        const inner = (h.D_chamber_inner as number) ?? (outer - 0.0254);
+        point[key] = inner * 1000;
+      } else if (key === 'n_orifices') {
+        point[key] = Math.round(getVar(h, key, xIdx, defaultVal, scale));
+      } else {
+        point[key] = getVar(h, key, xIdx, defaultVal, scale);
+      }
+    });
+    return point;
+  });
+
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {parameters.map(([key, label, unit]) => (
+        <div key={key} className="bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg p-4">
+          <h5 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">
+            {label} {unit && `(${unit})`}
+          </h5>
+          <ResponsiveContainer width="100%" height={200}>
+            <LineChart data={plotData} margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+              <XAxis 
+                dataKey="iteration"
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 9 }}
+              />
+              <YAxis 
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 9 }}
+              />
+              <Tooltip 
+                contentStyle={{
+                  backgroundColor: 'var(--color-bg-secondary)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: '0.5rem',
+                  fontSize: '12px'
+                }}
+              />
+              <Line 
+                type="monotone" 
+                dataKey={key} 
+                stroke="#3b82f6" 
+                strokeWidth={1.5}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
   const [settings, setSettings] = useState<Layer1Settings>({
     max_iterations: 80,
@@ -113,6 +248,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
     objective: number;
     best_objective: number;
   }>>([]);
+  const [showParameterPlots, setShowParameterPlots] = useState(false);
 
   // Check status on mount
   useEffect(() => {
@@ -333,6 +469,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                     stroke="#3b82f6" 
                     strokeWidth={2}
                     dot={{ r: 3 }}
+                    isAnimationActive={false}
                   />
                   <Line 
                     type="monotone" 
@@ -342,6 +479,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                     strokeWidth={2}
                     strokeDasharray="5 5"
                     dot={false}
+                    isAnimationActive={false}
                   />
                 </LineChart>
               </ResponsiveContainer>
@@ -352,7 +490,29 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                 </p>
               </div>
             )}
+            
+            {/* Button to show parameter plots */}
+            {results?.iteration_history && results.iteration_history.length > 0 && (
+              <div className="mt-4 flex justify-center">
+                <button
+                  onClick={() => setShowParameterPlots(!showParameterPlots)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors text-sm font-medium"
+                >
+                  {showParameterPlots ? '▼ Hide Parameter Plots' : '▶ Show Parameter Convergence Plots'}
+                </button>
+              </div>
+            )}
           </div>
+          
+          {/* Parameter Convergence Plots */}
+          {showParameterPlots && results?.iteration_history && results.iteration_history.length > 0 && (
+            <div className="mt-6 border-t border-[var(--color-border)] pt-6">
+              <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-4">
+                Parameter Convergence History
+              </h4>
+              <ParameterConvergencePlots iterationHistory={results.iteration_history} />
+            </div>
+          )}
         </div>
       )}
 
@@ -510,6 +670,14 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               );
             })()}
           </div>
+
+          {/* Optimized Geometry */}
+          {results.geometry && Object.keys(results.geometry).length > 0 && (
+            <div className="mb-6">
+              <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-3">📐 Optimized Geometry</h4>
+              <GeometryTable geometry={results.geometry} />
+            </div>
+          )}
 
           {/* Validation Status */}
           <div className="mb-6">

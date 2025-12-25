@@ -351,6 +351,11 @@ class CombustionEfficiencyConfig(BaseModel):
         default=False,
         description="Use advanced physics-based efficiency model (kinetics, mixing, turbulence)"
     )
+    Pc_gate: float = Field(
+        default=1000000.0,
+        ge=0,
+        description="Chamber pressure gate for advanced model [Pa]. Below this pressure, simple model is used for stability."
+    )
     # Finite-rate chemistry and reaction modeling
     use_finite_rate_chemistry: bool = Field(
         default=True,

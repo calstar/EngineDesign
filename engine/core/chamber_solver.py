@@ -158,13 +158,23 @@ class ChamberSolver:
             "turbulence_intensity": diagnostics.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
         }
 
+        # Decide which efficiency model to use based on pressure gating
+        pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
+        use_advanced = self.config.combustion.efficiency.use_advanced_model
+        
+        if use_advanced and Pc_val < pc_gate:
+            # Below gate pressure, use simple model for stability
+            if Pc_val < 1.1e5: # Only log at bottom bound (Pc_min) to avoid spam during iterations
+                print(f"[ETA_GATE] Pc={Pc_val/1e6:.2f} MPa < Pc_gate={pc_gate/1e6:.2f} MPa -> using simple eta_cstar")
+            use_advanced = False
+
         eta = eta_cstar(
             self.Lstar,
             self.config.combustion.efficiency,
             self.spray_quality_good,
             mixture_efficiency=mixture_eff,
             cooling_efficiency=cooling_eff,
-            use_advanced_model=True,
+            use_advanced_model=use_advanced,
             advanced_params=advanced_params,
         )
         
@@ -359,36 +369,37 @@ class ChamberSolver:
                             cg = ensure_chamber_geometry(self.config)
                             Pc_estimate = mdot_supply_test * cstar_actual_test / cg.A_throat
                             
-                            # raise ValueError(
-                            #     f"No solution: Supply > Demand at all Pc. "
-                            #     f"Residual at Pc_min: {residual_min:.4f} kg/s, at Pc_max: {residual_max:.4f} kg/s. "
-                            #     f"\nDiagnostics at Pc_max ({Pc_max/1e6:.2f} MPa):"
-                            #     f"\n  - Supply: {mdot_supply_test:.4f} kg/s (mdot_O={mdot_O_test:.4f}, mdot_F={mdot_F_test:.4f})"
-                            #     f"\n  - Demand: {mdot_demand_test:.4f} kg/s (c*_actual={cstar_actual_test:.1f} m/s, At={self.config.chamber_geometry.A_throat*1e6:.2f} mm²)"
-                            #     f"\n  - Estimated Pc needed: {Pc_estimate/1e6:.2f} MPa (vs Pc_max={Pc_max/1e6:.2f} MPa)"
-                            #     f"\nPossible fixes:"
-                            #     f"\n  1. Reduce injector orifice areas (currently oversized)"
-                            #     f"\n  2. Increase throat area (currently undersized)"
-                            #     f"\n  3. Increase P_tank_O to allow higher Pc_max (if {Pc_estimate/1e6:.2f} MPa is achievable)"
-                            #     f"\n  4. Check combustion efficiency (low efficiency reduces demand)"
-                            # )
+                            raise ValueError(
+                                f"No solution: Supply > Demand at all Pc. "
+                                f"Residual at Pc_min: {residual_min:.4f} kg/s, at Pc_max: {residual_max:.4f} kg/s. "
+                                f"\nDiagnostics at Pc_max ({Pc_max/1e6:.2f} MPa):"
+                                f"\n  - Supply: {mdot_supply_test:.4f} kg/s (mdot_O={mdot_O_test:.4f}, mdot_F={mdot_F_test:.4f})"
+                                f"\n  - Demand: {mdot_demand_test:.4f} kg/s (c*_actual={cstar_actual_test:.1f} m/s, At={cg.A_throat*1e6:.2f} mm²)"
+                                f"\n  - Estimated Pc needed: {Pc_estimate/1e6:.2f} MPa (vs Pc_max={Pc_max/1e6:.2f} MPa)"
+                                f"\nPossible fixes:"
+                                f"\n  1. Reduce injector orifice areas (currently oversized)"
+                                f"\n  2. Increase throat area (currently undersized)"
+                                f"\n  3. Increase tank pressures to allow higher Pc_max"
+                                f"\n  4. Check combustion efficiency (low efficiency reduces demand)"
+                            )
                         else:
-                            # raise ValueError(
-                            #     f"No solution: Supply > Demand at all Pc. "
-                            #     f"Residual: [{residual_min:.4f}, {residual_max:.4f}] kg/s. "
-                            #     f"Could not compute detailed diagnostics."
-                            # )
-                            pass
+                            raise ValueError(
+                                f"No solution: Supply > Demand at all Pc. "
+                                f"Residual: [{residual_min:.4f}, {residual_max:.4f}] kg/s. "
+                                f"Could not compute detailed diagnostics."
+                            )
+                    except ValueError:
+                        # Re-raise explicit ValueErrors from above
+                        raise
                     except Exception as diag_e:
                         # Diagnostics failed - provide generic error
-                        # raise ValueError(
-                        #     f"No solution: Supply > Demand at all Pc. "
-                        #     f"Residual at bounds: [{residual_min:.4f}, {residual_max:.4f}] kg/s. "
-                        #     f"Pc_max ({Pc_max/1e6:.2f} MPa) limited by tank pressure ({P_tank_O/1e6:.2f} MPa). "
-                        #     f"Possible causes: Injector oversized, throat undersized, or combustion efficiency too low. "
-                        #     f"Diagnostic error: {diag_e}"
-                        # )
-                        pass
+                        raise ValueError(
+                            f"No solution: Supply > Demand at all Pc. "
+                            f"Residual at bounds: [{residual_min:.4f}, {residual_max:.4f}] kg/s. "
+                            f"Pc_max ({Pc_max/1e6:.2f} MPa) limited by tank pressure. "
+                            f"Possible causes: Injector oversized, throat undersized, or combustion efficiency too low. "
+                            f"Diagnostic error: {diag_e}"
+                        )
                     
             else:
                 # Supply < Demand at all Pc (both negative)
@@ -540,7 +551,14 @@ class ChamberSolver:
         )
 
         # Use advanced combustion efficiency model if enabled
+        pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
         use_advanced = getattr(self.config.combustion.efficiency, 'use_advanced_model', True)
+        
+        # Apply pressure gating for final diagnostics consistency
+        if use_advanced and Pc_val < pc_gate:
+            print(f"[ETA_GATE] Final diagnostics: Pc={Pc_val/1e6:.2f} MPa < Pc_gate={pc_gate/1e6:.2f} MPa -> using simple eta_cstar")
+            use_advanced = False
+
         advanced_params = None
         
         if use_advanced:
@@ -574,6 +592,11 @@ class ChamberSolver:
         cstar_actual = eta * cea_props["cstar_ideal"]
         gamma = cea_props["gamma"]
         R = cea_props["R"]
+
+        print(
+            f"[CSTAR] eta={eta:.4f} | c*_ideal={cea_props['cstar_ideal']:.1f} m/s -> c*_actual={cstar_actual:.1f} m/s | "
+            f"ratio={cstar_actual/cea_props['cstar_ideal']:.4f}"
+        )   
         
         # Calculate Isp for validation
         # CRITICAL FIX: Correct Isp formula

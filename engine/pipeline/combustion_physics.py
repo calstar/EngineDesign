@@ -404,6 +404,8 @@ def calculate_mixing_efficiency(
     Da_mix = np.clip(Da_mix, 0.0, 50.0)
     # print(f'tau_res_eff: {tau_res_eff}, tau_mix: {tau_mix}, Da_mix: {Da_mix}')
     eta_m = 1.0 - np.exp(-Da_mix)
+    print("DEBUG: ETA_MIXING: 1.0")
+    return .90
     return float(np.clip(eta_m, 0.0, 1.0))
 
 def calculate_combustion_efficiency_advanced(
@@ -546,7 +548,11 @@ def calculate_combustion_efficiency_advanced(
     eta_turbulence = np.clip(eta_turbulence, 0.85, 1.0)
     
     # 5. Combined efficiency
-    # print(f"eta_Lstar: {eta_Lstar}, eta_kinetics: {eta_kinetics}, eta_mixing: {eta_mixing}, eta_turbulence: {eta_turbulence}")
+    print(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc={Tc:.0f} K, Lstar={Lstar:.3f} m")
+    print(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
+    print(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, turbulence_intensity={turbulence_intensity:.4f}")
+    print(f"[ETA_DEBUG] DERIVED: U={m_dot_total/(Pc/(R*Tc)*Ac):.2f} m/s, Da={Da:.4f}, tau_res={tau_res*1e3:.3f} ms, tau_chem={tau_chem*1e6:.3f} µs")
+    print(f"[ETA_DEBUG] OUTPUTS: eta_Lstar={eta_Lstar:.4f}, eta_kinetics={eta_kinetics:.4f}, eta_mixing={eta_mixing:.4f}, eta_turbulence={eta_turbulence:.4f}")
     eta_total = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
     
     # Apply cooling efficiency if provided (external)

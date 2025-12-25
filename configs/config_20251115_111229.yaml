@@ -21,17 +21,17 @@ injector:
   type: pintle
   geometry:
     lox:
-      n_orifices: 12
-      d_orifice: 0.003
-      theta_orifice: 30.0
-      A_entry: 8.0e-06
-      d_hydraulic: 0.003
+      n_orifices: 16
+      d_orifice: 0.003979
+      theta_orifice: 30.01
+      A_entry: 1.0e-05
+      d_hydraulic: 0.003979
     fuel:
-      d_pintle_tip: 0.015
-      d_reservoir_inner: 0.016
-      h_gap: 0.0005
-      A_entry: 1.2e-05
-      d_hydraulic: 0.001
+      d_pintle_tip: 0.01905
+      d_reservoir_inner: 0.019676
+      h_gap: 0.000313
+      A_entry: 1.5e-05
+      d_hydraulic: 0.000626
 feed_system:
   oxidizer:
     d_inlet: 0.009525
@@ -101,9 +101,9 @@ ablative_cooling:
   heat_of_ablation: 2500000.0
   thermal_conductivity: 0.35
   specific_heat: 1500.0
-  initial_thickness: 0.008
+  initial_thickness: 0.01
   surface_temperature_limit: 1200.0
-  coverage_fraction: 0.9
+  coverage_fraction: 0.85
   pyrolysis_temperature: 950.0
   blowing_efficiency: 0.75
   use_physics_based_blowing: true
@@ -128,7 +128,7 @@ graphite_insert:
   heat_of_ablation: 15000000.0
   thermal_conductivity: 100.0
   specific_heat: 710.0
-  initial_thickness: 0.006
+  initial_thickness: 0.005
   surface_temperature_limit: 2500.0
   oxidation_temperature: 800.0
   oxidation_rate: 1.0e-06
@@ -197,7 +197,7 @@ combustion:
     cea_parallel_workers: null
     ox_name: LOX
     fuel_name: RP-1
-    expansion_ratio: 7.8169
+    expansion_ratio: 6.0713
     cache_file: output/cache/cea_cache_LOX_RP1_3D.npz
     Pc_range:
     - 1000000.0
@@ -237,45 +237,43 @@ combustion:
 # =============================================================================
 chamber_geometry:
   # Design requirements
-  design_pressure: 2413166.0      # Pc [Pa] - 350 psi design point (300–400 psi range)
-  design_thrust: 7000.0           # F [N] - target thrust
+  design_pressure: 2068000.0      # Pc [Pa] - target chamber pressure
+  design_thrust: 4893.042           # F [N] - target thrust
   design_MR: 2.55                 # O/F mixture ratio at design point
   
   # Chamber dimensions
-  chamber_diameter: 0.12065       # Inner chamber diameter [m]
-  Lstar: 1.11                     # Characteristic length [m] (0.95-1.27 for LOX/RP-1)
+  chamber_diameter: 0.1016       # Inner chamber diameter [m]
+  Lstar: 1.1176                     # Characteristic length [m] (0.95-1.27 for LOX/RP-1)
   
   # Nozzle dimensions
-  exit_diameter: 0.1305           # Nozzle exit diameter [m] - UPDATED to match eps*At
-  expansion_ratio: 7.8169         # Area ratio (A_exit / A_throat)
-  nozzle_efficiency: 0.95         # Nozzle efficiency (0.94-0.98 typical)
+  exit_diameter: 0.1143            # Nozzle exit diameter [m]
+  expansion_ratio: 6.0713         # Area ratio (A_exit / A_throat)
+  nozzle_efficiency: 0.98         # Nozzle efficiency (0.94-0.98 typical)
   
   # Solver outputs (computed by solve_chamber_geometry_with_cea)
-  A_throat: 0.001709              # Throat area [m²] - UPDATED (7 kN @ 350 psi, Cf=1.7)
-  A_exit: 0.013361                # Exit area [m²] - UPDATED (= eps * At)
-  volume: 0.001897                # Chamber volume [m³] - UPDATED (= L* * At)
-  length: 0.1661                  # Chamber length [m] - UPDATED (= volume / Ac with Dc=0.12065 m)
-  Cf: 1.70                        # UPDATED design-point Cf
-
+  # These are populated after running the solver
+  A_throat: 0.001690053           # Throat area [m²] - SOLVED
+  A_exit: 0.01026083              # Exit area [m²] - SOLVED  
+  volume: 0.001888803             # Chamber volume [m³] - SOLVED
+  length: 0.2492846               # Chamber length [m] - SOLVED
+  Cf: 1.4                         # Thrust coefficient - SOLVED
 
 # # Legacy sections (for backward compatibility with existing code)
 # chamber:
-#   volume: 0.001244586
-#   A_throat: 0.001037155
-#   length: 0.1423623
-#   Lstar: 1.11
-#   chamber_inner_diameter: 0.12065
-#   exit_diameter: 0.101
-#   design_pressure: 4481594.0
-#   design_thrust: 7000.0
-#   design_MR: 2.55
-#   design_force_coefficient: 1.505989588378393
+#   volume: 0.001888803
+#   A_throat: 0.001690053
+#   length: 0.2492846
+#   Lstar: 1.1176
+#   chamber_inner_diameter: 0.1016
+#   design_pressure: 2068000.0
+#   design_thrust: 4893.042
+#   design_force_coefficient: 1.4
 # nozzle:
-#   A_throat: 0.001037155
-#   A_exit: 0.00810732
-#   expansion_ratio: 7.8169
-#   exit_diameter: 0.101
-#   efficiency: 0.95
+#   A_throat: 0.001690053
+#   A_exit: 0.01026083
+#   expansion_ratio: 6.0713
+#   exit_diameter: 0.1143
+#   efficiency: 0.98
 solver:
   method: brentq
   Pc_bounds:
@@ -290,18 +288,18 @@ solver:
 # Tank configurations - 'mass' is the PROPELLANT mass (initial liquid fill)
 lox_tank:
   lox_h: 1.14
-  lox_radius: 0.06985
-  ox_tank_pos: 0.8
-  mass: 18.0  # LOX propellant mass [kg] (not tank structure mass)
+  lox_radius: 0.0762
+  ox_tank_pos: 0.6
+  mass: 22.0  # LOX propellant mass [kg] (not tank structure mass)
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
-  fuel_tank_pos: 3
-  mass: 7.0  # RP-1 propellant mass [kg] (not tank structure mass)
+  fuel_tank_pos: -0.2
+  mass: 4.0  # RP-1 propellant mass [kg] (not tank structure mass)
 press_tank:
   press_h: 0.457
   press_radius: 0.0762
-  pres_tank_pos: 3.6
+  pres_tank_pos: 1.2
   mass: null
   free_volume_L: 4.5  # COPV free internal volume [L]
 # Rocket configuration - NEW MASS MODEL
@@ -315,14 +313,10 @@ press_tank:
 #   lox_tank.mass:       LOX propellant only (not tank structure)
 #   fuel_tank.mass:      RP-1 propellant only (not tank structure)
 #
-# EXAMPLE:
-#   Total dry mass = 78.72 + 24.0 = 102.72 kg
-#   Total wet mass = 102.72 + 22.0 + 4.0 = 128.72 kg
-#
 rocket:
   # NEW mass model - matches CAD assemblies
-  airframe_mass: 78.72      # Airframe only (fuselage, fins, nosecone, avionics) [kg]
-  cm_wo_motor: 3.861725449  # Airframe center of mass without motor, from tail [m]
+  airframe_mass: 90.72      # Airframe only (fuselage, fins, nosecone, avionics) [kg]
+  cm_wo_motor: 1.3  # Airframe center of mass without motor, from tail [m]
   
   # Propulsion breakdown (for accurate CM calculation)
   engine_mass: 8.0                 # Engine + plumbing [kg]
@@ -337,22 +331,22 @@ rocket:
   motor_position: 0.0      # Nozzle exit position from rocket tail [m]
   
   # Geometry
-  radius: 0.078359          # Rocket body radius [m]
+  radius: 0.1015          # Rocket body radius [m]
   rocket_length: 7.5        # Total rocket length (tail to nose) [m]
   
   # Inertia of AIRFRAME ONLY (no propulsion, no propellants) [kg·m²]
   # Propulsion inertia is auto-calculated from propulsion_dry_mass
   inertia:
-  - 8.0   # Ixx (roll)
-  - 8.0   # Iyy (pitch)
-  - 0.5   # Izz (yaw)
+  - 8.0
+  - 8.0
+  - 0.5
   
   fins:
-    no_fins: 4
-    root_chord: 0.626872
-    tip_chord: 0.20066
-    fin_span: 0.20066
-    fin_position: 1.054535
+    no_fins: 3
+    root_chord: 0.2
+    tip_chord: 0.1
+    fin_span: 0.3
+    fin_position: 0.0
   strakes:
     no_fins: 4
     root_chord: 0.305
@@ -362,8 +356,8 @@ rocket:
 environment:
   date:
   - 2025
-  - 12
-  - 6
+  - 11
+  - 18
   - 18
   latitude: 35.34722
   longitude: -117.8099547

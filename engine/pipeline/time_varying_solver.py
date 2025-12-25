@@ -248,14 +248,6 @@ class TimeVaryingCoupledSolver:
         cg.A_exit = A_exit
         cg.expansion_ratio = A_exit / A_throat if A_throat > 0 else cg.expansion_ratio
         
-        # Also update legacy sections if they exist (for backward compatibility)
-        if config_current.chamber is not None:
-            config_current.chamber.volume = V_chamber
-            config_current.chamber.A_throat = A_throat
-        if config_current.nozzle is not None:
-            config_current.nozzle.A_throat = A_throat
-            config_current.nozzle.A_exit = A_exit
-        
         # Calculate current L*
         Lstar = V_chamber / A_throat if A_throat > 0 else cg.Lstar
         
@@ -536,6 +528,12 @@ class TimeVaryingCoupledSolver:
         eps_new = A_exit_new / A_throat_new if A_throat_new > 0 else cg.expansion_ratio
         Lstar_new = V_chamber_new / A_throat_new if A_throat_new > 0 else Lstar
         
+        # Update config with current time-varying geometry
+        config_current.chamber_geometry.A_throat = A_throat_new
+        config_current.chamber_geometry.A_exit = A_exit_new
+        config_current.chamber_geometry.expansion_ratio = eps_new
+        config_current.chamber_geometry.volume = V_chamber_new
+        
         # Calculate thrust with shifting equilibrium
         # CRITICAL: Pass reaction progress so shifting equilibrium accounts for time-varying chemistry
         Pa = 101325.0  # Ambient
@@ -545,13 +543,10 @@ class TimeVaryingCoupledSolver:
             MR,
             mdot_total,
             self.cea_cache,
-            config_current.nozzle,
+            config_current,
             Pa,
-            eps=eps_new,  # Current expansion ratio
             reaction_progress=reaction_progress_dict,  # TIME-VARYING reaction progress
             use_shifting_equilibrium=True,
-            config=config_current,
-            A_throat=A_throat_new,  # Current throat area
         )
         
         F = thrust_results["F"]
@@ -586,7 +581,8 @@ class TimeVaryingCoupledSolver:
             nozzle_efficiency = nozzle_velocity_results["efficiency"]
             
             # Nozzle heat flux distribution
-            L_nozzle = getattr(config_current.nozzle, 'length', 0.1)
+            # Nozzle length is not yet in ChamberGeometryConfig, using 0.1 as default
+            L_nozzle = 0.1
             n_nozzle_points = 50
             nozzle_positions = np.linspace(0.0, L_nozzle, n_nozzle_points)
             
@@ -628,7 +624,7 @@ class TimeVaryingCoupledSolver:
             import warnings
             warnings.warn(f"Nozzle dynamics calculation failed: {e}")
             # CRITICAL FIX: Remove arbitrary 0.95 default - use config value or calculate
-            nozzle_efficiency = getattr(self.config.nozzle, 'efficiency', 0.92)  # Use config or typical value
+            nozzle_efficiency = getattr(config_current.chamber_geometry, 'nozzle_efficiency', 0.92)  # Use config or typical value
             nozzle_dynamics = {
                 "efficiency": nozzle_efficiency,
                 "max_heat_flux": 0.0,

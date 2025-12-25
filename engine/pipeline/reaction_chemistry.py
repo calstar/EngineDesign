@@ -712,7 +712,6 @@ def calculate_shifting_equilibrium_gamma(
             else:
                 raise ValueError("A_throat not available")
         except (ValueError, AttributeError):
-        else:
             # Fallback: estimate from pressure ratio (isentropic area ratio)
             # A/A* = (1/M) * [(2/(γ+1)) * (1 + (γ-1)/2 * M²)]^((γ+1)/(2(γ-1)))
             # For large eps, M ≈ sqrt(2/(γ-1) * (eps^((γ-1)/γ) - 1))
@@ -745,17 +744,23 @@ def calculate_shifting_equilibrium_gamma(
     # Get fuel type from config
     fuel_type = None
     if cea_cache is not None and hasattr(cea_cache, 'config'):
-        if hasattr(cea_cache.config, 'propellants') and hasattr(cea_cache.config.propellants, 'fuel'):
-            fuel_type = cea_cache.config.propellants.fuel.name
-        elif hasattr(cea_cache.config, 'fluids') and 'fuel' in cea_cache.config.fluids:
-            fuel_type = cea_cache.config.fluids['fuel'].get('name', None)
-        elif hasattr(cea_cache.config, 'cea') and hasattr(cea_cache.config.cea, 'fuel_name'):
-            fuel_type = cea_cache.config.cea.fuel_name
-    # If still not found, try to get from CEA config directly
-    if fuel_type is None and cea_cache is not None:
-        # Try to get from CEA cache metadata
-        if hasattr(cea_cache, 'config') and hasattr(cea_cache.config, 'cea'):
-            fuel_type = getattr(cea_cache.config.cea, 'fuel_name', None)
+        conf = cea_cache.config
+        # Path 1: Directly on CEAConfig (most common now)
+        if hasattr(conf, 'fuel_name'):
+            fuel_type = conf.fuel_name
+        # Path 2: Nested in propellants (legacy/alternate)
+        elif hasattr(conf, 'propellants') and hasattr(conf.propellants, 'fuel'):
+            fuel_type = conf.propellants.fuel.name
+        # Path 3: In fluids dict
+        elif hasattr(conf, 'fluids') and 'fuel' in conf.fluids:
+            fuel_obj = conf.fluids['fuel']
+            if hasattr(fuel_obj, 'name'):
+                fuel_type = fuel_obj.name
+            elif isinstance(fuel_obj, dict):
+                fuel_type = fuel_obj.get('name')
+        # Path 4: Nested in cea section (legacy)
+        elif hasattr(conf, 'cea') and hasattr(conf.cea, 'fuel_name'):
+            fuel_type = conf.cea.fuel_name
     # Final fallback - use default but warn
     if fuel_type is None:
         import warnings

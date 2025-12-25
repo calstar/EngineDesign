@@ -210,11 +210,11 @@ class CEACache:
         if self.use_3d:
             self.eps_min, self.eps_max = config.eps_range
             self.eps_grid = np.linspace(self.eps_min, self.eps_max, self.n_points)
-            print(f"[INFO] Using 3D CEA cache: {self.n_points}^3 = {self.n_points**3} points")
+            # print(f"[INFO] Using 3D CEA cache: {self.n_points}^3 = {self.n_points**3} points")
         else:
             self.eps_min = self.eps_max = config.expansion_ratio
             self.eps_grid = None
-            print(f"[INFO] Using 2D CEA cache: {self.n_points}^2 = {self.n_points**2} points")
+            # print(f"[INFO] Using 2D CEA cache: {self.n_points}^2 = {self.n_points**2} points")
         
         # Lookup tables (initialized as None, loaded from cache or computed)
         # Shape: (n, n, n) for 3D or (n, n) for 2D
@@ -233,7 +233,7 @@ class CEACache:
     
     def _load_cache(self):
         """Load CEA data from cache file"""
-        print(f"[OK] Loading CEA cache from {self.cache_file}")
+        # print(f"[OK] Loading CEA cache from {self.cache_file}")
         data = np.load(self.cache_file)
 
         meta_expected = {
@@ -781,28 +781,73 @@ class CEACache:
         """
         if eps is None:
             eps = self.config.expansion_ratio
-        
-        # Clamp to grid bounds
-        Pc = np.clip(Pc, self.Pc_min, self.Pc_max)
-        MR = np.clip(MR, self.MR_min, self.MR_max)
-        
-        # Use 3D or 2D interpolation
+
+        Pc_in, MR_in, eps_in = float(Pc), float(MR), float(eps)
+
+        # Clamp
+        Pc_clamped = float(np.clip(Pc_in, self.Pc_min, self.Pc_max))
+        MR_clamped = float(np.clip(MR_in, self.MR_min, self.MR_max))
+        eps_clamped = eps_in
         if self.use_3d:
-            eps = np.clip(eps, self.eps_min, self.eps_max)
-            return {
-                "cstar_ideal": self._trilinear_interpolate(Pc, MR, eps, self.cstar_table),
-                "Cf_ideal": self._trilinear_interpolate(Pc, MR, eps, self.Cf_table),
-                "Tc": self._trilinear_interpolate(Pc, MR, eps, self.Tc_table),
-                "gamma": self._trilinear_interpolate(Pc, MR, eps, self.gamma_table),
-                "R": self._trilinear_interpolate(Pc, MR, eps, self.R_table),
-                "M": self._trilinear_interpolate(Pc, MR, eps, self.M_table),
-            }
+            eps_clamped = float(np.clip(eps_in, self.eps_min, self.eps_max))
+
+        # print(
+        #     "[CEA DEBUG] in:",
+        #     f"Pc={Pc_in:.6g} Pa, MR={MR_in:.6g}, Pa={Pa:.6g} Pa, eps={eps_in:.6g}, use_3d={self.use_3d}"
+        # )
+        # print(
+        #     "[CEA DEBUG] bounds:",
+        #     f"Pc=[{self.Pc_min:.6g}, {self.Pc_max:.6g}]",
+        #     f"MR=[{self.MR_min:.6g}, {self.MR_max:.6g}]",
+        #     f"eps=[{self.eps_min:.6g}, {self.eps_max:.6g}]"
+        # )
+        # if (Pc_in != Pc_clamped) or (MR_in != MR_clamped) or (eps_in != eps_clamped):
+        #     print(
+        #         "[CEA DEBUG][CLAMPED]:",
+        #         f"Pc {Pc_in:.6g}->{Pc_clamped:.6g},",
+        #         f"MR {MR_in:.6g}->{MR_clamped:.6g},",
+        #         f"eps {eps_in:.6g}->{eps_clamped:.6g}"
+        #     )
+
+        # Interpolate
+        if self.use_3d:
+            cstar = float(self._trilinear_interpolate(Pc_clamped, MR_clamped, eps_clamped, self.cstar_table))
+            Cf    = float(self._trilinear_interpolate(Pc_clamped, MR_clamped, eps_clamped, self.Cf_table))
+            Tc    = float(self._trilinear_interpolate(Pc_clamped, MR_clamped, eps_clamped, self.Tc_table))
+            gamma = float(self._trilinear_interpolate(Pc_clamped, MR_clamped, eps_clamped, self.gamma_table))
+            R     = float(self._trilinear_interpolate(Pc_clamped, MR_clamped, eps_clamped, self.R_table))
+            M     = float(self._trilinear_interpolate(Pc_clamped, MR_clamped, eps_clamped, self.M_table))
         else:
-            return {
-                "cstar_ideal": self._bilinear_interpolate(Pc, MR, self.cstar_table),
-                "Cf_ideal": self._bilinear_interpolate(Pc, MR, self.Cf_table),
-                "Tc": self._bilinear_interpolate(Pc, MR, self.Tc_table),
-                "gamma": self._bilinear_interpolate(Pc, MR, self.gamma_table),
-                "R": self._bilinear_interpolate(Pc, MR, self.R_table),
-                "M": self._bilinear_interpolate(Pc, MR, self.M_table),
-            }
+            cstar = float(self._bilinear_interpolate(Pc_clamped, MR_clamped, self.cstar_table))
+            Cf    = float(self._bilinear_interpolate(Pc_clamped, MR_clamped, self.Cf_table))
+            Tc    = float(self._bilinear_interpolate(Pc_clamped, MR_clamped, self.Tc_table))
+            gamma = float(self._bilinear_interpolate(Pc_clamped, MR_clamped, self.gamma_table))
+            R     = float(self._bilinear_interpolate(Pc_clamped, MR_clamped, self.R_table))
+            M     = float(self._bilinear_interpolate(Pc_clamped, MR_clamped, self.M_table))
+
+        out = {
+            "cstar_ideal": cstar,
+            "Cf_ideal": Cf,
+            "Tc": Tc,
+            "gamma": gamma,
+            "R": R,
+            "M": M,
+        }
+
+        # print(
+        #     "[CEA DEBUG] out:",
+        #     f"c*={cstar:.3f} m/s, Cf={Cf:.4f}, Tc={Tc:.1f} K, gamma={gamma:.4f}, R={R:.3f}, M={M:.3f}"
+        # )
+
+        # Loud sanity flags (these are the ones that usually catch unit bugs instantly)
+        if not (1200.0 <= cstar <= 2200.0):
+            print("[CEA DEBUG][WARNING] c* is out of expected LOX/RP-1-ish range. Unit/table issue likely.")
+        if not (1.05 <= gamma <= 1.40):
+            print("[CEA DEBUG][WARNING] gamma is weird.")
+        if not (2000.0 <= Tc <= 4200.0):
+            print("[CEA DEBUG][WARNING] Tc is weird.")
+        # Typical combustion-gas R is a few hundred J/(kg·K). If you see ~3000+, it's probably kJ/kmol-K or similar unit mismatch.
+        if R > 2000.0 or R < 50.0:
+            print("[CEA DEBUG][WARNING] R magnitude looks wrong. Possible units mismatch (J/kg-K vs something else).")
+
+        return out

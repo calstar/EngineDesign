@@ -9,6 +9,7 @@ import json
 import traceback
 import numpy as np
 import threading
+import math
 
 from backend.state import app_state
 from engine.pipeline.config_schemas import DesignRequirementsConfig
@@ -24,12 +25,19 @@ def convert_numpy(obj):
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     elif isinstance(obj, (np.integer, np.floating)):
-        return obj.item()
+        # Convert numpy scalar to Python scalar, then sanitize non-finite floats
+        val = obj.item()
+        if isinstance(val, float) and not math.isfinite(val):
+            return None
+        return val
     elif isinstance(obj, np.bool_):
         return bool(obj)
     elif isinstance(obj, bool):
         return bool(obj)
-    elif isinstance(obj, (int, float, str, type(None))):
+    elif isinstance(obj, float):
+        # JSON forbids NaN/Infinity; scrub them here so JSON.parse never fails
+        return obj if math.isfinite(obj) else None
+    elif isinstance(obj, (int, str, type(None))):
         return obj
     else:
         # Try to convert to string for unknown types
@@ -37,6 +45,13 @@ def convert_numpy(obj):
             return str(obj)
         except:
             return None
+
+
+def safe_json_dumps(payload: Any) -> str:
+    """Strict JSON serialization for SSE: converts numpy + strips NaN/Inf."""
+    sanitized = convert_numpy(payload)
+    # allow_nan=False ensures we never emit invalid JSON tokens like NaN
+    return json.dumps(sanitized, allow_nan=False)
 
 router = APIRouter(prefix="/api/optimizer", tags=["optimizer"])
 
@@ -188,7 +203,7 @@ async def run_layer1(
         _optimization_status["error"] = None
         
         # Send initial status
-        yield f"data: {json.dumps({'type': 'status', 'progress': 0.0, 'stage': 'Initializing', 'message': 'Starting optimization...'})}\n\n"
+        yield f"data: {safe_json_dumps({'type': 'status', 'progress': 0.0, 'stage': 'Initializing', 'message': 'Starting optimization...'})}\n\n"
         
         try:
             # Get design requirements
@@ -263,7 +278,7 @@ async def run_layer1(
                         'stage': _optimization_status['stage'], 
                         'message': _optimization_status['message']
                     })
-                    yield f"data: {json.dumps(progress_data)}\n\n"
+                    yield f"data: {safe_json_dumps(progress_data)}\n\n"
                     
                     # Check for new objective history updates and send them
                     with objective_history_lock:
@@ -278,7 +293,7 @@ async def run_layer1(
                                 'objective_history': new_entries,
                                 'total_count': last_sent_objective_count,
                             })
-                            yield f"data: {json.dumps(objective_data)}\n\n"
+                            yield f"data: {safe_json_dumps(objective_data)}\n\n"
                     
                     await asyncio.sleep(0.5)
                 
@@ -292,8 +307,9 @@ async def run_layer1(
             results_dict = convert_numpy({
                 "performance": results.get("performance", {}),
                 "validation": results.get("validation", {}),
-                "geometry": results.get("geometry", {}),
+                "geometry": results.get("optimized_parameters", {}),
                 "objective_history": objective_history,
+                "iteration_history": results.get("iteration_history", []),
             })
             _optimization_status["results"] = results_dict
             _optimization_status["progress"] = 1.0
@@ -301,7 +317,7 @@ async def run_layer1(
             _optimization_status["message"] = "Optimization completed successfully"
             
             # Send completion event
-            yield f"data: {json.dumps({'type': 'complete', 'results': results_dict})}\n\n"
+            yield f"data: {safe_json_dumps({'type': 'complete', 'results': results_dict})}\n\n"
             
         except Exception as e:
             error_msg = f"Optimization failed: {str(e)}"
@@ -310,7 +326,7 @@ async def run_layer1(
             _optimization_status["message"] = error_msg
             
             # Send error event
-            yield f"data: {json.dumps({'type': 'error', 'error': error_msg, 'traceback': error_trace})}\n\n"
+            yield f"data: {safe_json_dumps({'type': 'error', 'error': error_msg, 'traceback': error_trace})}\n\n"
         
         finally:
             _optimization_status["running"] = False

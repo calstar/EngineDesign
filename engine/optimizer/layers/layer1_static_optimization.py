@@ -127,8 +127,24 @@ def create_layer1_apply_x_to_config(
         else:
             contraction_ratio = 10.0
         theta_contraction = np.pi / 4  # 45 degrees
-        L_cylindrical = chamber_length_calc(V_chamber, A_throat, contraction_ratio, theta_contraction)
-        L_contraction = contraction_length_horizontal_calc(A_chamber, R_throat, theta_contraction)
+        # NOTE: `contraction_length_horizontal_calc()` expects the nozzle-entrance radius
+        # (called `nozzle_y_first` in `engine.core.chamber_geometry.chamber_geometry_calc`).
+        # Layer 1 does not generate a full nozzle contour for speed, so we approximate the
+        # nozzle-entrance radius as the throat radius (good approximation for the current
+        # nozzle generator where the first point is at/near the throat).
+        nozzle_entrance_radius_est = R_throat
+
+        L_cylindrical = chamber_length_calc(
+            chamber_volume=V_chamber,
+            area_throat=A_throat,
+            contraction_ratio=contraction_ratio,
+            theta=theta_contraction,
+        )
+        L_contraction = contraction_length_horizontal_calc(
+            area_chamber=A_chamber,
+            entrance_arc_start_y=nozzle_entrance_radius_est,
+            theta=theta_contraction,
+        )
         L_chamber = L_cylindrical + L_contraction
         
         if L_chamber <= 0 or L_cylindrical <= 0 or not np.isfinite(L_chamber):
@@ -540,6 +556,11 @@ def run_layer1_optimization(
     update_progress("Layer 1: Setup", 0.05, "Creating apply_x_to_config function...")
     apply_x_to_config = create_layer1_apply_x_to_config(bounds, max_chamber_od, max_nozzle_exit)
     
+    # Precompute bounds arrays for clipping, caching, and CMA-ES scaling
+    lower_bounds = np.array([b[0] for b in bounds], dtype=float)
+    upper_bounds = np.array([b[1] for b in bounds], dtype=float)
+    span = np.maximum(upper_bounds - lower_bounds, 1e-9)
+    
     # Initialize optimization state
     opt_state = {
         "iteration": 0,
@@ -568,9 +589,59 @@ def run_layer1_optimization(
     
     update_progress("Layer 1: Objective", 0.10, "Defining objective function...")
     
+    # ------------------------------------------------------------------
+    # Objective acceleration: cache expensive evaluate() calls
+    # ------------------------------------------------------------------
+    # Many optimizers will revisit the same point (especially with discrete
+    # variables like n_orifices). Caching is a large speed win because
+    # `PintleEngineRunner.evaluate()` is the expensive part.
+    #
+    # Cache key strategy:
+    # - clip to bounds
+    # - quantize continuous dims to a fraction of their span
+    # - keep discrete dims exact (n_orifices)
+    cache_rel = float(requirements.get("objective_cache_rel", 1e-4))  # 0.01% of span per bin
+    cache_rel = float(np.clip(cache_rel, 1e-6, 1e-2))
+    cache_steps = np.maximum(span * cache_rel, 1e-12)
+    eval_cache: Dict[Tuple[int, ...], Dict[str, Any]] = {}
+    
+    def _make_eval_cache_key(x_raw: np.ndarray) -> Tuple[int, ...]:
+        """Quantize x to a stable hashable key for caching evaluate() results."""
+        x_arr = np.clip(np.asarray(x_raw, dtype=float), lower_bounds, upper_bounds)
+        x_arr = x_arr.copy()
+        # Discrete variable: n_orifices
+        x_arr[6] = int(round(x_arr[6]))
+        key_parts = []
+        for i, v in enumerate(x_arr):
+            if i == 6:
+                key_parts.append(int(v))
+                continue
+            step = float(cache_steps[i])
+            # Quantize within bounds so different absolute magnitudes hash consistently
+            key_parts.append(int(round((float(v) - float(lower_bounds[i])) / step)))
+        return tuple(key_parts)
+    
+    def _hinge_band(x_val: float, lo: float, hi: float, scale: float = 1.0) -> float:
+        """Dimensionless squared hinge penalty outside [lo, hi]."""
+        if scale <= 0:
+            scale = 1.0
+        below = max(0.0, (lo - x_val) / scale)
+        above = max(0.0, (x_val - hi) / scale)
+        return below * below + above * above
+    
     # Define objective function
     def objective(x: np.ndarray) -> float:
-        """Layer 1 objective function: optimize geometry + initial pressures."""
+        """Layer 1 objective function: optimize geometry + initial pressures.
+        
+        Staged/lexicographic structure (approximate but smooth):
+        1) Feasibility (hard constraints + stability gates)
+        2) Thrust closeness
+        3) O/F closeness
+        4) Regularization (Cf band, chamber length, exit pressure)
+        
+        Note: we still return a single scalar for SciPy/CMA-ES, but the scaling
+        preserves the priority ordering and reduces "weight fights".
+        """
         
         # Initialize opt_state keys
         for key in ["consecutive_failures", "last_valid_obj", "iteration", "function_evaluations", "best_objective", "best_x"]:
@@ -601,280 +672,218 @@ def run_layer1_optimization(
                 return satisfied_obj
             return satisfied_obj
         
-        # Convert x to config
-        config, P_O_start_psi_from_x, P_F_start_psi_from_x = apply_x_to_config(x, config_base)
+        # Always work with a clipped/consistent candidate vector (helps caching and stability)
+        x_clipped = np.clip(np.asarray(x, dtype=float), lower_bounds, upper_bounds)
+        # Discrete variable
+        x_clipped = x_clipped.copy()
+        x_clipped[6] = int(round(x_clipped[6]))
         
-        # Check constraints before evaluation
+        # Convert x to config
+        config, _, _ = apply_x_to_config(x_clipped, config_base)
+        
+        # Feasibility pre-checks (cheap): injector sizing and O/F area sanity
         from engine.pipeline.config_schemas import ensure_chamber_geometry
         cg = ensure_chamber_geometry(config)
-        A_throat_check = cg.A_throat
-        if hasattr(config, 'injector') and config.injector.type == "pintle":
-            geom = config.injector.geometry
-            A_lox_injector = geom.lox.n_orifices * np.pi * (geom.lox.d_orifice / 2) ** 2
-            R_inner = geom.fuel.d_pintle_tip / 2
-            R_outer = R_inner + geom.fuel.h_gap
-            A_fuel_injector = np.pi * (R_outer ** 2 - R_inner ** 2)
+        A_throat_check = float(cg.A_throat or 0.0)
+        
+        geom = getattr(getattr(config, "injector", None), "geometry", None)
+        has_pintle = bool(getattr(getattr(config, "injector", None), "type", None) == "pintle" and geom is not None)
+        
+        A_lox_injector = np.nan
+        A_fuel_injector = np.nan
+        lox_ratio = np.nan
+        fuel_ratio = np.nan
+        area_ratio_error = np.nan
+        
+        infeasibility_score = 0.0
+        
+        if has_pintle and A_throat_check > 0:
+            A_lox_injector = float(geom.lox.n_orifices * np.pi * (geom.lox.d_orifice / 2) ** 2)
+            R_inner = float(geom.fuel.d_pintle_tip / 2)
+            R_outer = float(R_inner + geom.fuel.h_gap)
+            A_fuel_injector = float(np.pi * (R_outer ** 2 - R_inner ** 2))
+            lox_ratio = A_lox_injector / A_throat_check
+            fuel_ratio = A_fuel_injector / A_throat_check
             
-            max_injector_area_ratio = 1.0
-            if A_throat_check > 0:
-                lox_ratio = A_lox_injector / A_throat_check
-                fuel_ratio = A_fuel_injector / A_throat_check
-                
-                if lox_ratio > max_injector_area_ratio or fuel_ratio > max_injector_area_ratio:
-                    excess_lox = max(0, lox_ratio - max_injector_area_ratio)
-                    excess_fuel = max(0, fuel_ratio - max_injector_area_ratio)
-                    constraint_penalty = 1e6 * (1.0 + excess_lox ** 2 + excess_fuel ** 2)
-                    return constraint_penalty
-                
-                # Check O/F area ratio
-                if A_fuel_injector > 0:
-                    area_ratio = A_lox_injector / A_fuel_injector
-                    Cd_ratio = 0.4 / 0.65
-                    rho_ratio = np.sqrt(1140.0 / 780.0)
-                    delta_p_ratio_est = np.sqrt(1.2)
-                    area_ratio_factor = Cd_ratio * rho_ratio * delta_p_ratio_est
-                    required_area_ratio = optimal_of / area_ratio_factor
-                    area_ratio_error = abs(area_ratio - required_area_ratio) / required_area_ratio if required_area_ratio > 0 else 1.0
-                    
-                    if area_ratio_error > 0.5:
-                        constraint_penalty = 1e5 * (1.0 + area_ratio_error ** 2)
-                        return constraint_penalty
+            # Hard constraint: injector area should not exceed throat area
+            infeasibility_score += max(0.0, lox_ratio - 1.0) ** 2
+            infeasibility_score += max(0.0, fuel_ratio - 1.0) ** 2
+            
+            # Sanity constraint: injector O/F area ratio should be in the right ballpark
+            if A_fuel_injector > 0:
+                area_ratio = A_lox_injector / A_fuel_injector
+                Cd_ratio = 0.4 / 0.65
+                rho_ratio = np.sqrt(1140.0 / 780.0)
+                delta_p_ratio_est = np.sqrt(1.2)
+                area_ratio_factor = Cd_ratio * rho_ratio * delta_p_ratio_est
+                required_area_ratio = optimal_of / area_ratio_factor if area_ratio_factor > 0 else np.inf
+                if required_area_ratio > 0 and np.isfinite(required_area_ratio):
+                    area_ratio_error = abs(area_ratio - required_area_ratio) / required_area_ratio
+                    # Treat large mismatch as infeasible (provides direction to optimizer)
+                    infeasibility_score += max(0.0, area_ratio_error - 0.5) ** 2
         
-        # Disable thermal protection for evaluation
-        config_runner = copy.deepcopy(config)
-        if hasattr(config_runner, "ablative_cooling") and config_runner.ablative_cooling:
-            config_runner.ablative_cooling.enabled = False
-        if hasattr(config_runner, "graphite_insert") and config_runner.graphite_insert:
-            config_runner.graphite_insert.enabled = False
-        
-        test_runner = PintleEngineRunner(config_runner)
-        
-        # Use x[8] and x[9] directly as pressures
-        P_O_psi = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
-        P_F_psi = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
+        # Tank pressures (dimensionless ratios are used for penalties and caching guidance)
+        P_O_psi = float(np.clip(x_clipped[8], bounds[8][0], bounds[8][1]))
+        P_F_psi = float(np.clip(x_clipped[9], bounds[9][0], bounds[9][1]))
         P_O_test = P_O_psi * psi_to_Pa
         P_F_test = P_F_psi * psi_to_Pa
+        P_O_ratio = P_O_psi / max_lox_P_psi if max_lox_P_psi > 0 else 0.0
+        P_F_ratio = P_F_psi / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.0
         
-        # Evaluate
-        try:
-            final_results = test_runner.evaluate(P_O_test, P_F_test, P_ambient=target_P_exit)
-            final_pressures = (P_O_test, P_F_test)
-        except Exception as eval_error:
-            error_str = str(eval_error)
-            if "Supply > Demand" in error_str or "No solution" in error_str:
-                return 1e5
-            return 1e6
+        # If already infeasible from cheap checks, skip expensive evaluation.
+        # This is both a lexicographic improvement and a speed win.
+        eval_success = False
+        final_results: Dict[str, Any] = {}
+        final_pressures = (P_O_test, P_F_test)
+        eval_error_str: Optional[str] = None
         
-        # Extract results
-        F_actual = final_results.get("F", 0)
-        Isp_actual = final_results.get("Isp", 0)
-        MR_actual = final_results.get("MR", 0)
-        Pc_actual = final_results.get("Pc", 0)
-        Cf_actual = final_results.get("Cf_actual", final_results.get("Cf", 0))
-        stability = final_results.get("stability_results", {})
-        
-        # Calculate errors
-        thrust_error = abs(F_actual - target_thrust) / target_thrust if target_thrust > 0 else 1.0
-        of_error = abs(MR_actual - optimal_of) / optimal_of if optimal_of > 0 else 1.0
-        
-        # Penalties for very bad geometries
-        of_penalty_extra = 0.0
-        thrust_penalty_extra = 0.0
-        if of_error > 0.30:
-            of_penalty_extra = 500.0 * (of_error - 0.30) ** 2
-        if thrust_error > 0.50:
-            thrust_penalty_extra = 500.0 * (thrust_error - 0.50) ** 2
-        
-        # Exit pressure error
-        # Use target_P_exit calculated from environment config (GPS/GFS-derived atmospheric pressure)
-        P_exit_actual = final_results.get("P_exit", 0.0)
-        exit_pressure_error = 0.0
-        # target_P_exit is calculated from environment config elevation using standard atmosphere model
-        # (defined in outer scope, calculated once at optimization start)
-        if target_P_exit > 0:
-            exit_pressure_error = abs(P_exit_actual - target_P_exit) / target_P_exit
-        
-        # Cf (thrust coefficient) penalty - HIGHEST PRIORITY
-        # Acceptable range: 1.3-1.8 (relaxed from 1.3-1.45 to allow for underexpanded nozzles)
-        # Penalty structure designed to handle coupling with thrust
-        Cf_min_acceptable = 1.3
-        Cf_max_acceptable = 1.8
-        Cf_error = 0.0
-        Cf_penalty = 0.0
-        Cf_in_range = False
-        
-        if Cf_actual > 0 and np.isfinite(Cf_actual):
-            if Cf_actual < Cf_min_acceptable:
-                # Penalty for being below acceptable range
-                deficit = Cf_min_acceptable - Cf_actual
-                # Moderate quadratic penalty - Cf is important
-                Cf_penalty = 650.0 * (deficit ** 2)
-                Cf_error = deficit / Cf_min_acceptable
-                Cf_in_range = False
-            elif Cf_actual > Cf_max_acceptable:
-                # Penalty for being above acceptable range
-                excess = Cf_actual - Cf_max_acceptable
-                # Progressive penalty structure: softer for moderate excess, stronger for large excess
-                # This allows optimizer to work towards target without being overly penalized
-                if excess <= 0.3:
-                    # Very small excess (1.8-2.1): very gentle penalty
-                    Cf_penalty = 300.0 * (excess ** 2)
-                elif excess <= 0.6:
-                    # Moderate excess (2.1-2.4): moderate penalty
-                    base_penalty = 300.0 * (0.3 ** 2)  # Penalty up to 0.3 excess
-                    extra_penalty = 400.0 * ((excess - 0.3) ** 2)  # Additional for 0.3-0.6 excess
-                    Cf_penalty = base_penalty + extra_penalty
-                else:
-                    # Large excess (>2.4): stronger penalty
-                    base_penalty = 300.0 * (0.3 ** 2)  # Penalty up to 0.3 excess
-                    mid_penalty = 400.0 * (0.3 ** 2)  # Penalty for 0.3-0.6 excess
-                    extra_penalty = 600.0 * ((excess - 0.6) ** 2)  # Additional for >0.6 excess
-                    Cf_penalty = base_penalty + mid_penalty + extra_penalty
-                Cf_error = excess / Cf_max_acceptable
-                Cf_in_range = False
+        cache_key = _make_eval_cache_key(x_clipped)
+        if infeasibility_score <= 0.0:
+            cached = eval_cache.get(cache_key)
+            if cached is not None:
+                eval_success = bool(cached.get("success", False))
+                final_results = copy.deepcopy(cached.get("results", {})) if eval_success else {}
+                eval_error_str = cached.get("error", None)
             else:
-                # Within acceptable range (1.3-1.8): no penalty
-                Cf_penalty = 0.0
-                Cf_error = 0.0
-                Cf_in_range = True
-        elif Cf_actual <= 0 or not np.isfinite(Cf_actual):
-            # Large penalty for invalid Cf
-            Cf_penalty = 1500.0
-            Cf_error = 1.0
-            Cf_in_range = False
+                # Disable thermal protection for evaluation (for speed + avoid unrelated failures)
+                config_runner = copy.deepcopy(config)
+                if hasattr(config_runner, "ablative_cooling") and config_runner.ablative_cooling:
+                    config_runner.ablative_cooling.enabled = False
+                if hasattr(config_runner, "graphite_insert") and config_runner.graphite_insert:
+                    config_runner.graphite_insert.enabled = False
+                
+                test_runner = PintleEngineRunner(config_runner)
+                try:
+                    final_results = test_runner.evaluate(P_O_test, P_F_test, P_ambient=target_P_exit)
+                    eval_success = True
+                except Exception as eval_error:
+                    eval_success = False
+                    eval_error_str = str(eval_error)
+                    final_results = {}
+                
+                eval_cache[cache_key] = {
+                    "success": bool(eval_success),
+                    "results": copy.deepcopy(final_results) if eval_success else {},
+                    "error": eval_error_str,
+                }
         
-        # Stability handling
-        stability_state = stability.get("stability_state", "marginal")
-        stability_score = stability.get("stability_score", 0.5)
-        chugging = stability.get("chugging", {})
-        chugging_margin = max(0.0, chugging.get("stability_margin", 0.0))
-        acoustic = stability.get("acoustic", {})
-        acoustic_margin = max(0.0, acoustic.get("stability_margin", 0.0))
-        feed_system = stability.get("feed_system", {})
-        feed_margin = max(0.0, feed_system.get("stability_margin", 0.0))
+        # Defaults when evaluation fails / skipped
+        F_actual = float(final_results.get("F", np.nan)) if eval_success else np.nan
+        Isp_actual = float(final_results.get("Isp", np.nan)) if eval_success else np.nan
+        MR_actual = float(final_results.get("MR", np.nan)) if eval_success else np.nan
+        Pc_actual = float(final_results.get("Pc", np.nan)) if eval_success else np.nan
+        Cf_actual = float(final_results.get("Cf_actual", final_results.get("Cf", np.nan))) if eval_success else np.nan
+        stability = final_results.get("stability_results", {}) if eval_success else {}
         
-        min_stability_score_raw = requirements.get("min_stability_score", 0.75)
+        # Primary errors (dimensionless)
+        thrust_error = abs(F_actual - target_thrust) / target_thrust if (eval_success and target_thrust > 0 and np.isfinite(F_actual)) else 1.0
+        of_error = abs(MR_actual - optimal_of) / optimal_of if (eval_success and optimal_of > 0 and np.isfinite(MR_actual)) else 1.0
+        
+        # Exit pressure preference (dimensionless)
+        P_exit_actual = float(final_results.get("P_exit", np.nan)) if eval_success else np.nan
+        exit_pressure_error = abs(P_exit_actual - target_P_exit) / target_P_exit if (eval_success and target_P_exit > 0 and np.isfinite(P_exit_actual)) else 1.0
+        
+        # Stability gates contribute to feasibility (lexicographic stage 1)
+        stability_state = stability.get("stability_state", "unstable")
+        stability_score = float(stability.get("stability_score", 0.0))
+        chugging_margin = max(0.0, float(stability.get("chugging", {}).get("stability_margin", 0.0)))
+        acoustic_margin = max(0.0, float(stability.get("acoustic", {}).get("stability_margin", 0.0)))
+        feed_margin = max(0.0, float(stability.get("feed_system", {}).get("stability_margin", 0.0)))
+        
+        min_stability_score_raw = float(requirements.get("min_stability_score", 0.75))
         stability_margin_handicap = float(requirements.get("stability_margin_handicap", 0.0))
         score_factor = max(0.0, 1.0 - stability_margin_handicap)
-        min_stability_score = min_stability_score_raw * score_factor
+        margin_factor = max(0.0, 1.0 - stability_margin_handicap)
+        effective_min_score = min_stability_score_raw * score_factor
+        effective_margin = float(min_stability) * margin_factor
         
-        stability_penalty_base = 0.0
-        if stability_score <= 0.0 or stability_state == "unstable":
-            stability_penalty_base = 100.0 * (1.0 + (1.0 - max(0.0, stability_score)) ** 2)
-        
-        if stability_score < min_stability_score:
-            score_deficit = min_stability_score - stability_score
-            stability_penalty = stability_penalty_base + score_deficit * 100.0
+        require_stable_state = bool(requirements.get("require_stable_state", True))
+        allowed_states = {"stable", "marginal"}
+        state_ok = (stability_state in allowed_states) if require_stable_state else (stability_state != "unstable")
+        if eval_success:
+            if not state_ok:
+                infeasibility_score += 1.0
+            if effective_min_score > 0:
+                infeasibility_score += max(0.0, (effective_min_score - stability_score) / effective_min_score) ** 2
+            if effective_margin > 0:
+                infeasibility_score += max(0.0, (effective_margin - chugging_margin) / effective_margin) ** 2
+                infeasibility_score += max(0.0, (effective_margin - acoustic_margin) / effective_margin) ** 2
+                infeasibility_score += max(0.0, (effective_margin - feed_margin) / effective_margin) ** 2
         else:
-            stability_penalty = stability_penalty_base
+            # If solver fails, treat as infeasible and try to provide directional guidance.
+            # This avoids "constant penalty with no gradient" behavior.
+            infeasibility_score += 1.0
+            if eval_error_str is not None:
+                err_lower = eval_error_str.lower()
+                # Supply < Demand → encourage higher pressures and/or larger injector area
+                if ("supply < demand" in err_lower) or ("insufficient mass flow" in err_lower):
+                    infeasibility_score += max(0.0, 0.90 - P_O_ratio) ** 2 + max(0.0, 0.90 - P_F_ratio) ** 2
+                # Supply > Demand / bracket issues → encourage reducing injector oversupply or increasing throat
+                if ("supply > demand" in err_lower) or ("invalid bracket" in err_lower) or ("no solution" in err_lower):
+                    if np.isfinite(lox_ratio):
+                        infeasibility_score += max(0.0, lox_ratio - 0.90) ** 2
+                    if np.isfinite(fuel_ratio):
+                        infeasibility_score += max(0.0, fuel_ratio - 0.90) ** 2
+            # Always include area-ratio mismatch as directional signal if available
+            if np.isfinite(area_ratio_error):
+                infeasibility_score += max(0.0, area_ratio_error - 0.25) ** 2
         
-        margin_penalty = 0.0
-        if chugging_margin < min_stability * 0.8:
-            margin_penalty += 10.0 * (1.0 - chugging_margin / min_stability)
-        if acoustic_margin < min_stability * 0.8:
-            margin_penalty += 10.0 * (1.0 - acoustic_margin / min_stability)
-        if feed_margin < min_stability * 0.8:
-            margin_penalty += 10.0 * (1.0 - feed_margin / min_stability)
+        # Regularization terms (dimensionless squared)
+        Cf_min_acceptable = 1.3
+        Cf_max_acceptable = 1.8
+        cf_hinge = _hinge_band(float(Cf_actual) if np.isfinite(Cf_actual) else 0.0,
+                               Cf_min_acceptable, Cf_max_acceptable,
+                               scale=(Cf_max_acceptable - Cf_min_acceptable))
         
-        stability_penalty = stability_penalty + margin_penalty
-
-        # ------------------------------------------------------------------
-        # Soft preference for shorter chambers
-        # ------------------------------------------------------------------
         preferred_L_chamber = float(requirements.get("preferred_chamber_length_m", 0.35))
-        length_penalty = 0.0
         L_chamber_curr = getattr(getattr(config, "chamber", None), "length", None)
-        if L_chamber_curr is not None and np.isfinite(L_chamber_curr) and preferred_L_chamber > 0.0:
-            if L_chamber_curr > preferred_L_chamber:
-                excess_ratio = (L_chamber_curr - preferred_L_chamber) / preferred_L_chamber
-                # Gentle quadratic penalty so this never dominates thrust/O/F/stability.
-                length_penalty = 30.0 * excess_ratio ** 2
+        L_chamber_curr = float(L_chamber_curr) if (L_chamber_curr is not None and np.isfinite(L_chamber_curr)) else np.nan
+        length_term = 0.0
+        if np.isfinite(L_chamber_curr) and preferred_L_chamber > 0:
+            length_term = max(0.0, (L_chamber_curr - preferred_L_chamber) / preferred_L_chamber) ** 2
         
+        # ------------------------------------------------------------------
+        # Lexicographic-ish scalarization
+        # ------------------------------------------------------------------
+        BASE_INFEAS = 1e8
+        W_INFEAS = 1e6
+        W_THRUST = 1e6
+        W_OF = 1e4
+        W_CF = 100.0
+        W_EXIT = 10.0
+        W_LEN = 1.0
         
-        # Bounds penalty
-        bounds_penalty = 0.0
-        for i, (lo, hi) in enumerate(bounds):
-            val = x[i]
-            if val < lo:
-                bounds_penalty += 10.0 * ((lo - val) / (hi - lo + 1e-10)) ** 2
-            elif val > hi:
-                bounds_penalty += 10.0 * ((val - hi) / (hi - lo + 1e-10)) ** 2
+        if (not np.isfinite(infeasibility_score)) or infeasibility_score < 0:
+            infeasibility_score = 1.0
         
-        # Objective components - RESTRUCTURED to handle Cf-thrust-Pc coupling
-        # Priority order: Cf > Stability > Thrust > O/F
-        # When Cf is in range, reduce thrust penalty weight (they're coupled)
-        
-        # Base thrust penalty
-        thrust_penalty_base = (thrust_error ** 2) * 250.0
-        
-        # Adaptive thrust penalty: reduce weight when Cf is acceptable or close
-        # This handles the coupling - if Cf is reasonable, we're more forgiving on thrust
-        # Priority: Cf > Stability > Thrust (when Cf is reasonable)
-        if Cf_in_range:
-            # Cf is acceptable (1.3-1.8): reduce thrust penalty weight by 40%
-            # This allows optimizer to prioritize Cf without being overly penalized
-            # for thrust variations that naturally occur when adjusting geometry
-            thrust_penalty = thrust_penalty_base * 0.6
-        elif Cf_actual > 0 and np.isfinite(Cf_actual) and Cf_actual > Cf_max_acceptable:
-            # Cf is above acceptable: gradual penalty increase based on how far above
-            # Extended range: allow adaptive penalty up to 2.4 (1.8 * 1.33)
-            # This helps optimizer reduce Cf from high values (2.3+) without being
-            # overly penalized on thrust while working towards target
-            adaptive_max = Cf_max_acceptable * 1.33  # Up to 2.4
-            if Cf_actual <= adaptive_max:
-                # Cf is in adaptive range (1.8-2.4): gradual penalty increase
-                excess_ratio = (Cf_actual - Cf_max_acceptable) / (adaptive_max - Cf_max_acceptable)
-                excess_ratio = max(0.0, min(1.0, excess_ratio))  # Clip to [0, 1]
-                # Interpolate between reduced (0.6x) and full penalty
-                # More gradual: start at 0.5x for very close, ramp to 1.0x at 2.4
-                thrust_penalty = thrust_penalty_base * (0.5 + 0.5 * excess_ratio)
-            else:
-                # Cf is very high (>2.4): full thrust penalty
-                thrust_penalty = thrust_penalty_base
+        if infeasibility_score > 0.0:
+            obj = BASE_INFEAS + W_INFEAS * float(infeasibility_score)
         else:
-            # Cf is below acceptable (too low): full thrust penalty
-            # Don't reduce thrust penalty when Cf is problematic
-            thrust_penalty = thrust_penalty_base
-        
-        # O/F penalty (moderate priority)
-        of_penalty = (of_error ** 2) * 300.0
-        
-        # Exit pressure penalty (low priority - less important than Cf/thrust/stability)
-        exit_pressure_penalty = (exit_pressure_error ** 2) * 80.0
-        
-        # Stability penalty (HIGH priority - second only to Cf)
-        stability_weight = 50.0 * stability_penalty
-        
-        # Combined objective
-        # Structure: Cf (highest) > Stability > Thrust (adaptive) > O/F > Exit pressure
-        obj = (
-            Cf_penalty +           # Highest priority - Cf accuracy
-            stability_weight +     # Second priority - stability margins
-            thrust_penalty +       # Third priority - thrust (adaptive weight based on Cf)
-            of_penalty +           # Fourth priority - O/F ratio
-            exit_pressure_penalty + # Fifth priority - exit pressure matching
-            length_penalty +       # Soft preference - chamber length
-            bounds_penalty +       # Constraint enforcement
-            thrust_penalty_extra + # Extra penalties for very bad cases
-            of_penalty_extra
-        )
+            obj = (
+                W_THRUST * (thrust_error ** 2) +
+                W_OF * (of_error ** 2) +
+                W_CF * cf_hinge +
+                W_EXIT * (exit_pressure_error ** 2) +
+                W_LEN * length_term
+            )
         
         if not np.isfinite(obj):
-            obj = 1e6
+            obj = BASE_INFEAS
         
-        # Check for early stopping
+        # Check for early stopping (pure feasibility + primary objective satisfaction)
         thrust_tol_validation = thrust_tol * 1.0
         of_tol_validation = 0.15
         errors_acceptable = (
-            thrust_error < thrust_tol_validation and
-            of_error < of_tol_validation and
-            stability_score >= 0.6
+            (infeasibility_score <= 0.0) and
+            (thrust_error < thrust_tol_validation) and
+            (of_error < of_tol_validation) and
+            (stability_score >= effective_min_score * 0.8)
         )
         
-        if np.isfinite(obj) and obj < obj_tolerance and errors_acceptable:
+        if errors_acceptable:
             opt_state['objective_satisfied'] = True
             opt_state['satisfied_obj'] = min(opt_state.get('satisfied_obj', float('inf')), obj)
-            if final_pressures is not None:
+            if eval_success and final_pressures is not None:
                 opt_state["best_pressures"] = final_pressures
                 opt_state["best_results_for_validation"] = {
                     "F": F_actual,
@@ -895,7 +904,7 @@ def run_layer1_optimization(
             opt_state['force_maxfun_1'] = True
         
         # Track valid evaluations
-        if np.isfinite(obj) and obj < 1e3:
+        if eval_success and np.isfinite(obj):
             opt_state['consecutive_failures'] = 0
             opt_state['last_valid_obj'] = obj
         else:
@@ -904,16 +913,23 @@ def run_layer1_optimization(
                 return 1e5
         
         # Record history with all parameterization variables
-        A_throat_curr = float(np.clip(x[0], bounds[0][0], bounds[0][1]))
-        Lstar_curr = float(np.clip(x[1], bounds[1][0], bounds[1][1]))
-        expansion_ratio_curr = float(np.clip(x[2], bounds[2][0], bounds[2][1]))
-        D_outer_curr = float(np.clip(x[3], bounds[3][0], bounds[3][1]))
-        d_pintle_tip_curr = float(np.clip(x[4], bounds[4][0], bounds[4][1]))
-        h_gap_curr = float(np.clip(x[5], bounds[5][0], bounds[5][1]))
-        n_orifices_curr = int(round(np.clip(x[6], bounds[6][0], bounds[6][1])))
-        d_orifice_curr = float(np.clip(x[7], bounds[7][0], bounds[7][1]))
-        P_O_start_psi_hist = float(np.clip(x[8], bounds[8][0], bounds[8][1]))
-        P_F_start_psi_hist = float(np.clip(x[9], bounds[9][0], bounds[9][1]))
+        def _finite_or_none(v: Any) -> Optional[float]:
+            try:
+                vv = float(v)
+            except Exception:
+                return None
+            return vv if np.isfinite(vv) else None
+
+        A_throat_curr = float(np.clip(x_clipped[0], bounds[0][0], bounds[0][1]))
+        Lstar_curr = float(np.clip(x_clipped[1], bounds[1][0], bounds[1][1]))
+        expansion_ratio_curr = float(np.clip(x_clipped[2], bounds[2][0], bounds[2][1]))
+        D_outer_curr = float(np.clip(x_clipped[3], bounds[3][0], bounds[3][1]))
+        d_pintle_tip_curr = float(np.clip(x_clipped[4], bounds[4][0], bounds[4][1]))
+        h_gap_curr = float(np.clip(x_clipped[5], bounds[5][0], bounds[5][1]))
+        n_orifices_curr = int(round(np.clip(x_clipped[6], bounds[6][0], bounds[6][1])))
+        d_orifice_curr = float(np.clip(x_clipped[7], bounds[7][0], bounds[7][1]))
+        P_O_start_psi_hist = float(np.clip(x_clipped[8], bounds[8][0], bounds[8][1]))
+        P_F_start_psi_hist = float(np.clip(x_clipped[9], bounds[9][0], bounds[9][1]))
         
         D_inner_curr = D_outer_curr - TOTAL_WALL_THICKNESS_M
         if D_inner_curr <= 0:
@@ -921,12 +937,12 @@ def run_layer1_optimization(
         
         lox_start_ratio_hist = P_O_start_psi_hist / max_lox_P_psi if max_lox_P_psi > 0 else 0.7
         fuel_start_ratio_hist = P_F_start_psi_hist / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.7
-        combined_stability_margin = min(chugging_margin, acoustic_margin, feed_margin)
-        L_chamber_hist = L_chamber_curr if (L_chamber_curr is not None and np.isfinite(L_chamber_curr)) else None
+        combined_stability_margin = min(chugging_margin, acoustic_margin, feed_margin) if eval_success else 0.0
+        L_chamber_hist = L_chamber_curr if (np.isfinite(L_chamber_curr)) else None
         
         opt_state["history"].append({
             "iteration": iteration,
-            "x": x.copy(),
+            "x": x_clipped.copy(),
             # Parameterization variables (geometries and pressures)
             "A_throat": A_throat_curr,
             "Lstar": Lstar_curr,
@@ -941,15 +957,15 @@ def run_layer1_optimization(
             "P_O_start_psi": P_O_start_psi_hist,
             "P_F_start_psi": P_F_start_psi_hist,
             # Performance metrics
-            "thrust": F_actual,
+            "thrust": _finite_or_none(F_actual),
             "thrust_error": thrust_error,
             "of_error": of_error,
-            "Isp": Isp_actual,
-            "MR": MR_actual,
-            "Pc": Pc_actual,
-            "Cf": Cf_actual,
-            "Cf_error": Cf_error,
-            "Cf_penalty": Cf_penalty,
+            "Isp": _finite_or_none(Isp_actual),
+            "MR": _finite_or_none(MR_actual),
+            "Pc": _finite_or_none(Pc_actual),
+            "Cf": _finite_or_none(Cf_actual),
+            "Cf_error": float(np.sqrt(cf_hinge)) if np.isfinite(cf_hinge) else 1.0,
+            "Cf_penalty": float(W_CF * cf_hinge),
             # Stability metrics
             "stability_margin": combined_stability_margin,
             "stability_state": stability_state,
@@ -962,6 +978,10 @@ def run_layer1_optimization(
             "fuel_end_ratio": fuel_start_ratio_hist,
             "lox_start_ratio": lox_start_ratio_hist,
             "fuel_start_ratio": fuel_start_ratio_hist,
+            # Feasibility diagnostics
+            "infeasibility_score": float(infeasibility_score),
+            "eval_success": bool(eval_success),
+            "eval_error": eval_error_str,
             # Objective
             "objective": obj,
         })
@@ -970,11 +990,13 @@ def run_layer1_optimization(
         is_new_best = obj < opt_state["best_objective"]
         if is_new_best:
             opt_state["best_objective"] = obj
-            opt_state["best_config"] = copy.deepcopy(config)
-            opt_state["best_lox_end_ratio"] = lox_start_ratio_hist
-            opt_state["best_fuel_end_ratio"] = fuel_start_ratio_hist
-            opt_state["best_x"] = x.copy()
-            if final_pressures is not None:
+            opt_state["best_x"] = x_clipped.copy()
+            # Only store a "best config" if we actually evaluated successfully and are feasible.
+            if eval_success and infeasibility_score <= 0.0:
+                opt_state["best_config"] = copy.deepcopy(config)
+                opt_state["best_lox_end_ratio"] = lox_start_ratio_hist
+                opt_state["best_fuel_end_ratio"] = fuel_start_ratio_hist
+            if eval_success and final_pressures is not None:
                 opt_state["best_pressures"] = final_pressures
                 opt_state["best_results_for_validation"] = {
                     "F": F_actual,
@@ -1009,20 +1031,19 @@ def run_layer1_optimization(
                 pass
         
         # Convergence check
-        require_stable_state = requirements.get("require_stable_state", True)
-        allowed_states = {"stable", "marginal"}
-        state_ok = (stability_state in allowed_states)
         stability_acceptable = (
             state_ok and
-            (stability_score >= min_stability_score * 0.6) and
-            (chugging_margin >= min_stability * 0.5) and
-            (acoustic_margin >= min_stability * 0.5) and
-            (feed_margin >= min_stability * 0.5)
+            (stability_score >= effective_min_score * 0.6) and
+            (chugging_margin >= effective_margin * 0.5) and
+            (acoustic_margin >= effective_margin * 0.5) and
+            (feed_margin >= effective_margin * 0.5)
         )
         
         convergence_thrust_tol = thrust_tol * 2.0
         convergence_of_tol = 0.30
-        obj_improving = obj < opt_state.get("best_objective", float('inf'))
+        # `best_objective` is updated above when `is_new_best` is True, so comparing
+        # against it here would always be False for a new best. Re-use the flag.
+        obj_improving = is_new_best
         
         if (thrust_error < convergence_thrust_tol and 
             of_error < convergence_of_tol and 
@@ -1049,10 +1070,7 @@ def run_layer1_optimization(
     
     result = None
     x0_refined = x0
-    
-    lower_bounds = np.array([b[0] for b in bounds], dtype=float)
-    upper_bounds = np.array([b[1] for b in bounds], dtype=float)
-    span = np.maximum(upper_bounds - lower_bounds, 1e-9)
+    # lower_bounds/upper_bounds/span are computed above (used for caching and solvers)
     
     use_cma_solver = cma is not None
     

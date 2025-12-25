@@ -2,7 +2,6 @@
 
 import numpy as np
 from typing import Dict, Optional, Any
-from engine.pipeline.config_schemas import NozzleConfig
 from engine.pipeline.cea_cache import CEACache
 from engine.pipeline.numerical_robustness import (
     PhysicalConstraints,
@@ -106,13 +105,10 @@ def calculate_thrust(
     MR: float,
     mdot_total: float,
     cea_cache: CEACache,
-    nozzle_config: NozzleConfig,
+    config: Any,
     Pa: float = 101325.0,
-    eps: float = None,
     reaction_progress: Optional[Dict] = None,
     use_shifting_equilibrium: bool = True,
-    config: Optional[Any] = None,
-    A_throat: Optional[float] = None,  # CRITICAL: Use actual chamber throat area, not nozzle_config.A_throat
 ) -> dict:
     """
     Calculate engine thrust with high fidelity.
@@ -138,13 +134,14 @@ def calculate_thrust(
         Total mass flow rate [kg/s]
     cea_cache : CEACache
         CEA cache for thermochemical properties
-    nozzle_config : NozzleConfig
-        Nozzle configuration
+    config : PintleEngineConfig
+        Complete engine configuration
     Pa : float
         Ambient pressure [Pa] (default: sea level)
-    eps : float, optional
-        Expansion ratio (A_exit / A_throat). If None, uses nozzle_config.expansion_ratio.
-        For ablative nozzles, this changes over time as throat/exit areas evolve.
+    reaction_progress : dict, optional
+        Reaction progress for shifting equilibrium
+    use_shifting_equilibrium : bool
+        Enable shifting equilibrium model
     
     Returns:
     --------
@@ -159,20 +156,32 @@ def calculate_thrust(
         - v_exit: Exit velocity [m/s]
         - Isp: Specific impulse [s]
     """
-    # Use provided eps or default from config
-    if eps is None:
-        eps = nozzle_config.expansion_ratio
-    else:
-        # Validate provided eps
-        if eps <= 1.0:
-            import warnings
-            warnings.warn(f"Invalid expansion ratio: eps={eps:.4f} (should be > 1). Using config value {nozzle_config.expansion_ratio:.4f} instead.")
-            eps = nozzle_config.expansion_ratio
-    
-    # Final validation
-    if eps <= 1.0:
-        raise ValueError(f"Invalid expansion ratio: eps={eps:.4f}. Must be > 1.0 for supersonic nozzle.")
-    
+    # Extract geometry from config.chamber_geometry
+    cg = config.chamber_geometry
+    if cg is None:
+        raise ValueError("config.chamber_geometry must be provided")
+
+    A_throat = cg.A_throat
+    A_exit = cg.A_exit
+    eps = cg.expansion_ratio
+    efficiency = cg.nozzle_efficiency
+
+    # Validate geometry inputs
+    if A_throat is None or A_throat <= 0:
+        raise ValueError(f"Invalid A_throat: {A_throat}")
+    if A_exit is None or A_exit <= 0:
+        raise ValueError(f"Invalid A_exit: {A_exit}")
+    if eps is None or eps <= 1.0:
+        raise ValueError(f"Invalid expansion ratio: eps={eps}")
+
+    # Verify geometric consistency: eps = A_exit / A_throat
+    eps_calc = A_exit / A_throat
+    if not np.isclose(eps, eps_calc, rtol=1e-4):
+        raise ValueError(
+            f"Geometric inconsistency: config.chamber_geometry.expansion_ratio ({eps:.6f}) "
+            f"does not match A_exit / A_throat ({eps_calc:.6f})"
+        )
+
     # Get CEA properties (now with eps parameter for 3D cache)
     cea_props = cea_cache.eval(MR, Pc, Pa, eps)
     Cf_ideal = cea_props["Cf_ideal"]
@@ -180,24 +189,37 @@ def calculate_thrust(
     Tc = cea_props["Tc"]
     R = cea_props["R"]
     
-    # Apply nozzle efficiency
-    Cf = nozzle_config.efficiency * Cf_ideal
-    
-    # Calculate exit pressure using isentropic relations
-    # eps is already set above (from parameter or config)
-    
-    # For supersonic nozzles (eps > 1), we need to solve the area-Mach relation:
-    # A/A* = (1/M) × [(2/(gamma+1)) × (1 + (gamma-1)/2 × M²)]^((gamma+1)/(2(gamma-1)))
-    # Then use isentropic relation: P/Pc = [1 + (gamma-1)/2 × M²]^(-gamma/(gamma-1))
+
+
     
     # Validate inputs
     gamma_val = float(gamma)
     eps_val = float(eps)
     Pc_val = float(Pc)
+
+    print(
+        f"[NOZZLE][CEA] Pc={Pc_val:.3e} Pa, Pa={Pa:.3e} Pa, MR={MR:.4f}, eps={eps_val:.3f} | "
+        f"Cf_ideal={Cf_ideal:.4f}, gamma={gamma_val:.4f}, Tc={Tc:.1f} K, R={R:.2f}"
+    )
+
+
+    # estimate what c*_actual is implied by Pc, At, mdot
+    cstar_implied = (Pc_val * A_throat) / max(mdot_total, 1e-12)
+
+    print(
+        f"[NOZ-CSTAR] c*_implied_from_mdot={cstar_implied:.1f} m/s | "
+        f"c*_ideal_from_CEA={cea_props['cstar_ideal']:.1f} m/s | ratio={cstar_implied/cea_props['cstar_ideal']:.4f}"
+    )
+
     
-    # CRITICAL: Use actual chamber throat area if provided, otherwise fall back to nozzle_config
-    # This ensures we use the correct A_throat (from chamber config, which may differ from nozzle config)
-    A_throat_actual = A_throat if A_throat is not None else nozzle_config.A_throat
+    # Apply nozzle efficiency
+    Cf = efficiency * Cf_ideal
+    
+    # Calculate exit pressure using isentropic relations
+    
+    # For supersonic nozzles (eps > 1), we need to solve the area-Mach relation:
+    # A/A* = (1/M) × [(2/(gamma+1)) × (1 + (gamma-1)/2 × M²)]^((gamma+1)/(2(gamma-1)))
+    # Then use isentropic relation: P/Pc = [1 + (gamma-1)/2 × M²]^(-gamma/(gamma-1))
     
     gamma_check = PhysicalConstraints.validate_gamma(gamma_val)
     if not gamma_check.passed and gamma_check.severity == "error":
@@ -432,6 +454,12 @@ def calculate_thrust(
         else:
             v_exit = 0.0
     
+    print(
+        f"[NOZZLE][ISO] M_exit={M_exit:.4f} | "
+        f"T_exit={T_exit:.1f} K ({T_exit/Tc:.3f} Tc), "
+        f"P_exit={P_exit:.3e} Pa ({P_exit/Pc_val:.4f} Pc)"
+    )
+
     # Apply shifting equilibrium if enabled
     # PROPER ITERATIVE APPROACH: As gas expands, equilibrium composition shifts.
     # Gamma and R change between chamber (equilibrium) and exit (shifting).
@@ -746,17 +774,57 @@ def calculate_thrust(
         v_exit = 0.0
     
     # Calculate thrust components with validation
+    g0 = 9.80665
+
+    PcAt = Pc_val * A_throat
+    F_mom = mdot_total * v_exit
+    F_pres = (P_exit - Pa) * A_exit
+    F_sum = F_mom + F_pres
+
+    Cf_from_sum = F_sum / PcAt
+    Isp_from_sum = F_sum / (mdot_total * g0)
+
+    # Expected “effective exhaust velocity” should be ~ Isp*g0
+    c_eff = F_sum / mdot_total
+
+    print(
+        f"[NOZZLE][THRUSTCHK] PcAt={PcAt:.1f} N | "
+        f"mdot={mdot_total:.4f} kg/s, v_exit={v_exit:.1f} m/s, c_eff=F/mdot={c_eff:.1f} m/s | "
+        f"F_mom={F_mom:.1f} N, F_pres={F_pres:.1f} N, F_sum={F_sum:.1f} N | "
+        f"Cf_sum={Cf_from_sum:.3f}, Isp_sum={Isp_from_sum:.1f} s"
+    )
+
+    # Compare to CEA-ish expectations
+    print(
+        f"[NOZZLE][EXPECT] c*_ideal={cea_props['cstar_ideal']:.1f} m/s, "
+        f"Cf_ideal={Cf_ideal:.3f} => expected c_eff~Cf*c*={Cf_ideal*cea_props['cstar_ideal']:.1f} m/s"
+    )
+
     F_momentum = mdot_total * v_exit
-    F_pressure = (P_exit - Pa) * nozzle_config.A_exit
+    F_pressure = (P_exit - Pa) * A_exit
     F_total = F_momentum + F_pressure
+
+    print(
+        "[NOZZLE FINAL]",
+        f"Pc={Pc_val:.3e} Pa, At={A_throat:.3e} m^2, Ae={A_exit:.3e} m^2, eps={A_exit/A_throat:.3f}",
+        f"M_exit={M_exit:.4f}, gamma_exit={gamma_exit:.4f}, R_exit={R_exit:.2f}",
+        f"T_exit={T_exit:.1f} K, Tc={Tc:.1f} K",
+        f"v_exit={v_exit:.1f} m/s",
+        f"P_exit={P_exit:.3e} Pa, Pa={Pa:.3e} Pa",
+        f"mdot={mdot_total:.4f} kg/s",
+        f"F_mom={F_momentum:.1f} N, F_pres={F_pressure:.1f} N",
+        f"PcAt={Pc_val*A_throat:.1f} N",
+        f"Cf_actual={F_total/(Pc_val*A_throat):.3f}, Cf_ideal={Cf_ideal:.3f}"
+    )
+
     
     # Validate thrust components
     if not all(np.isfinite([F_momentum, F_pressure, F_total])):
         # Fallback to thrust coefficient method
-        F_total = Cf * Pc_val * A_throat_actual
+        F_total = Cf * Pc_val * A_throat
     
     # Also calculate using thrust coefficient method for validation
-    F_cf = Cf * Pc_val * A_throat_actual
+    F_cf = Cf * Pc_val * A_throat
     
     # Validate thrust equation
     thrust_check = PhysicsValidator.validate_thrust_equation(
@@ -773,7 +841,7 @@ def calculate_thrust(
     # Cf_actual = F / (Pc * A_throat)
     # This is the measured value, not the theoretical
     Cf_actual, cf_actual_valid = NumericalStability.safe_divide(
-        F, Pc_val * A_throat_actual, 0.0, "Cf_actual"
+        F, Pc_val * A_throat, 0.0, "Cf_actual"
     )
     if not cf_actual_valid.passed:
         Cf_actual = Cf  # Fallback to theoretical
