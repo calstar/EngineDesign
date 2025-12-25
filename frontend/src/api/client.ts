@@ -641,10 +641,16 @@ export interface Layer1StatusResponse {
 }
 
 export interface Layer1ProgressEvent {
-  type: 'status' | 'progress' | 'complete' | 'error';
+  type: 'status' | 'progress' | 'objective' | 'complete' | 'error';
   progress?: number;
   stage?: string;
   message?: string;
+  objective_history?: Array<{
+    iteration: number;
+    objective: number;
+    best_objective: number;
+  }>;
+  total_count?: number;
   results?: Layer1Results;
   error?: string;
   traceback?: string;

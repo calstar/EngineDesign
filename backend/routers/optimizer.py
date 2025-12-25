@@ -8,6 +8,7 @@ import asyncio
 import json
 import traceback
 import numpy as np
+import threading
 
 from backend.state import app_state
 from engine.pipeline.config_schemas import DesignRequirementsConfig
@@ -209,8 +210,10 @@ async def run_layer1(
                 "apogee": 0.15,
             }
             
-            # Objective history
+            # Objective history - use thread-safe list
             objective_history = []
+            objective_history_lock = threading.Lock()
+            last_sent_objective_count = 0
             
             # Progress callback
             def update_progress(stage: str, progress: float, message: str):
@@ -218,13 +221,14 @@ async def run_layer1(
                 _optimization_status["stage"] = stage
                 _optimization_status["message"] = message
             
-            # Objective callback
+            # Objective callback - thread-safe
             def objective_callback(iteration: int, objective: float, best_objective: float):
-                objective_history.append({
-                    "iteration": iteration,
-                    "objective": objective,
-                    "best_objective": best_objective,
-                })
+                with objective_history_lock:
+                    objective_history.append({
+                        "iteration": int(iteration),
+                        "objective": float(objective),
+                        "best_objective": float(best_objective),
+                    })
             
             # Run optimization (blocking)
             # Note: This will block the event loop, but for now we'll keep it simple
@@ -260,6 +264,22 @@ async def run_layer1(
                         'message': _optimization_status['message']
                     })
                     yield f"data: {json.dumps(progress_data)}\n\n"
+                    
+                    # Check for new objective history updates and send them
+                    with objective_history_lock:
+                        if len(objective_history) > last_sent_objective_count:
+                            # Get new entries
+                            new_entries = objective_history[last_sent_objective_count:]
+                            last_sent_objective_count = len(objective_history)
+                            
+                            # Send objective update event
+                            objective_data = convert_numpy({
+                                'type': 'objective',
+                                'objective_history': new_entries,
+                                'total_count': last_sent_objective_count,
+                            })
+                            yield f"data: {json.dumps(objective_data)}\n\n"
+                    
                     await asyncio.sleep(0.5)
                 
                 # Get results

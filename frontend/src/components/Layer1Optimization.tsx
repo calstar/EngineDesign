@@ -153,6 +153,11 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           if (event.progress !== undefined) setProgress(event.progress);
           if (event.stage) setStage(event.stage);
           if (event.message) setMessage(event.message);
+        } else if (event.type === 'objective') {
+          // Handle real-time objective updates
+          if (event.objective_history && Array.isArray(event.objective_history)) {
+            setObjectiveHistory(prev => [...prev, ...event.objective_history]);
+          }
         } else if (event.type === 'complete') {
           setIsRunning(false);
           setProgress(1.0);
@@ -160,6 +165,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           setMessage('Optimization completed successfully');
           if (event.results) {
             setResults(event.results);
+            // Update objective history from final results (in case we missed any)
             if (event.results.objective_history) {
               setObjectiveHistory(event.results.objective_history);
             }
@@ -284,10 +290,17 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
             <p className="text-sm text-[var(--color-text-secondary)] mt-2">{message}</p>
           </div>
 
-          {/* Objective Convergence Plot */}
-          {objectiveHistory.length > 0 && (
-            <div className="mt-6">
-              <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-2">Objective Convergence</h4>
+          {/* Objective Convergence Plot - Always visible during optimization */}
+          <div className="mt-6">
+            <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-2">
+              Objective Convergence
+              {objectiveHistory.length > 0 && (
+                <span className="text-sm font-normal text-[var(--color-text-secondary)] ml-2">
+                  ({objectiveHistory.length} iterations)
+                </span>
+              )}
+            </h4>
+            {objectiveHistory.length > 0 ? (
               <ResponsiveContainer width="100%" height={300}>
                 <LineChart data={objectiveHistory} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.5} />
@@ -332,8 +345,14 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                   />
                 </LineChart>
               </ResponsiveContainer>
-            </div>
-          )}
+            ) : (
+              <div className="flex items-center justify-center h-64 bg-[var(--color-bg-primary)] rounded-lg border border-[var(--color-border)]">
+                <p className="text-[var(--color-text-secondary)]">
+                  Waiting for objective function data...
+                </p>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

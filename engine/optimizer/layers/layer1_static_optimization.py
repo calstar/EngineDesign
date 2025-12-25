@@ -1438,13 +1438,6 @@ def run_layer1_optimization(
         final_performance["P_O_start_ratio"] = 0.8
         final_performance["P_F_start_ratio"] = 0.8
     
-    # Generate constant pressure curves (Layer 1 static only)
-    update_progress("Layer 1: Pressure Curves", 0.55, "Generating constant pressure curves...")
-    n_time_points = 200
-    time_array = np.linspace(0.0, target_burn_time, n_time_points)
-    P_tank_O_array = np.full(n_time_points, final_performance["P_O_start_psi"] * psi_to_Pa)
-    P_tank_F_array = np.full(n_time_points, final_performance["P_F_start_psi"] * psi_to_Pa)
-    
     # Build results dict
     results = {
         "performance": final_performance,
@@ -1460,22 +1453,8 @@ def run_layer1_optimization(
         "optimized_pressure_curves": {
             "lox_end_ratio": final_lox_end_ratio,
             "fuel_end_ratio": final_fuel_end_ratio,
-            "lox_segments": [{
-                "type": "linear",
-                "duration": target_burn_time,
-                "start_pressure_psi": final_performance["P_O_start_psi"],
-                "end_pressure_psi": final_performance["P_O_start_psi"],
-            }],
-            "fuel_segments": [{
-                "type": "linear",
-                "duration": target_burn_time,
-                "start_pressure_psi": final_performance["P_F_start_psi"],
-                "end_pressure_psi": final_performance["P_F_start_psi"],
-            }],
             "lox_start_psi": final_performance["P_O_start_psi"],
-            "lox_end_psi": final_performance["P_O_start_psi"],
             "fuel_start_psi": final_performance["P_F_start_psi"],
-            "fuel_end_psi": final_performance["P_F_start_psi"],
         },
         "layer_status": {
             "layer_1_pressure_candidate": pressure_candidate_valid,
