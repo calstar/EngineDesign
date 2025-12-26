@@ -205,9 +205,18 @@ def eta_cstar(
     cooling_efficiency = float(np.clip(cooling_efficiency, config.cooling_efficiency_floor, 1.0))
     eta *= mixture_efficiency * cooling_efficiency
     
-    # Clamp to reasonable range - ensure minimum 85% for well-designed engines
-    # This prevents efficiency from dropping too low due to conservative models
-    lower_bound = max(min(config.mixture_efficiency_floor, config.cooling_efficiency_floor), 0.85)
+    # Clamp to reasonable range using user-configured floor values
+    # Removed hardcoded 0.85 override - respects user config
+    lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
+    
+    # Warn if efficiency is unusually low (may indicate design issues)
+    if eta < 0.85:
+        import warnings
+        warnings.warn(
+            f"Combustion efficiency {eta:.2%} is below 85% typical floor. "
+            f"This may indicate design issues or very conservative models."
+        )
+    
     eta = np.clip(eta, lower_bound, 1.0)
     
     return float(eta)

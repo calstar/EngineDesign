@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 import numpy as np
 from engine.pipeline.config_schemas import NozzleConfig
+from engine.core.mach_solver import solve_mach_robust
 
 
 def calculate_nozzle_exit_velocity(
@@ -57,10 +58,8 @@ def calculate_nozzle_exit_velocity(
     
     # Exit Mach number from area ratio
     # For isentropic flow: A/A* = (1/M) * ((2/(gamma+1)) * (1 + (gamma-1)/2 * M^2))^((gamma+1)/(2*(gamma-1)))
-    # Solve iteratively or use approximation
-    # For large expansion ratios, M_exit >> 1
-    M_exit = np.sqrt(2.0 / (gamma - 1.0) * ((expansion_ratio ** ((gamma - 1.0) / (gamma + 1.0))) - 1.0))
-    M_exit = max(M_exit, 1.0)  # Must be supersonic
+    # Use robust consolidated solver
+    M_exit, _ = solve_mach_robust(expansion_ratio, gamma, supersonic=True)
     
     # Exit velocity: v = M * sqrt(gamma * R * T)
     v_exit = M_exit * np.sqrt(gamma * R * T_exit)
@@ -158,9 +157,8 @@ def calculate_nozzle_heat_flux(
     
     # Solve for exit Mach number (isentropic)
     # A/A* = (1/M) * ((2/(gamma+1)) * (1 + (gamma-1)/2 * M^2))^((gamma+1)/(2*(gamma-1)))
-    # For large expansion ratios, M_exit >> 1
-    M_exit = np.sqrt(2.0 / (gamma - 1.0) * ((expansion_ratio ** ((gamma - 1.0) / (gamma + 1.0))) - 1.0))
-    M_exit = max(M_exit, 1.0)
+    # Use robust consolidated solver
+    M_exit, _ = solve_mach_robust(expansion_ratio, gamma, supersonic=True)
     
     # Exit pressure (isentropic)
     P_exit = P_throat * ((1.0 + (gamma - 1.0) / 2.0 * M_exit ** 2) ** (-gamma / (gamma - 1.0)))

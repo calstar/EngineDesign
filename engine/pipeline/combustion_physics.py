@@ -24,10 +24,12 @@ def calculate_eta_Lstar(
     SMD: float,
     L_star: float,
     mu: float = 7e-5,
-    Bm: float = 0.2,
+    Bm: float = None,  # Now optional - calculated from pressure-based formulation if not provided
     phi: float = 3.0,
     D0: float = 2e-5,
     rho_l: float = 800.0,
+    gamma: float = None,  # For calculating cp_gas if available
+    fuel_props: dict = None,  # Fuel properties from config (T_boil, L_vap, P_sat_coeffs)
 ) -> float:
     """
     Compute evaporation-based efficiency using L* and a d^2-law evaporation model.
@@ -51,13 +53,20 @@ def calculate_eta_Lstar(
     mu : float, optional
         Dynamic viscosity [Pa·s]
     Bm : float, optional
-        Spalding mass number [-]
+        Spalding mass number [-]. If None, calculated from pressure-based formulation.
     phi : float, optional
         LOX penalty constant [-]
     D0 : float, optional
         Reference diffusivity at 300 K, 1 atm [m^2/s]
     rho_l : float, optional
         Liquid fuel density [kg/m^3]
+    gamma : float, optional
+        Specific heat ratio for calculating cp_gas
+    fuel_props : dict, optional
+        Fuel properties from config:
+        - T_boil: Boiling point [K]
+        - L_vap: Latent heat [J/kg]
+        - A_antoine, B_antoine, C_antoine: Antoine equation coefficients for P_sat
 
     Returns
     -------
@@ -77,6 +86,51 @@ def calculate_eta_Lstar(
 
     Sh = 2.0 + 0.6 * Re**0.5 * Sc**(1.0/3.0)
 
+    # Calculate Spalding number if not provided
+    # Using PRESSURE-BASED mass fraction formulation (recommended for rocket conditions)
+    # Bm = Ys / (1 - Ys) where Ys = P_sat(T_s) / Pc
+    if Bm is None:
+        # Extract fuel properties from config or use RP-1 defaults
+        if fuel_props is not None:
+            T_boil = fuel_props.get("T_boil", fuel_props.get("boiling_point", 489.0))
+            L_vap = fuel_props.get("L_vap", fuel_props.get("latent_heat", 300e3))
+            # Antoine coefficients for vapor pressure (if available)
+            A_ant = fuel_props.get("A_antoine", 6.9)  # RP-1 approx
+            B_ant = fuel_props.get("B_antoine", 1400.0)
+            C_ant = fuel_props.get("C_antoine", -60.0)
+        else:
+            # RP-1 defaults
+            T_boil = 489.0  # K
+            L_vap = 300e3   # J/kg
+            A_ant = 6.9     # Approximate Antoine A for RP-1
+            B_ant = 1400.0  # Approximate Antoine B
+            C_ant = -60.0   # Approximate Antoine C
+        
+        # Estimate droplet surface temperature (approximation: between T_boil and Tc)
+        # At high heat transfer rates, T_s approaches wet-bulb temperature
+        T_s = min(T_boil + 50.0, 0.7 * Tc + 0.3 * T_boil)  # Weighted average
+        
+        # Calculate saturation vapor pressure at surface temperature
+        # Using Clausius-Clapeyron approximation: P_sat = P_ref * exp(-L_vap/R_fuel * (1/T - 1/T_ref))
+        # or Antoine equation: log10(P_sat) = A - B/(C + T)
+        # Use Clausius-Clapeyron for simplicity (more robust)
+        R_fuel = 8314.0 / 170.0  # J/(kg·K) for RP-1 (M ~ 170 g/mol)
+        P_sat_boil = 101325.0  # At boiling point, P_sat = 1 atm
+        P_sat = P_sat_boil * np.exp(-L_vap / R_fuel * (1.0/T_s - 1.0/T_boil))
+        
+        # Mass fraction at surface: Ys = P_sat / Pc (for dilute species, ideal mixing)
+        Ys = P_sat / max(Pc, 1e3)  # Prevent division by zero
+        
+        # Pressure-based Spalding mass transfer number
+        # Bm = Ys / (1 - Ys)
+        # This naturally accounts for high chamber pressure reducing evaporation
+        Ys = np.clip(Ys, 0.0, 0.95)  # Prevent division by zero, cap at 95%
+        Bm = Ys / (1.0 - Ys)
+        
+        # CRITICAL: Clamp Bm to physically plausible range for rocket conditions
+        # Without clamping, Bm can exceed 5-10 and cause unrealistic efficiency collapse
+        Bm = np.clip(Bm, 0.01, 2.0)  # Upper bound of 2.0 as recommended
+
     # Evaporation constant K [m^2/s]
     K = ((8.0 * D_eff * rho_g) / rho_l) * Sh * np.log(1.0 + Bm)
 
@@ -90,7 +144,9 @@ def calculate_eta_Lstar(
     # Efficiency from d^2-law over length L*
     eta_Lstar = 1.0 - np.exp(-Da_L)
 
+
     return eta_Lstar
+
 
 def calculate_residence_time(
     Lstar: float,

@@ -247,7 +247,7 @@ chamber_geometry:
   
   # Nozzle dimensions
   exit_diameter: 0.1305           # Nozzle exit diameter [m] - UPDATED to match eps*At
-  expansion_ratio: 7.8169         # Area ratio (A_exit / A_throat)
+  expansion_ratio: 7.818022         # Area ratio (A_exit / A_throat)
   nozzle_efficiency: 0.95         # Nozzle efficiency (0.94-0.98 typical)
   
   # Solver outputs (computed by solve_chamber_geometry_with_cea)

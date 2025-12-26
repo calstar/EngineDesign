@@ -13,6 +13,7 @@ from __future__ import annotations
 from typing import Dict, Tuple
 import numpy as np
 from engine.pipeline.numerical_robustness import NumericalStability
+from engine.core.mach_solver import solve_mach_robust
 
 
 def calculate_throat_conditions(
@@ -207,16 +208,7 @@ def calculate_exit_mach_from_area_ratio(
     supersonic: bool = True,
 ) -> float:
     """
-    Calculate exit Mach number from area ratio using isentropic flow relation.
-    
-    Area-Mach relation (isentropic):
-    A/A* = (1/M) × [(2/(γ+1)) × (1 + (γ-1)/2 × M²)]^((γ+1)/(2(γ-1)))
-    
-    For a given area ratio, there are two solutions:
-    - Subsonic (M < 1.0) - in converging section
-    - Supersonic (M > 1.0) - in diverging section
-    
-    For rocket nozzles, exit is always supersonic (M > 1.0).
+    Calculate exit Mach number from area ratio using consolidated isentropic flow solver.
     
     Parameters:
     -----------
@@ -236,66 +228,7 @@ def calculate_exit_mach_from_area_ratio(
         Exit Mach number
     """
     eps = A_exit / A_throat if A_throat > 0 else 1.0
-    
-    if eps <= 1.0:
-        # Exit area ≤ throat area - invalid for rocket nozzle
-        return 1.0  # Sonic (at throat)
-    
-    # Area-Mach relation
-    # A/A* = (1/M) × [(2/(γ+1)) × (1 + (γ-1)/2 × M²)]^((γ+1)/(2(γ-1)))
-    exponent = (gamma + 1.0) / (2.0 * (gamma - 1.0))
-    base_factor = 2.0 / (gamma + 1.0)
-    
-    # Initial guess
-    if supersonic:
-        # Supersonic: M > 1.0
-        # For large eps: M ≈ sqrt(2/(γ-1) × (eps^((γ-1)/2) - 1))
-        if eps > 10.0:
-            M_guess = np.sqrt(2.0 / (gamma - 1.0) * (eps ** ((gamma - 1.0) / 2.0) - 1.0))
-        else:
-            M_guess = 1.0 + np.sqrt(2.0 * (eps - 1.0) / (gamma + 1.0))
-        M_guess = max(M_guess, 1.01)  # Ensure supersonic
-    else:
-        # Subsonic: M < 1.0
-        M_guess = 0.5
-    
-    # Newton-Raphson iteration
-    tolerance = 1e-10
-    max_iterations = 50
-    M = M_guess
-    
-    for i in range(max_iterations):
-        # Calculate A/A* for current M
-        term = base_factor * (1.0 + (gamma - 1.0) / 2.0 * M**2)
-        A_Astar = (1.0 / M) * (term ** exponent)
-        
-        # Error
-        error = A_Astar - eps
-        
-        if abs(error) < tolerance:
-            break
-        
-        # Derivative d(A/A*)/dM
-        dterm_dM = (gamma - 1.0) * M
-        dA_dM = -A_Astar / M + A_Astar * exponent * (dterm_dM / term)
-        
-        if abs(dA_dM) < 1e-12:
-            # Use bisection-like fallback
-            if error > 0:
-                M = M * 0.99
-            else:
-                M = M * 1.01
-        else:
-            step = error / dA_dM
-            step = np.clip(step, -0.5 * M, 0.5 * M)  # Limit step size
-            M = M - step
-        
-        # Enforce bounds
-        if supersonic:
-            M = max(M, 1.01)  # Must be supersonic
-        else:
-            M = min(M, 0.99)  # Must be subsonic
-    
+    M, _ = solve_mach_robust(eps, gamma, supersonic=supersonic)
     return float(M)
 
 
