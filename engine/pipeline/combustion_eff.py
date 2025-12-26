@@ -126,11 +126,14 @@ def eta_cstar(
             # Extract parameters
             Pc = advanced_params.get("Pc", DEFAULT_CHAMBER_PRESS_PA)
             Tc = advanced_params.get("Tc", DEFAULT_CHAMBER_TEMP_K)
+            Tc_kinetics = advanced_params.get("Tc_kinetics", None)
             cstar_ideal = advanced_params.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S)
             gamma = advanced_params.get("gamma", DEFAULT_GAMMA_ND)
             R = advanced_params.get("R", DEFAULT_GAS_CONST_J_KG_K)
             MR = advanced_params.get("MR", DEFAULT_MIXTURE_RATIO_ND)
             Ac = advanced_params.get("Ac", None)
+            At = advanced_params.get("At", None)
+            chamber_length = advanced_params.get("chamber_length", None)
             m_dot_total = advanced_params.get("m_dot_total", None)
             Dinj = advanced_params.get("Dinj", None)
             spray_diagnostics = advanced_params.get("spray_diagnostics", None)
@@ -139,6 +142,12 @@ def eta_cstar(
             # Validate required parameters
             if Ac is None or m_dot_total is None:
                 raise ValueError("Ac and m_dot_total are required for advanced combustion efficiency model")
+            if At is None:
+                raise ValueError("At is required for advanced combustion efficiency model")
+            
+            if chamber_length is None:
+                raise ValueError("chamber_length is required for advanced combustion efficiency model")
+            
             if Dinj is None:
                 Dinj = float(np.sqrt(4.0 * Ac / np.pi))
             Dinj = float(max(Dinj, 1e-6))
@@ -146,8 +155,10 @@ def eta_cstar(
             # Calculate advanced efficiency
             results = calculate_combustion_efficiency_advanced(
                 Lstar, Pc, Tc, cstar_ideal, gamma, R, MR, config,
-                Ac, Dinj, m_dot_total,
-                spray_diagnostics, turbulence_intensity
+                Ac, At, Dinj, m_dot_total,
+                spray_diagnostics, turbulence_intensity,
+                chamber_length=chamber_length,
+                Tc_kinetics=Tc_kinetics
             )
             
             eta = results["eta_total"]

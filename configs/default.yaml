@@ -254,7 +254,9 @@ chamber_geometry:
   A_throat: 0.001709              # Throat area [m²] - UPDATED (7 kN @ 350 psi, Cf=1.7)
   A_exit: 0.013361                # Exit area [m²] - UPDATED (= eps * At)
   volume: 0.001897                # Chamber volume [m³] - UPDATED (= L* * At)
-  length: 0.1661                  # Chamber length [m] - UPDATED (= volume / Ac with Dc=0.12065 m)
+  length: 0.1661                  # Total chamber length [m] - UPDATED (= volume / Ac with Dc=0.12065 m)
+  length_cylindrical: 0.121       # Cylindrical section length [m]
+  length_contraction: 0.0451      # Contraction section length [m]
   Cf: 1.70                        # UPDATED design-point Cf
 
 

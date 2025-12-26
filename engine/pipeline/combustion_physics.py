@@ -100,14 +100,13 @@ def calculate_residence_time(
     R: float,
     Tc: float,
     Ac: float,
+    At: float,
     m_dot_total: float,
 ) -> float:
     """
     Calculate characteristic residence time in chamber.
     
-    τ_res = L* / v_characteristic
-    
-    where v_characteristic is based on chamber conditions.
+    τ_res = V_chamber * rho / mdot = (L* * At) * rho / mdot
     
     Parameters:
     -----------
@@ -125,6 +124,8 @@ def calculate_residence_time(
         Chamber temperature [K]
     Ac : float
         Chamber area (m^2)
+    At : float
+        Throat area (m^2)
     m_dot_total : float
         Total mass flow rate (kg/s)
     
@@ -133,12 +134,12 @@ def calculate_residence_time(
     tau_res : float
         Residence time [s]
     """
-    # Use velocity of gas products as velocity, dependent on chamber velocity and length
-    rho_g = Pc/(R*Tc)
-    U = m_dot_total/(rho_g*Ac)
-
-    # Residence time
-    tau_res = Lstar / U
+    # Gas density at chamber conditions
+    rho_g = Pc / (R * Tc) if R > 0 and Tc > 0 else 1.0
+    
+    # Residence time = Volume * rho / mdot
+    # Since L* = Volume / At, then Volume = L* * At
+    tau_res = (Lstar * At * rho_g) / m_dot_total if m_dot_total > 0 else 0.001
     
     return float(tau_res)
 
@@ -253,6 +254,7 @@ def calculate_mixing_efficiency(
     Pc: float,
     R: float,
     Ac: float,
+    At: float,
     Dinj: float,
     m_dot_total: float,
     Lstar: float,
@@ -366,8 +368,12 @@ def calculate_mixing_efficiency(
     else:
         evap_factor = 0.5  # Unknown
     # print(f"evaporation_length: {evaporation_length}, evap_factor: {evap_factor}")
-
-    tau_res_eff = (Lstar / max(U, 1e-4)) * (1.0 / evap_factor)
+    
+    # Correct residence time for mixing: tau = V * rho / mdot = (Lstar * At) * rho / mdot
+    # Using Lstar / U where U = mdot / (rho * Ac) gives V * rho * (Ac/At) / mdot, which is wrong.
+    # We should use U_throat_equiv = mdot / (rho * At)
+    U_throat_equiv = m_dot_total / max(rho_g * At, 1e-8)
+    tau_res_eff = (Lstar / max(U_throat_equiv, 1e-4)) * (1.0 / evap_factor)
 
     # Physics-based recirculation length
     Dc = np.sqrt(4.0 * Ac / np.pi)
@@ -404,8 +410,7 @@ def calculate_mixing_efficiency(
     Da_mix = np.clip(Da_mix, 0.0, 50.0)
     # print(f'tau_res_eff: {tau_res_eff}, tau_mix: {tau_mix}, Da_mix: {Da_mix}')
     eta_m = 1.0 - np.exp(-Da_mix)
-    print("DEBUG: ETA_MIXING: 1.0")
-    return .90
+    
     return float(np.clip(eta_m, 0.0, 1.0))
 
 def calculate_combustion_efficiency_advanced(
@@ -418,10 +423,13 @@ def calculate_combustion_efficiency_advanced(
     MR: float,
     config: CombustionEfficiencyConfig,
     Ac: float,
+    At: float,
     Dinj: float,
     m_dot_total: float,
     spray_diagnostics: Optional[Dict] = None,
     turbulence_intensity: float = 0.08,
+    chamber_length: Optional[float] = None,
+    Tc_kinetics: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Advanced combustion efficiency calculation with physics-based corrections.
@@ -449,7 +457,7 @@ def calculate_combustion_efficiency_advanced(
     Pc : float
         Chamber pressure [Pa]
     Tc : float
-        Chamber temperature [K]
+        Chamber temperature [K] (Used for residence time - Ideal is conservative)
     cstar_ideal : float
         Ideal c* from CEA [m/s]
     gamma : float
@@ -462,6 +470,8 @@ def calculate_combustion_efficiency_advanced(
         Efficiency configuration
     Ac : float
         Chamber area [m^2]
+    At : float
+        Throat area [m^2]
     Dinj : float
         Characteristic injector diameter [m]
     m_dot_total : float
@@ -470,6 +480,11 @@ def calculate_combustion_efficiency_advanced(
         Spray diagnostics (SMD, evaporation length, etc.)
     turbulence_intensity : float
         Turbulence intensity (0-1)
+    chamber_length : float, optional
+        Physical chamber length [m]
+    Tc_kinetics : float, optional
+        Temperature to use for reaction kinetics [K]. If None, uses Tc.
+        (Actual/Effective is conservative)
     
     Returns:
     --------
@@ -483,7 +498,11 @@ def calculate_combustion_efficiency_advanced(
         - tau_res: Residence time [s]
         - tau_chem: Chemical reaction time [s]
     """
+    # Use Tc_kinetics for reaction-rate limited processes if provided
+    T_react = Tc_kinetics if Tc_kinetics is not None else Tc
+
     # 1. L*-based efficiency (finite residence time)
+    # Uses Tc (Ideal) for conservative residence time (shorter)
     if config.model == "constant":
         eta_Lstar = 1.0 - config.C
     elif config.model == "linear":
@@ -494,35 +513,37 @@ def calculate_combustion_efficiency_advanced(
             SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
         else:
             SMD = 100e-6  # Default SMD if diagnostics not available
-        #print(f"the SMD is {SMD}")
+            raise ValueError("SMD is required for eta_Lstar calculation")
+        
+        # Use Tc (Ideal) for residence time part, but T_react (Actual) for evaporation physics
         eta_Lstar = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, SMD, Lstar)
     
     # Clamp L* efficiency
     eta_Lstar = np.clip(eta_Lstar, config.mixture_efficiency_floor, 1.0)
     
     # 2. Reaction kinetics efficiency (Damköhler number)
-    tau_res = calculate_residence_time(Lstar, Pc, cstar_ideal, gamma, R, Tc, Ac, m_dot_total)
-    tau_chem = calculate_reaction_time_scale(Pc, Tc, MR, gamma)
+    # tau_res uses Tc (Ideal) -> shorter time (conservative)
+    tau_res = calculate_residence_time(Lstar, Pc, cstar_ideal, gamma, R, Tc, Ac, At, m_dot_total)
+    # tau_chem uses T_react (Actual) -> longer time (conservative)
+    tau_chem = calculate_reaction_time_scale(Pc, T_react, MR, gamma)
     Da = calculate_damkohler_number(tau_res, tau_chem)
-    #print(f"Da: {Da}, tau_res: {tau_res}, tau_chem: {tau_chem}")
-    # Efficiency based on Damköhler number
-    # Da >> 1: equilibrium (eta → 1)
-    # Da ~ 1: finite-rate (eta ~ 0.8-0.95)
-    # Da << 1: slow chemistry (eta ~ 0.5-0.8)
-    # print(f"Da: {Da}")
-    eta_kinetics = 1 - np.exp(-Da**0.5)
-        #eta_kinetics = 0.5 + 0.3 * (Da / 0.1)
     
+    # Efficiency based on Damköhler number
+    eta_kinetics = 1 - np.exp(-Da**0.5)
     eta_kinetics = np.clip(eta_kinetics, 0.5, 1.0)
     
     # 3. Mixing efficiency
     if spray_diagnostics is not None:
         SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
         x_star = spray_diagnostics.get("x_star", 0.0) or 0.1
-        chamber_length = Lstar  # Approximate
+        
+        if chamber_length is None:
+            raise ValueError("chamber_length is required for mixing efficiency calculation")
+            
+        # Use Tc (Ideal) for mixing physics to be conservative on residence time (shorter window)
         eta_mixing = calculate_mixing_efficiency(
             SMD, x_star, chamber_length, turbulence_intensity,
-            Tc, Pc, R, Ac, Dinj, m_dot_total, Lstar,
+            Tc, Pc, R, Ac, At, Dinj, m_dot_total, Lstar,
             target_smd=config.target_smd_microns * 1e-6 if hasattr(config, 'target_smd_microns') else 50e-6
         )
     else:
@@ -537,18 +558,17 @@ def calculate_combustion_efficiency_advanced(
     eta_mixing = np.clip(eta_mixing, config.mixture_efficiency_floor, 1.0)
     
     # 4. Turbulence efficiency (enhancement)
-    # Moderate turbulence enhances mixing, excessive turbulence can reduce efficiency
     if turbulence_intensity < 0.05:
-        eta_turbulence = 0.9  # Low turbulence → poor mixing
+        eta_turbulence = 0.9
     elif turbulence_intensity < 0.15:
-        eta_turbulence = 0.95 + 0.05 * (turbulence_intensity / 0.15)  # Optimal range
+        eta_turbulence = 0.95 + 0.05 * (turbulence_intensity / 0.15)
     else:
-        eta_turbulence = 1.0 - 0.1 * ((turbulence_intensity - 0.15) / 0.35)  # Excessive turbulence
+        eta_turbulence = 1.0 - 0.1 * ((turbulence_intensity - 0.15) / 0.35)
     
     eta_turbulence = np.clip(eta_turbulence, 0.85, 1.0)
     
     # 5. Combined efficiency
-    print(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc={Tc:.0f} K, Lstar={Lstar:.3f} m")
+    print(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc_ideal={Tc:.0f} K, T_react={T_react:.0f} K, Lstar={Lstar:.3f} m")
     print(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
     print(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, turbulence_intensity={turbulence_intensity:.4f}")
     print(f"[ETA_DEBUG] DERIVED: U={m_dot_total/(Pc/(R*Tc)*Ac):.2f} m/s, Da={Da:.4f}, tau_res={tau_res*1e3:.3f} ms, tau_chem={tau_chem*1e6:.3f} µs")

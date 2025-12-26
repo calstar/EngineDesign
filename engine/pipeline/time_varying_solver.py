@@ -158,8 +158,10 @@ class TimeVaryingCoupledSolver:
         self.A_throat_initial = cg.A_throat
         self.A_exit_initial = cg.A_exit
         self.L_chamber = cg.length if cg.length else 0.18
-        # FIXED: Add safety checks for sqrt operations
-        self.D_chamber_initial = np.sqrt(max(0, 4 * self.V_chamber_initial / (np.pi * self.L_chamber))) if self.L_chamber > 0 else 0.1
+        self.L_cylindrical = cg.length_cylindrical if cg.length_cylindrical else 0.12
+        self.L_contraction = cg.length_contraction if cg.length_contraction else 0.06
+        # FIXED: Use chamber_diameter from unified config
+        self.D_chamber_initial = cg.chamber_diameter if cg.chamber_diameter and cg.chamber_diameter > 0 else 0.08
         self.D_throat_initial = np.sqrt(max(0, 4 * self.A_throat_initial / np.pi)) if self.A_throat_initial > 0 else 0.015
         self.D_exit_initial = np.sqrt(max(0, 4 * self.A_exit_initial / np.pi)) if self.A_exit_initial > 0 else 0.1
         
@@ -248,8 +250,16 @@ class TimeVaryingCoupledSolver:
         cg.A_exit = A_exit
         cg.expansion_ratio = A_exit / A_throat if A_throat > 0 else cg.expansion_ratio
         
-        # Calculate current L*
+        # Calculate and update current lengths
+        # For simplicity, we assume lengths don't change much during ablation 
+        # (mostly diameter and volume change), but we keep them in sync
+        cg.length = self.L_chamber
+        cg.length_cylindrical = self.L_cylindrical
+        cg.length_contraction = self.L_contraction
+        
+        # Calculate and update current L*
         Lstar = V_chamber / A_throat if A_throat > 0 else cg.Lstar
+        cg.Lstar = Lstar  # CRITICAL: Update Lstar so ChamberSolver uses it correctly
         
         # Update chamber solver with current geometry
         solver = ChamberSolver(config_current, self.cea_cache)
@@ -283,17 +293,19 @@ class TimeVaryingCoupledSolver:
         mach_number = chamber_intrinsics["mach_number"]  # Now calculated dynamically, not hardcoded
         
         # Calculate reaction progress (TIME-VARYING - depends on current L*)
-        # This is the KEY coupling: L* changes → reaction progress changes → shifting equilibrium changes
+        # Use conservative "Worst of Both Worlds" temperatures:
+        # Tc_ideal for residence time (shortest time), effective_Tc for kinetics (slowest reactions)
         reaction_progress_dict = calculate_chamber_reaction_progress(
             Lstar,
             Pc,
-            Tc,
-            cstar_actual,
+            diagnostics["Tc_ideal"], # Ideal Tc (Residence Time)
+            cstar_ideal,             # Ideal cstar (Residence Time)
             gamma_chamber,
             R_chamber,
             MR,
             self.config,
             spray_diagnostics=diagnostics.get("spray_diagnostics"),
+            Tc_kinetics=Tc,          # Actual/Effective Tc (Kinetics)
         )
         
         # Extract reaction progress
@@ -301,6 +313,14 @@ class TimeVaryingCoupledSolver:
         progress_mid = reaction_progress_dict["progress_mid"]
         progress_injection = reaction_progress_dict["progress_injection"]
         
+        # Calculate current chamber diameter (for heat flux and area)
+        if previous_state is not None:
+            D_chamber_current = previous_state.D_chamber
+        else:
+            D_chamber_current = self.D_chamber_initial
+            
+        A_chamber_current = np.pi * (D_chamber_current / 2.0) ** 2
+
         # Calculate heat flux for ablation/graphite
         # Chamber heat flux
         gas_props_chamber = {
@@ -309,7 +329,7 @@ class TimeVaryingCoupledSolver:
             "gamma": gamma_chamber,
             "R": R_chamber,
             "chamber_length": self.L_chamber,
-            "chamber_area": np.pi * (self.D_chamber_initial / 2) ** 2,
+            "chamber_area": A_chamber_current,
         }
         heat_flux_chamber_dict = estimate_hot_wall_heat_flux(
             gas_props_chamber,
@@ -322,12 +342,6 @@ class TimeVaryingCoupledSolver:
         
         # Throat heat flux using physics-based Bartz correlation
         from engine.pipeline.physics_based_replacements import calculate_throat_heat_flux_physics
-        
-        # Calculate current chamber diameter (use previous state or initial)
-        if previous_state is not None:
-            D_chamber_current = previous_state.D_chamber
-        else:
-            D_chamber_current = self.D_chamber_initial
         
         # Calculate chamber velocity (CRITICAL FIX: Don't overwrite V_chamber volume!)
         rho_chamber = Pc / (R_chamber * Tc)

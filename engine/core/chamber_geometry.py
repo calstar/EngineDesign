@@ -335,10 +335,16 @@ def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeff
         doc.saveas(str(dxf_path))
         print(f"Chamber contour exported to {export_dxf}")
     
-    # Also return the total chamber length as a separate value for easy access
-    return chamber_pts, table_data, total_chamber_length
+    # Also return the lengths as a separate dictionary for easy access
+    lengths = {
+        'cylindrical': cylindrical_length,
+        'contraction': contraction_length_horizontal,
+        'total': total_chamber_length
+    }
+    
+    return chamber_pts, table_data, lengths
 
 # Only run example if script is executed directly (not when imported)
 if __name__ == "__main__":
-    pts, data, total_length = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
+    pts, data, lengths = chamber_geometry_calc(pc_design=2.068e6, thrust_design=6000, do_plot=True, color_segments=True, export_dxf='chamber/chamber_contour.dxf')
  

@@ -3967,7 +3967,7 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
             if not use_cea_solver:
                 # Use manual force coefficient method (original behavior)
                 with st.spinner("Calculating chamber geometry..."):
-                    pts, table_data, total_chamber_length = chamber_geometry_calc(
+                    pts, table_data, lengths = chamber_geometry_calc(
                         pc_design=pc_design_metric,
                         thrust_design=thrust_design_metric,
                         force_coeffcient=force_coefficient,
@@ -3977,6 +3977,7 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
                         do_plot=False,
                         steps=200
                     )
+                    total_chamber_length = lengths['total']
             
             # Extract calculated values from table_data
             # table_data format: [headers, row1, row2, ...]
@@ -4019,6 +4020,33 @@ def chamber_design_view(config_obj: PintleEngineConfig, runner: Optional[PintleE
             # Update chamber length with total chamber length (cylindrical + contraction)
             if "Total Chamber Length" in calculated_values:
                 config_dict["chamber"]["length"] = calculated_values["Total Chamber Length"]
+                updated = True
+            if "Cylindrical Length" in calculated_values:
+                config_dict["chamber"]["length_cylindrical"] = calculated_values["Cylindrical Length"]
+                updated = True
+            if "Contraction Length" in calculated_values:
+                config_dict["chamber"]["length_contraction"] = calculated_values["Contraction Length"]
+                updated = True
+            
+            # Update chamber_geometry section if it exists
+            if "chamber_geometry" in config_dict:
+                cg = config_dict["chamber_geometry"]
+                if "Chamber Volume" in calculated_values:
+                    cg["volume"] = calculated_values["Chamber Volume"]
+                if "Throat Area" in calculated_values:
+                    cg["A_throat"] = calculated_values["Throat Area"]
+                if "Exit Area" in calculated_values:
+                    cg["A_exit"] = calculated_values["Exit Area"]
+                if "Expansion Ratio" in calculated_values:
+                    cg["expansion_ratio"] = calculated_values["Expansion Ratio"]
+                if "Total Chamber Length" in calculated_values:
+                    cg["length"] = calculated_values["Total Chamber Length"]
+                if "Cylindrical Length" in calculated_values:
+                    cg["length_cylindrical"] = calculated_values["Cylindrical Length"]
+                if "Contraction Length" in calculated_values:
+                    cg["length_contraction"] = calculated_values["Contraction Length"]
+                if use_cea_solver and solver_info:
+                    cg["Cf"] = solver_info.get("final_Cf", force_coefficient)
                 updated = True
             
             # Store design parameters used for geometry calculation

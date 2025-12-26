@@ -387,6 +387,7 @@ def calculate_chamber_reaction_progress(
     MR: float,
     config: PintleEngineConfig,
     spray_diagnostics: Optional[Dict] = None,
+    Tc_kinetics: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Calculate reaction progress through chamber using actual physics.
@@ -400,7 +401,7 @@ def calculate_chamber_reaction_progress(
     Pc : float
         Chamber pressure [Pa]
     Tc : float
-        Chamber temperature [K]
+        Chamber temperature [K] (Used for residence time - Ideal is conservative)
     cstar : float
         Characteristic velocity [m/s]
     gamma : float
@@ -413,6 +414,9 @@ def calculate_chamber_reaction_progress(
         Engine configuration
     spray_diagnostics : dict, optional
         Spray diagnostics (SMD, velocities, etc.) for evaporation/mixing
+    Tc_kinetics : float, optional
+        Temperature to use for reaction kinetics [K]. If None, uses Tc.
+        (Actual/Effective is conservative)
     
     Returns:
     --------
@@ -423,29 +427,27 @@ def calculate_chamber_reaction_progress(
     if not all(np.isfinite([Lstar, Pc, Tc, cstar, gamma, R, MR])):
         raise ValueError("Non-finite input parameters to calculate_chamber_reaction_progress")
     
-    if Lstar <= 0 or Pc <= 0 or Tc <= 0 or cstar <= 0 or gamma <= 1.0 or R <= 0 or MR <= 0:
-        raise ValueError(f"Invalid physical parameters: L*={Lstar}, Pc={Pc}, Tc={Tc}, c*={cstar}, γ={gamma}, R={R}, MR={MR}")
+    # Use Tc_kinetics for reaction-rate limited processes if provided
+    T_react = Tc_kinetics if Tc_kinetics is not None else Tc
     
-    # Calculate residence time from actual conditions
-    sound_speed_squared = gamma * R * Tc
-    if sound_speed_squared <= 0:
-        raise ValueError(f"Invalid sound speed: γ={gamma}, R={R}, Tc={Tc}")
+    if Lstar <= 0 or Pc <= 0 or Tc <= 0 or cstar <= 0 or gamma <= 1.0 or R <= 0 or MR <= 0 or T_react <= 0:
+        raise ValueError(f"Invalid physical parameters: L*={Lstar}, Pc={Pc}, Tc={Tc}, T_react={T_react}, c*={cstar}, γ={gamma}, R={R}, MR={MR}")
     
-    sound_speed, sound_valid = NumericalStability.safe_sqrt(sound_speed_squared, "sound_speed")
-    if not sound_valid.passed or sound_speed <= 0:
-        raise ValueError(f"Sound speed calculation failed: {sound_valid.message}")
-    
-    tau_residence, tau_valid = NumericalStability.safe_divide(Lstar, sound_speed, None, "tau_residence")
+    # Calculate residence time from actual conditions (Ideal Tc is conservative: shorter time)
+    # τ_res = V_chamber * rho / mdot
+    # Since L* = V_chamber / At and mdot = Pc * At / cstar (choked flow):
+    # τ_res = (Lstar * At) * (Pc / (R * Tc)) / (Pc * At / cstar) = Lstar * cstar / (R * Tc)
+    tau_residence, tau_valid = NumericalStability.safe_divide(Lstar * cstar, R * Tc, None, "tau_residence")
     if not tau_valid.passed:
-        raise ValueError(f"Residence time calculation failed: L*={Lstar}, a={sound_speed}")
+        raise ValueError(f"Residence time calculation failed: L*={Lstar}, c*={cstar}, R={R}, Tc={Tc}")
     
     # Get fuel type from config
     fuel_name = config.propellants.fuel.name if hasattr(config, 'propellants') else "RP-1"
     
-    # Calculate reaction time scale from Arrhenius kinetics (no references)
-    tau_reaction = calculate_reaction_time_scale(Pc, Tc, MR, fuel_name)
+    # Calculate reaction time scale from Arrhenius kinetics (Actual T_react is conservative: longer time)
+    tau_reaction = calculate_reaction_time_scale(Pc, T_react, MR, fuel_name)
     
-    # Calculate evaporation time from droplet physics
+    # Calculate evaporation time from droplet physics (Actual T_react is conservative: longer time)
     # Use SMD from spray diagnostics if available
     if spray_diagnostics and "SMD" in spray_diagnostics:
         smd = spray_diagnostics["SMD"]  # [m]
@@ -460,7 +462,7 @@ def calculate_chamber_reaction_progress(
             "boiling_point": getattr(config.propellants.fuel, 'boiling_point', 489.0),
         }
     
-    tau_evaporation = calculate_evaporation_time_scale(Pc, Tc, smd, fuel_props)
+    tau_evaporation = calculate_evaporation_time_scale(Pc, T_react, smd, fuel_props)
     
     # Calculate mixing time from actual flow velocities
     # Mean velocity from characteristic velocity

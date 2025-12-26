@@ -396,7 +396,9 @@ class ChamberGeometryConfig(BaseModel):
     A_throat: Optional[float] = Field(default=None, gt=0, description="Throat area [m²] - SOLVED")
     A_exit: Optional[float] = Field(default=None, gt=0, description="Exit area [m²] - SOLVED")
     volume: Optional[float] = Field(default=None, gt=0, description="Chamber volume [m³] - SOLVED")
-    length: Optional[float] = Field(default=None, gt=0, description="Chamber length [m] - SOLVED")
+    length: Optional[float] = Field(default=None, gt=0, description="Total chamber length [m] - SOLVED")
+    length_cylindrical: Optional[float] = Field(default=None, gt=0, description="Cylindrical section length [m] - SOLVED")
+    length_contraction: Optional[float] = Field(default=None, gt=0, description="Contraction section length [m] - SOLVED")
     Cf: Optional[float] = Field(default=None, gt=0, description="Thrust coefficient - SOLVED")
 
 
@@ -404,7 +406,9 @@ class ChamberConfig(BaseModel):
     """Chamber geometry configuration"""
     volume: float = Field(gt=0, description="Chamber volume [m³]")
     A_throat: float = Field(gt=0, description="Throat area [m²]")
-    length: Optional[float] = Field(default=None, gt=0, description="Characteristic chamber length [m]")
+    length: Optional[float] = Field(default=None, gt=0, description="Total chamber length [m]")
+    length_cylindrical: Optional[float] = Field(default=None, gt=0, description="Cylindrical section length [m]")
+    length_contraction: Optional[float] = Field(default=None, gt=0, description="Contraction section length [m]")
     Lstar: Optional[float] = Field(
         default=None,
         gt=0,
@@ -706,6 +710,8 @@ def ensure_chamber_geometry(config: PintleEngineConfig) -> ChamberGeometryConfig
     A_exit = getattr(nozzle, 'A_exit', None)
     volume = getattr(chamber, 'volume', None)
     length = getattr(chamber, 'length', None)
+    length_cylindrical = getattr(chamber, 'length_cylindrical', None)
+    length_contraction = getattr(chamber, 'length_contraction', None)
     Cf = getattr(chamber, 'design_force_coefficient', None)
     
     # Create and assign chamber_geometry
@@ -722,6 +728,8 @@ def ensure_chamber_geometry(config: PintleEngineConfig) -> ChamberGeometryConfig
         A_exit=A_exit,
         volume=volume,
         length=length,
+        length_cylindrical=length_cylindrical,
+        length_contraction=length_contraction,
         Cf=Cf,
     )
     

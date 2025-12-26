@@ -152,6 +152,8 @@ class ChamberSolver:
             "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
             "MR": MR,
             "Ac": geometry["area_cross"],
+            "At": cg.A_throat,  # Added At for residence time calculation
+            "chamber_length": geometry["length"],  # Added for mixing models
             "Dinj": self.injector_diameter,
             "m_dot_total": mdot_supply,
             "spray_diagnostics": diagnostics,
@@ -503,6 +505,15 @@ class ChamberSolver:
         # Calculate total mass flow rate (needed for various calculations below)
         mdot_total = mdot_O + mdot_F
         
+        # Calculate cooling effects early (needed for conservative reaction kinetics)
+        cooling_results, cooling_eff, effective_Tc = self._evaluate_cooling_models(
+            Pc_val,
+            mdot_O,
+            mdot_F,
+            cea_props,
+            closure_diag,
+        )
+
         # Calculate reaction progress through chamber (if finite-rate chemistry enabled)
         reaction_progress = None
         if getattr(self.config.combustion.efficiency, 'use_finite_rate_chemistry', True):
@@ -512,16 +523,20 @@ class ChamberSolver:
                 # Pass spray diagnostics if available for better evaporation/mixing estimates
                 spray_diagnostics = closure_diag if closure_diag else None
                 
+                # Use conservative "Worst of Both Worlds" temperatures:
+                # Tc (Ideal) for residence time (shorter time is conservative)
+                # effective_Tc (Actual) for kinetics (slower chemistry is conservative)
                 reaction_progress = calculate_chamber_reaction_progress(
                     self.Lstar,
                     Pc_val,
-                    cea_props["Tc"],
+                    cea_props["Tc"], # Ideal Tc (Residence Time)
                     cea_props["cstar_ideal"],
                     cea_props["gamma"],
                     cea_props["R"],
                     MR,
                     self.config,
                     spray_diagnostics=spray_diagnostics,
+                    Tc_kinetics=effective_Tc, # Actual Tc (Kinetics)
                 )
             except Exception as e:
                 # Don't silently fail - raise error or log warning
@@ -529,26 +544,17 @@ class ChamberSolver:
                 warnings.warn(f"Reaction progress calculation failed: {e}. This may indicate invalid engine conditions.")
                 # Minimal fallback - but indicate uncertainty
                 # CRITICAL FIX: Correct residence time formula
-                # tau = V_chamber * rho / mdot_total = L* * rho * A_throat / mdot_total
-                # NOT L* / sqrt(gamma * R * T) which is a time scale related to sound speed, not residence time!
                 rho_chamber = Pc_val / (cea_props["R"] * cea_props["Tc"]) if cea_props["R"] > 0 and cea_props["Tc"] > 0 else 1.0
                 # Use actual mdot_total from closure (calculated above)
                 cg = ensure_chamber_geometry(self.config)
                 tau_residence_correct = self.Lstar * rho_chamber * cg.A_throat / mdot_total if mdot_total > 0 else 0.001
                 reaction_progress = {
                     "progress_throat": 1.0,  # Assume equilibrium
-                    "tau_residence": tau_residence_correct,  # FIXED: Use correct residence time formula
-                    "calculation_failed": True,  # Flag for downstream use
+                    "tau_residence": tau_residence_correct,
+                    "calculation_failed": True,
                 }
         
         mixture_eff = self._compute_mixture_efficiency(closure_diag)
-        cooling_results, cooling_eff, effective_Tc = self._evaluate_cooling_models(
-            Pc_val,
-            mdot_O,
-            mdot_F,
-            cea_props,
-            closure_diag,
-        )
 
         # Use advanced combustion efficiency model if enabled
         pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
@@ -566,12 +572,15 @@ class ChamberSolver:
             
             advanced_params = {
                 "Pc": Pc_val,
-                "Tc": effective_Tc,  # Use effective temperature after cooling
+                "Tc": cea_props["Tc"],  # Ideal Tc (Conservative Residence Time)
+                "Tc_kinetics": effective_Tc, # Actual Tc (Conservative Kinetics)
                 "cstar_ideal": cea_props.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S),
                 "gamma": cea_props.get("gamma", DEFAULT_GAMMA_ND),
                 "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
                 "MR": MR,
                 "Ac": geometry["area_cross"],
+                "At": cg.A_throat,
+                "chamber_length": geometry["length"],
                 "Dinj": self.injector_diameter,
                 "m_dot_total": mdot_total,
                 "spray_diagnostics": closure_diag,
@@ -628,6 +637,7 @@ class ChamberSolver:
             "mdot_total": mdot_total,
             "MR": MR,
             "cstar_ideal": cea_props["cstar_ideal"],
+            "Tc_ideal": cea_props["Tc"],  # Store original ideal temperature
             "cstar_actual": cstar_actual,
             "eta_cstar": eta,
             "mixture_efficiency": mixture_eff,
@@ -954,48 +964,67 @@ class ChamberSolver:
         return float(max(diameter, 1e-5))
 
     def _get_chamber_geometry(self) -> Dict[str, float]:
-        chamber_cfg = self.config.chamber_geometry
+        """
+        Extract physical chamber geometry from configuration.
+        
+        Returns a dictionary with:
+        - length: Total physical length [m]
+        - diameter: Chamber inner diameter [m]
+        - area_cross: Cross-sectional area [m²]
+        - circumference: Chamber circumference [m]
+        - area: Total wetted surface area [m²] (cylindrical + contraction)
+        """
+        # cg is guaranteed to exist because __init__ calls ensure_chamber_geometry
+        cg = ensure_chamber_geometry(self.config)
         regen_cfg = self.config.regen_cooling
 
-        # Use chamber.length if provided (this is the physical chamber length, NOT L*)
-        # NOTE: L* (characteristic length = V/A_throat) is stored separately in self.Lstar
-        # and used for combustion efficiency calculations. This function returns physical geometry.
-        length = chamber_cfg.length
-        # Fallback to regen channel_length if chamber.length is not set
-        if length is None and regen_cfg is not None and regen_cfg.channel_length > 0:
-            length = regen_cfg.channel_length
-        # Last resort: use a rough geometric estimate (volume/A_throat happens to equal L*,
-        # but we're using it here only as a fallback estimate for physical length, not as L*)
-        # NOTE: L* itself is calculated separately in __init__ and stored in self.Lstar
-        if length is None:
-            # Rough geometric estimate: assume cylindrical chamber, length ≈ volume / cross_area
-            # Using volume/A_throat as a rough proxy (this equals L*, but we're not using it as L* here)
-            # This is a fallback only - actual chamber length should be specified in config
-            estimated_length = chamber_cfg.volume / max(chamber_cfg.A_throat, 1e-6)
-            # Use a reasonable minimum (0.1m) to avoid unrealistic values
-            length = max(estimated_length, 0.1)
-        length = max(length, 1e-6)
-
-        diameter = None
-        if regen_cfg is not None and regen_cfg.chamber_inner_diameter is not None:
+        # 1. Physical diameter from unified config
+        diameter = cg.chamber_diameter
+        
+        # Fallback to regen if not in unified (though ensure_chamber_geometry should handle it)
+        if (diameter is None or diameter <= 0) and regen_cfg is not None and regen_cfg.chamber_inner_diameter is not None:
             diameter = regen_cfg.chamber_inner_diameter
-
-        if diameter is None and chamber_cfg.volume > 0:
-            area_cross = chamber_cfg.volume / length
-            diameter = np.sqrt(max(4.0 * area_cross / np.pi, 1e-8))
-        else:
-            area_cross = np.pi * (max(diameter, 1e-6) ** 2) / 4.0
-
+            
+        # Final fallback
+        if diameter is None or diameter <= 0:
+            diameter = 0.08
+            
         diameter = max(diameter, 1e-6)
+        area_cross = np.pi * (diameter / 2.0)**2
         circumference = np.pi * diameter
-        area = circumference * length
+        
+        # 2. Physical lengths
+        length_total = cg.length
+        length_cyl = cg.length_cylindrical
+        length_cont = cg.length_contraction
+        
+        # 3. Wetted Surface Area
+        # If we have the breakdown (cylindrical + contraction), calculate accurately
+        if length_cyl is not None and length_cont is not None:
+            # Wetted area = Cylindrical part + Contraction part (frustum of a cone)
+            # Area_cyl = pi * D * L_cyl
+            area_cyl = circumference * length_cyl
+            
+            # Area_cont = lateral area of a frustum = pi * (r1 + r2) * slant_height
+            r1 = diameter / 2.0
+            # Estimate throat radius from A_throat if available
+            A_throat = cg.A_throat if cg.A_throat and cg.A_throat > 0 else (area_cross / 3.0)
+            r2 = np.sqrt(A_throat / np.pi)
+            
+            slant_height = np.sqrt((r1 - r2)**2 + length_cont**2)
+            area_cont = np.pi * (r1 + r2) * slant_height
+            
+            area_wetted = area_cyl + area_cont
+        else:
+            # Fallback to simple cylinder if breakdown not available
+            area_wetted = circumference * length_total
 
         return {
-            "length": float(length),
+            "length": float(length_total),
             "diameter": float(diameter),
             "area_cross": float(area_cross),
             "circumference": float(circumference),
-            "area": float(area),
+            "area": float(area_wetted),
         }
 
 

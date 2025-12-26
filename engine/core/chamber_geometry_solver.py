@@ -358,7 +358,7 @@ def solve_chamber_geometry_with_cea(
     # Convert Cf to force_coefficient for the existing function
     force_coefficient = Cf_final
     
-    chamber_pts, table_data, total_chamber_length = chamber_geometry_calc(
+    chamber_pts, table_data, lengths = chamber_geometry_calc(
         pc_design=pc_design,
         thrust_design=thrust_design,
         force_coeffcient=force_coefficient,
@@ -370,6 +370,8 @@ def solve_chamber_geometry_with_cea(
         steps=steps,
         export_dxf=export_dxf,
     )
+    
+    total_chamber_length = lengths['total']
     
     # Add Cf information to table data
     # Find the row with "Contraction Ratio" and insert after it
@@ -395,6 +397,9 @@ def solve_chamber_geometry_with_cea(
         'final_Cf_ideal': float(Cf_ideal_final),  # Ideal Cf from CEA
         'final_A_throat': float(A_throat),
         'final_eps': float(eps_final),
+        'final_length_cylindrical': float(lengths['cylindrical']),
+        'final_length_contraction': float(lengths['contraction']),
+        'final_length_total': float(lengths['total']),
         'nozzle_efficiency': float(nozzle_efficiency),
         'convergence_history': convergence_history,
         'cea_props': {

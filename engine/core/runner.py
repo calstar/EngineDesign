@@ -205,6 +205,13 @@ class PintleEngineRunner:
         use_shifting = getattr(self.config.combustion.efficiency, 'use_shifting_equilibrium', True)
         reaction_progress = diagnostics.get("reaction_progress", None)
         
+        cea_noz = self.cea_cache.eval(MR, Pc, Pa, cg.expansion_ratio)
+        print(
+            f"[THERMO] chamber: Tc={Tc:.1f} K gamma={gamma:.4f} R={R:.2f} c*_actual={cstar_actual:.1f} | "
+            f"CEA(noz): Tc={cea_noz['Tc']:.1f} K gamma={cea_noz['gamma']:.4f} R={cea_noz['R']:.2f} c*_ideal={cea_noz['cstar_ideal']:.1f}"
+        )
+
+
         thrust_results = calculate_thrust(
             Pc,
             MR,
