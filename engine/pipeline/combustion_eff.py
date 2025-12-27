@@ -135,9 +135,12 @@ def eta_cstar(
             At = advanced_params.get("At", None)
             chamber_length = advanced_params.get("chamber_length", None)
             m_dot_total = advanced_params.get("m_dot_total", None)
+            u_fuel = advanced_params.get("u_fuel", None)
+            u_lox = advanced_params.get("u_lox", None)
             Dinj = advanced_params.get("Dinj", None)
             spray_diagnostics = advanced_params.get("spray_diagnostics", None)
             turbulence_intensity = advanced_params.get("turbulence_intensity", DEFAULT_TURBULENCE_INTENSITY_ND)
+            fuel_props = advanced_params.get("fuel_props", None)
             
             # Validate required parameters
             if Ac is None or m_dot_total is None:
@@ -156,9 +159,12 @@ def eta_cstar(
             results = calculate_combustion_efficiency_advanced(
                 Lstar, Pc, Tc, cstar_ideal, gamma, R, MR, config,
                 Ac, At, Dinj, m_dot_total,
-                spray_diagnostics, turbulence_intensity,
+                u_fuel=u_fuel, u_lox=u_lox,
+                spray_diagnostics=spray_diagnostics, 
+                turbulence_intensity=turbulence_intensity,
                 chamber_length=chamber_length,
-                Tc_kinetics=Tc_kinetics
+                Tc_kinetics=Tc_kinetics,
+                fuel_props=fuel_props
             )
             
             eta = results["eta_total"]

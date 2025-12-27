@@ -2,7 +2,7 @@
 
 import numpy as np
 from scipy.optimize import brentq, newton
-from typing import Tuple, Dict, Any, List
+from typing import Tuple, Dict, Any, List, Optional
 
 from engine.pipeline.config_schemas import PintleEngineConfig, ensure_chamber_geometry
 from engine.pipeline.combustion_eff import eta_cstar, calculate_Lstar
@@ -158,6 +158,7 @@ class ChamberSolver:
             "m_dot_total": mdot_supply,
             "spray_diagnostics": diagnostics,
             "turbulence_intensity": diagnostics.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
+            "fuel_props": self._get_fuel_props(),
         }
 
         # Decide which efficiency model to use based on pressure gating
@@ -583,8 +584,11 @@ class ChamberSolver:
                 "chamber_length": geometry["length"],
                 "Dinj": self.injector_diameter,
                 "m_dot_total": mdot_total,
+                "u_fuel": closure_diag.get("u_F"),
+                "u_lox": closure_diag.get("u_O"),
                 "spray_diagnostics": closure_diag,
                 "turbulence_intensity": closure_diag.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
+                "fuel_props": self._get_fuel_props(),
             }
         
         eta = eta_cstar(
@@ -1028,3 +1032,29 @@ class ChamberSolver:
         }
 
 
+    def _get_fuel_props(self) -> Optional[Dict[str, float]]:
+        """
+        Extract fuel properties from configuration for evaporation model.
+        
+        Returns a dictionary with:
+        - boiling_point: Fuel boiling point [K]
+        - latent_heat: Latent heat of vaporization [J/kg]
+        - molecular_weight: Molecular weight [g/mol]
+        - Pc_ref: Reference pressure for stable Bm calculation [Pa]
+        
+        Returns None if fuel config is not available.
+        """
+        try:
+            fuel_cfg = self.config.fluids.get("fuel")
+            if fuel_cfg is None:
+                return None
+            
+            # Extract as dict with fallbacks to RP-1 defaults
+            return {
+                "boiling_point": getattr(fuel_cfg, "boiling_point", 489.0),
+                "latent_heat": getattr(fuel_cfg, "latent_heat", 300e3),
+                "molecular_weight": getattr(fuel_cfg, "molecular_weight", 170.0),
+                "Pc_ref": getattr(fuel_cfg, "Pc_ref", 2.5e6),
+            }
+        except Exception:
+            return None

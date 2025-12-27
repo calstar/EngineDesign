@@ -277,6 +277,12 @@ def calculate_evaporation_time_scale(
     tau_evap : float
         Evaporation time scale [s]
     """
+    from engine.pipeline.spalding import (
+        calculate_droplet_surface_temperature,
+        calculate_spalding_number,
+        calculate_film_diffusivity,
+    )
+    
     if not np.isfinite(Pc) or Pc <= 0:
         raise ValueError(f"Invalid pressure: {Pc} Pa")
     if not np.isfinite(Tc) or Tc <= 0:
@@ -292,30 +298,14 @@ def calculate_evaporation_time_scale(
             "boiling_point": 489.0,  # K
         }
     
-    rho_fuel = fuel_props.get("density", 810.0)
-    L_vap = fuel_props.get("latent_heat", 300e3)
-    T_boil = fuel_props.get("boiling_point", 489.0)
+    # Calculate T_s and film temperature using centralized function
+    T_s, Tf = calculate_droplet_surface_temperature(Tc, Pc, fuel_props)
     
-    # Mass diffusivity [m²/s] - pressure and temperature dependent
-    # D ≈ D0 × (T/T0)^1.5 × (P0/P)
-    D0 = 1e-5  # Reference diffusivity [m²/s] at T0=500K, P0=1MPa
-    T0 = 500.0
-    P0 = 1e6  # 1 MPa
+    # Calculate diffusivity at film temperature
+    D = calculate_film_diffusivity(Tf, Pc)
     
-    D_temp_factor = (Tc / T0) ** 1.5
-    D_press_factor = P0 / Pc
-    
-    D = D0 * D_temp_factor * D_press_factor
-    
-    if not np.isfinite(D) or D <= 0:
-        raise ValueError(f"Non-physical diffusivity: D={D}")
-    
-    # Spalding number B = (Y_Fs - Y_F∞) / (1 - Y_Fs)
-    # Simplified: B ≈ cp × (T∞ - T_s) / L_vap
-    # For hot chamber: T∞ ≈ Tc, T_s ≈ T_boil
-    cp_gas = 1200.0  # J/(kg·K) - approximate gas specific heat
-    B = cp_gas * (Tc - T_boil) / L_vap
-    B = max(B, 0.01)  # Minimum for numerical stability (must be > 0)
+    # Calculate Spalding number using centralized function
+    B = calculate_spalding_number(Tc, Pc, T_s, fuel_props)
     
     if not np.isfinite(B) or B <= 0:
         raise ValueError(f"Non-physical Spalding number: B={B}")

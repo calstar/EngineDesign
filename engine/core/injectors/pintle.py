@@ -300,6 +300,9 @@ class PintleInjector(InjectorModel):
                     "turbulence_intensity_mix": turbulence_intensity_mix,
                     "breakup_multiplier": breakup_multiplier,
                     "penetration_multiplier": penetration_multiplier,
+                    # Injector velocities
+                    "u_O": float(u_O),
+                    "u_F": float(u_F),
                     # Injector pressure diagnostics
                     "P_injector_O": float(P_inj_O),
                     "P_injector_F": float(P_inj_F),

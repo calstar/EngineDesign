@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 import numpy as np
+import warnings
 from engine.pipeline.config_schemas import CombustionEfficiencyConfig
 
 def calculate_eta_Lstar(
@@ -21,6 +22,7 @@ def calculate_eta_Lstar(
     R: float,
     m_dot_total: float,
     Ac: float,
+    At: float,
     SMD: float,
     L_star: float,
     mu: float = 7e-5,
@@ -46,6 +48,8 @@ def calculate_eta_Lstar(
         Total mass flow rate [kg/s]
     Ac : float
         Chamber cross-sectional area [m^2]
+    At : float
+        Geometric throat area [m^2] (Consistent with nozzle solver geometric At)
     SMD : float
         Sauter mean diameter d32 [m]
     L_star : float
@@ -72,80 +76,62 @@ def calculate_eta_Lstar(
     -------
     eta_Lstar : float
         Evaporation/mixing efficiency associated with length L* [-]
+    Da_L : float
+        Length-based Damköhler number [-]
     """
-    # Gas density and bulk velocity
-    rho_g = Pc / (R * Tc)              # kg/m^3
-    U = m_dot_total / (rho_g * Ac)     # m/s
+    # ... (logic) ...
+    # (re-reading end of function)
+    # Gas density and bulk velocity (Chamber-average approximation)
+    rho_ch = Pc / (R * Tc)              # [kg/m^3]
+    
+    # U_bulk: chamber-average convective scale for droplet Re calculation
+    U_bulk = m_dot_total / (rho_ch * Ac) 
+    
+    # G_throat: Throat mass flux for residence-time scaling
+    G_throat = m_dot_total / At if At > 0 else 1.0
 
     # Effective diffusivity at Tc, Pc
     D_eff = D0 * (Tc / 300.0)**1.75 * (101325.0 / Pc)  # m^2/s
 
     # Dimensionless groups
-    Sc = mu / (rho_g * D_eff)
-    Re = rho_g * U * float(SMD) / mu          # based on droplet diameter
+    Sc = mu / (rho_ch * D_eff)
+    Re = rho_ch * U_bulk * float(SMD) / mu          # based on droplet diameter and bulk flow
 
     Sh = 2.0 + 0.6 * Re**0.5 * Sc**(1.0/3.0)
 
     # Calculate Spalding number if not provided
-    # Using PRESSURE-BASED mass fraction formulation (recommended for rocket conditions)
-    # Bm = Ys / (1 - Ys) where Ys = P_sat(T_s) / Pc
+    # Using centralized spalding module for consistent calculations
     if Bm is None:
-        # Extract fuel properties from config or use RP-1 defaults
-        if fuel_props is not None:
-            T_boil = fuel_props.get("T_boil", fuel_props.get("boiling_point", 489.0))
-            L_vap = fuel_props.get("L_vap", fuel_props.get("latent_heat", 300e3))
-            # Antoine coefficients for vapor pressure (if available)
-            A_ant = fuel_props.get("A_antoine", 6.9)  # RP-1 approx
-            B_ant = fuel_props.get("B_antoine", 1400.0)
-            C_ant = fuel_props.get("C_antoine", -60.0)
-        else:
-            # RP-1 defaults
-            T_boil = 489.0  # K
-            L_vap = 300e3   # J/kg
-            A_ant = 6.9     # Approximate Antoine A for RP-1
-            B_ant = 1400.0  # Approximate Antoine B
-            C_ant = -60.0   # Approximate Antoine C
+        from engine.pipeline.spalding import (
+            calculate_droplet_surface_temperature,
+            calculate_spalding_pressure_based,
+        )
         
-        # Estimate droplet surface temperature (approximation: between T_boil and Tc)
-        # At high heat transfer rates, T_s approaches wet-bulb temperature
-        T_s = min(T_boil + 50.0, 0.7 * Tc + 0.3 * T_boil)  # Weighted average
-        
-        # Calculate saturation vapor pressure at surface temperature
-        # Using Clausius-Clapeyron approximation: P_sat = P_ref * exp(-L_vap/R_fuel * (1/T - 1/T_ref))
-        # or Antoine equation: log10(P_sat) = A - B/(C + T)
-        # Use Clausius-Clapeyron for simplicity (more robust)
-        R_fuel = 8314.0 / 170.0  # J/(kg·K) for RP-1 (M ~ 170 g/mol)
-        P_sat_boil = 101325.0  # At boiling point, P_sat = 1 atm
-        P_sat = P_sat_boil * np.exp(-L_vap / R_fuel * (1.0/T_s - 1.0/T_boil))
-        
-        # Mass fraction at surface: Ys = P_sat / Pc (for dilute species, ideal mixing)
-        Ys = P_sat / max(Pc, 1e3)  # Prevent division by zero
-        
-        # Pressure-based Spalding mass transfer number
-        # Bm = Ys / (1 - Ys)
-        # This naturally accounts for high chamber pressure reducing evaporation
-        Ys = np.clip(Ys, 0.0, 0.95)  # Prevent division by zero, cap at 95%
-        Bm = Ys / (1.0 - Ys)
-        
-        # CRITICAL: Clamp Bm to physically plausible range for rocket conditions
-        # Without clamping, Bm can exceed 5-10 and cause unrealistic efficiency collapse
-        Bm = np.clip(Bm, 0.01, 2.0)  # Upper bound of 2.0 as recommended
+        # Calculate T_s and Spalding number using centralized functions
+        # Use pressure-based formulation with reference pressure for solver stability
+        T_s, _ = calculate_droplet_surface_temperature(Tc, Pc, fuel_props)
+        Bm = calculate_spalding_pressure_based(
+            Tc, Pc, T_s, fuel_props, use_reference_pressure=True
+        )
 
     # Evaporation constant K [m^2/s]
-    K = ((8.0 * D_eff * rho_g) / rho_l) * Sh * np.log(1.0 + Bm)
+    K = ((8.0 * D_eff * rho_ch) / rho_l) * Sh * np.log(1.0 + Bm)
 
     # LOX penalty → effective evaporation constant K_eff [m^2/s]
     K_eff = K / (1.0 + phi)
 
     # Length-based Damköhler number:
-    # Da_L = (K_eff * L_star) / (U * SMD^2)   (dimensionless)
-    Da_L = K_eff * L_star / (U * SMD**2)
+    # tau_res = L* * rho_ch / G_throat = (V/At) * rho_ch / (mdot/At) = V*rho/mdot
+    # t_evap = SMD^2 / K_eff (approximate d^2 law time scale)
+    # Da_L = tau_res / t_evap = (K_eff * L_star * rho_ch) / (G_throat * SMD^2)
+    # Using G_throat (throat mass flux) ensures correct residence-time scaling for L*.
+    Da_L = (K_eff * L_star * rho_ch) / (G_throat * SMD**2) if G_throat > 0 else 0.0
 
     # Efficiency from d^2-law over length L*
     eta_Lstar = 1.0 - np.exp(-Da_L)
 
 
-    return eta_Lstar
+    return eta_Lstar, Da_L
 
 
 def calculate_residence_time(
@@ -190,12 +176,14 @@ def calculate_residence_time(
     tau_res : float
         Residence time [s]
     """
-    # Gas density at chamber conditions
-    rho_g = Pc / (R * Tc) if R > 0 and Tc > 0 else 1.0
+    # Gas density at chamber conditions (Chamber approximation)
+    rho_ch = Pc / (R * Tc) if R > 0 and Tc > 0 else 1.0
     
     # Residence time = Volume * rho / mdot
     # Since L* = Volume / At, then Volume = L* * At
-    tau_res = (Lstar * At * rho_g) / m_dot_total if m_dot_total > 0 else 0.001
+    # tau_res = (L* * At * rho_ch) / mdot = L* * rho_ch / (mdot/At) = L* * rho_ch / G_throat
+    G_throat = m_dot_total / At if At > 0 else 1.0
+    tau_res = (Lstar * rho_ch) / G_throat if G_throat > 0 else 0.001
     
     return float(tau_res)
 
@@ -314,6 +302,8 @@ def calculate_mixing_efficiency(
     Dinj: float,
     m_dot_total: float,
     Lstar: float,
+    u_fuel: Optional[float] = None,
+    u_lox: Optional[float] = None,
     target_smd: float = 50e-6,  # 50 microns
     beta: float = 8.0,  # recirculation/mixing strength factor
 ) -> float:
@@ -347,6 +337,10 @@ def calculate_mixing_efficiency(
         Total mass flow rate [kg/s]
     Lstar : float
         Characteristic length [m]
+    u_fuel : float, optional
+        Fuel injection velocity [m/s]
+    u_lox : float, optional
+        LOX injection velocity [m/s]
     target_smd : float
         Target SMD for good atomization [m]
     beta : float
@@ -357,17 +351,19 @@ def calculate_mixing_efficiency(
     eta_mix : float
         Mixing efficiency (0-1)
     """
-    # Calculate gas density and bulk velocity from chamber conditions
-    rho_g = Pc / max(R * Tc, 1e-6)
-    U = m_dot_total / max(rho_g * Ac, 1e-8)
+    # Calculate gas density and bulk velocity from chamber conditions (Chamber approximation)
+    rho_ch = Pc / max(R * Tc, 1e-6)
+    
+    # U_bulk: chamber-average convective scale
+    U_bulk = m_dot_total / max(rho_ch * Ac, 1e-8)
 
     # --- turbulence-based transport properties ---
     # Use representative hot-gas viscosity for Reynolds number calculation
     mu_g = 7.0e-5  # Pa·s, representative hot-gas viscosity
 
     # Calculate Reynolds number based on injector diameter and bulk flow
-    Re = rho_g * U * Dinj / max(mu_g, 1e-8)
-    #print(f"rho_g: {rho_g}, U: {U}, Dinj: {Dinj}, mu_g: {mu_g}")
+    Re = rho_ch * U_bulk * Dinj / max(mu_g, 1e-8)
+    #print(f"rho_ch: {rho_ch}, U_bulk: {U_bulk}, Dinj: {Dinj}, mu_g: {mu_g}")
     Re = max(Re, 1.0)
 
     # Estimate turbulence intensity from canonical high-Re pipe flow correlation
@@ -382,19 +378,19 @@ def calculate_mixing_efficiency(
     # k-epsilon model constant (standard value)
     C_mu = 0.09
 
-    # Turbulent kinetic energy: k = (3/2) * (u'^2) where u' = U * I
-    k_est = 1.5 * (U * I_eff) ** 2
+    # Turbulent kinetic energy: k = (3/2) * (u'^2) where u' = U_bulk * I
+    k_est = 1.5 * (U_bulk * I_eff) ** 2
 
     # Dissipation rate: epsilon = C_mu^(3/4) * k^(3/2) / Lt (k-epsilon scaling)
     epsilon_est = C_mu ** 0.75 * k_est ** 1.5 / max(Lt, 1e-6)
     epsilon_est = max(epsilon_est, 1e-8)
 
     # Eddy viscosity: mu_t = rho * C_mu * k^2 / epsilon
-    mu_t = rho_g * C_mu * (k_est ** 2) / epsilon_est
+    mu_t = rho_ch * C_mu * (k_est ** 2) / epsilon_est
     mu_t = max(mu_t, 0.0)
 
     # Turbulent diffusivity: D_t = mu_t / rho (turbulent Schmidt number ≈ 1)
-    D_t = mu_t / max(rho_g, 1e-8)
+    D_t = mu_t / max(rho_ch, 1e-8)
 
     # Molecular diffusivity: scales with temperature^1.75 and inversely with pressure
     D_m = 2.0e-5 * (Tc / 300.0) ** 1.75 * (101325.0 / max(Pc, 1e3))
@@ -410,7 +406,7 @@ def calculate_mixing_efficiency(
     )
     
     # Calculate Reynolds number for physics-based calculations
-    Re_chamber = rho_g * U * np.sqrt(4.0 * Ac / np.pi) / max(mu_g, 1e-8)
+    Re_chamber = rho_ch * U_bulk * np.sqrt(4.0 * Ac / np.pi) / max(mu_g, 1e-8)
     
     if chamber_length > 0:
         evap_factor = calculate_evaporation_factor_physics(
@@ -425,23 +421,33 @@ def calculate_mixing_efficiency(
         evap_factor = 0.5  # Unknown
     # print(f"evaporation_length: {evaporation_length}, evap_factor: {evap_factor}")
     
-    # Correct residence time for mixing: tau = V * rho / mdot = (Lstar * At) * rho / mdot
-    # Using Lstar / U where U = mdot / (rho * Ac) gives V * rho * (Ac/At) / mdot, which is wrong.
-    # We should use U_throat_equiv = mdot / (rho * At)
-    U_throat_equiv = m_dot_total / max(rho_g * At, 1e-8)
-    tau_res_eff = (Lstar / max(U_throat_equiv, 1e-4)) * (1.0 / evap_factor)
+    # Correct residence time for mixing: tau_res = V * rho / mdot = (Lstar * At) * rho / mdot
+    # Using G_throat = mdot / At: tau_res = Lstar * rho / G_throat
+    G_throat = m_dot_total / max(At, 1e-8)
+    tau_res_eff = (Lstar * rho_ch / max(G_throat, 1e-4)) * (1.0 / evap_factor)
 
     # Physics-based recirculation length
     Dc = np.sqrt(4.0 * Ac / np.pi)
-    # Need injector velocity for recirculation calculation
-    # Estimate from mass flow: U_inj ≈ mdot / (rho × A_inj)
-    # For now, use chamber velocity as proxy
-    U_inj_estimate = U  # Approximate
+    
+    # Use provided injection velocities (near-field) if available, otherwise fall back to chamber bulk velocity
+    if u_fuel is None or u_lox is None:
+        # Log/Warn if fallback is used to indicate proxy usage
+        # In a real system, use a proper logger
+        # print(f"[MIXING_WARN] u_fuel or u_lox missing, falling back to U_bulk={U_bulk:.2f} m/s proxy")
+        pass
+
+    u_f_inj = u_fuel if u_fuel is not None else U_bulk
+    u_o_inj = u_lox if u_lox is not None else U_bulk
+    
+    # Sanity checks for injection velocities
+    u_f_inj = float(np.clip(u_f_inj, 1.0, 500.0))
+    u_o_inj = float(np.clip(u_o_inj, 1.0, 500.0))
+    
     L_recirc = calculate_recirculation_length_physics(
         D_chamber=Dc,
         d_pintle_tip=Dinj,  # Use injector diameter as proxy for pintle tip
-        fuel_velocity=U_inj_estimate,
-        lox_velocity=U_inj_estimate,
+        fuel_velocity=u_f_inj,
+        lox_velocity=u_o_inj,
         Re_chamber=Re_chamber,
     )
     # print(f"Dc: {Dc}, L_recirc: {L_recirc}")
@@ -464,7 +470,18 @@ def calculate_mixing_efficiency(
 
     Da_mix = tau_res_eff / tau_mix
     Da_mix = np.clip(Da_mix, 0.0, 50.0)
-    # print(f'tau_res_eff: {tau_res_eff}, tau_mix: {tau_mix}, Da_mix: {Da_mix}')
+    
+    # Debug prints for mixing efficiency diagnosis
+    print(f"[MIXING_DEBUG] === Mixing Efficiency Breakdown ===")
+    print(f"[MIXING_DEBUG] Gas Properties: rho_ch={rho_ch:.4f} kg/m³, U_bulk={U_bulk:.2f} m/s")
+    print(f"[MIXING_DEBUG] Turbulence: I_est={I_est:.4f}, I_eff={I_eff:.4f}, Re={Re:.0f}")
+    print(f"[MIXING_DEBUG] k-epsilon: k={k_est:.2f} m²/s², epsilon={epsilon_est:.2f} m²/s³, Lt={Lt*1e3:.2f} mm")
+    print(f"[MIXING_DEBUG] Diffusivity: D_m={D_m:.2e} m²/s, D_t={D_t:.2e} m²/s, D_total={D_total:.2e} m²/s")
+    print(f"[MIXING_DEBUG] Geometry: Dc={Dc*1e3:.1f} mm, L_recirc={L_recirc*1e3:.1f} mm")
+    print(f"[MIXING_DEBUG] Factors: evap_factor={evap_factor:.4f}, smd_factor={smd_factor:.4f}")
+    print(f"[MIXING_DEBUG] Time Scales: tau_res_eff={tau_res_eff*1e3:.3f} ms, tau_mix={tau_mix*1e3:.3f} ms")
+    print(f"[MIXING_DEBUG] Da_mix={Da_mix:.4f} -> eta_m_raw={1.0 - np.exp(-Da_mix):.4f}")
+    
     eta_m = 1.0 - np.exp(-Da_mix)
     
     return float(np.clip(eta_m, 0.0, 1.0))
@@ -482,10 +499,13 @@ def calculate_combustion_efficiency_advanced(
     At: float,
     Dinj: float,
     m_dot_total: float,
+    u_fuel: Optional[float] = None,
+    u_lox: Optional[float] = None,
     spray_diagnostics: Optional[Dict] = None,
     turbulence_intensity: float = 0.08,
     chamber_length: Optional[float] = None,
     Tc_kinetics: Optional[float] = None,
+    fuel_props: Optional[Dict] = None,
 ) -> Dict[str, float]:
     """
     Advanced combustion efficiency calculation with physics-based corrections.
@@ -572,10 +592,18 @@ def calculate_combustion_efficiency_advanced(
             raise ValueError("SMD is required for eta_Lstar calculation")
         
         # Use Tc (Ideal) for residence time part, but T_react (Actual) for evaporation physics
-        eta_Lstar = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, SMD, Lstar)
+        eta_Lstar, Da_L = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, At, SMD, Lstar, fuel_props=fuel_props)
+
+    if config.model != "exponential":
+        # Back-calculate Da_L for logging if using non-exponential models
+        Da_L = np.inf if eta_Lstar > 0.999 else -np.log(max(1.0 - eta_Lstar, 1e-10))
+
     
     # Clamp L* efficiency
+    eta_Lstar_raw = eta_Lstar
     eta_Lstar = np.clip(eta_Lstar, config.mixture_efficiency_floor, 1.0)
+    if eta_Lstar != eta_Lstar_raw:
+        warnings.warn(f"[ETA_CLAMP] eta_Lstar clamped from {eta_Lstar_raw:.4f} to {eta_Lstar:.4f}")
     
     # 2. Reaction kinetics efficiency (Damköhler number)
     # tau_res uses Tc (Ideal) -> shorter time (conservative)
@@ -585,8 +613,10 @@ def calculate_combustion_efficiency_advanced(
     Da = calculate_damkohler_number(tau_res, tau_chem)
     
     # Efficiency based on Damköhler number
-    eta_kinetics = 1 - np.exp(-Da**0.5)
-    eta_kinetics = np.clip(eta_kinetics, 0.5, 1.0)
+    eta_kinetics_raw = 1 - np.exp(-Da**0.5)
+    eta_kinetics = np.clip(eta_kinetics_raw, 0.5, 1.0)
+    if eta_kinetics != eta_kinetics_raw:
+        warnings.warn(f"[ETA_CLAMP] eta_kinetics clamped from {eta_kinetics_raw:.4f} to {eta_kinetics:.4f}")
     
     # 3. Mixing efficiency
     if spray_diagnostics is not None:
@@ -600,6 +630,7 @@ def calculate_combustion_efficiency_advanced(
         eta_mixing = calculate_mixing_efficiency(
             SMD, x_star, chamber_length, turbulence_intensity,
             Tc, Pc, R, Ac, At, Dinj, m_dot_total, Lstar,
+            u_fuel=u_fuel, u_lox=u_lox,
             target_smd=config.target_smd_microns * 1e-6 if hasattr(config, 'target_smd_microns') else 50e-6
         )
     else:
@@ -611,32 +642,46 @@ def calculate_combustion_efficiency_advanced(
         if not spray_quality_good:
             eta_mixing *= config.spray_penalty_factor
     
+    eta_mixing_raw = eta_mixing
     eta_mixing = np.clip(eta_mixing, config.mixture_efficiency_floor, 1.0)
+    if eta_mixing != eta_mixing_raw:
+        warnings.warn(f"[ETA_CLAMP] eta_mixing clamped from {eta_mixing_raw:.4f} to {eta_mixing:.4f}")
     
     # 4. Turbulence efficiency (enhancement)
     if turbulence_intensity < 0.05:
-        eta_turbulence = 0.9
+        eta_turbulence_raw = 0.9
     elif turbulence_intensity < 0.15:
-        eta_turbulence = 0.95 + 0.05 * (turbulence_intensity / 0.15)
+        eta_turbulence_raw = 0.95 + 0.05 * (turbulence_intensity / 0.15)
     else:
-        eta_turbulence = 1.0 - 0.1 * ((turbulence_intensity - 0.15) / 0.35)
+        eta_turbulence_raw = 1.0 - 0.1 * ((turbulence_intensity - 0.15) / 0.35)
     
-    eta_turbulence = np.clip(eta_turbulence, 0.85, 1.0)
+    eta_turbulence = np.clip(eta_turbulence_raw, 0.85, 1.0)
+    if eta_turbulence != eta_turbulence_raw:
+        warnings.warn(f"[ETA_CLAMP] eta_turbulence clamped from {eta_turbulence_raw:.4f} to {eta_turbulence:.4f}")
     
     # 5. Combined efficiency
     print(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc_ideal={Tc:.0f} K, T_react={T_react:.0f} K, Lstar={Lstar:.3f} m")
-    print(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
-    print(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, turbulence_intensity={turbulence_intensity:.4f}")
-    print(f"[ETA_DEBUG] DERIVED: U={m_dot_total/(Pc/(R*Tc)*Ac):.2f} m/s, Da={Da:.4f}, tau_res={tau_res*1e3:.3f} ms, tau_chem={tau_chem*1e6:.3f} µs")
+    print(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², At={At*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
+    print(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, u_fuel_inj={u_fuel if u_fuel else 0:.1f} m/s, u_lox_inj={u_lox if u_lox else 0:.1f} m/s")
+    
+    rho_ch = Pc / (R * Tc)
+    U_bulk = m_dot_total / (rho_ch * Ac)
+    G_throat = m_dot_total / At
+    
+    print(f"[ETA_DEBUG] DERIVED: rho_ch={rho_ch:.4f} kg/m³, U_bulk={U_bulk:.2f} m/s, G_throat={G_throat:.1f} kg/m²s")
+    print(f"[ETA_DEBUG] DERIVED: tau_res_ch={tau_res*1e3:.3f} ms, Da_kinetics={Da:.4f}, Da_L={Da_L:.4f}")
     print(f"[ETA_DEBUG] OUTPUTS: eta_Lstar={eta_Lstar:.4f}, eta_kinetics={eta_kinetics:.4f}, eta_mixing={eta_mixing:.4f}, eta_turbulence={eta_turbulence:.4f}")
-    eta_total = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
+    
+    eta_total_raw = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
     
     # Apply cooling efficiency if provided (external)
     # This would be multiplied in by the caller
     
     # Final clamp
     lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
-    eta_total = np.clip(eta_total, lower_bound, 1.0)
+    eta_total = np.clip(eta_total_raw, lower_bound, 1.0)
+    if eta_total != eta_total_raw:
+        warnings.warn(f"[ETA_CLAMP] eta_total clamped from {eta_total_raw:.4f} to {eta_total:.4f}")
     
     return {
         "eta_total": float(eta_total),
