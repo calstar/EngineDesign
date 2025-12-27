@@ -102,17 +102,22 @@ def calculate_eta_Lstar(
     # Calculate Spalding number if not provided
     # Using centralized spalding module for consistent calculations
     if Bm is None:
-        from engine.pipeline.spalding import (
-            calculate_droplet_surface_temperature,
-            calculate_spalding_pressure_based,
-        )
+        from engine.pipeline.spalding import solve_spalding_coupled
         
-        # Calculate T_s and Spalding number using centralized functions
-        # Use pressure-based formulation with reference pressure for solver stability
-        T_s, _ = calculate_droplet_surface_temperature(Tc, Pc, fuel_props)
-        Bm = calculate_spalding_pressure_based(
-            Tc, Pc, T_s, fuel_props, use_reference_pressure=True
+        # Build required parameters from fuel_props
+        W_F = fuel_props.get("W", fuel_props.get("molecular_weight", 170.0)) if fuel_props else 170.0
+        L_vap = fuel_props.get("L_vap", fuel_props.get("latent_heat", 300e3)) if fuel_props else 300e3
+        
+        result = solve_spalding_coupled(
+            T_inf=Tc,
+            P=Pc,
+            W_F=W_F,
+            L_vap=L_vap,
+            gamma=gamma if gamma else 1.2,
+            R_gas=R,
+            fuel="RP-1",
         )
+        Bm = result["B_M"]
 
     # Evaporation constant K [m^2/s]
     K = ((8.0 * D_eff * rho_ch) / rho_l) * Sh * np.log(1.0 + Bm)
@@ -592,7 +597,7 @@ def calculate_combustion_efficiency_advanced(
             raise ValueError("SMD is required for eta_Lstar calculation")
         
         # Use Tc (Ideal) for residence time part, but T_react (Actual) for evaporation physics
-        eta_Lstar, Da_L = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, At, SMD, Lstar, fuel_props=fuel_props)
+        eta_Lstar, Da_L = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, At, SMD, Lstar, gamma=gamma, fuel_props=fuel_props)
 
     if config.model != "exponential":
         # Back-calculate Da_L for logging if using non-exponential models

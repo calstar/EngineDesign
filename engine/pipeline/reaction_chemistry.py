@@ -254,6 +254,8 @@ def calculate_evaporation_time_scale(
     Tc: float,
     droplet_diameter: float,
     fuel_props: Optional[Dict] = None,
+    gamma: float = 1.2,
+    R_gas: float = 300.0,
 ) -> float:
     """
     Calculate droplet evaporation time scale from physics.
@@ -271,6 +273,10 @@ def calculate_evaporation_time_scale(
         Droplet diameter [m] (SMD or characteristic size)
     fuel_props : dict, optional
         Fuel properties (density, latent heat, etc.)
+    gamma : float
+        Specific heat ratio from CEA
+    R_gas : float
+        Gas constant [J/(kg·K)] from CEA
     
     Returns:
     --------
@@ -278,8 +284,7 @@ def calculate_evaporation_time_scale(
         Evaporation time scale [s]
     """
     from engine.pipeline.spalding import (
-        calculate_droplet_surface_temperature,
-        calculate_spalding_number,
+        solve_spalding_coupled,
         calculate_film_diffusivity,
     )
     
@@ -298,14 +303,25 @@ def calculate_evaporation_time_scale(
             "boiling_point": 489.0,  # K
         }
     
-    # Calculate T_s and film temperature using centralized function
-    T_s, Tf = calculate_droplet_surface_temperature(Tc, Pc, fuel_props)
+    # Build required parameters for coupled solver
+    W_F = fuel_props.get("W", fuel_props.get("molecular_weight", 170.0))
+    L_vap = fuel_props.get("L_vap", fuel_props.get("latent_heat", 300e3))
+    
+    # Use coupled solver for consistent Spalding number calculation
+    result = solve_spalding_coupled(
+        T_inf=Tc,
+        P=Pc,
+        W_F=W_F,
+        L_vap=L_vap,
+        gamma=gamma,
+        R_gas=R_gas,
+        fuel="RP-1",
+    )
+    B = result["B_M"]
+    Tf = result["T_film"]
     
     # Calculate diffusivity at film temperature
     D = calculate_film_diffusivity(Tf, Pc)
-    
-    # Calculate Spalding number using centralized function
-    B = calculate_spalding_number(Tc, Pc, T_s, fuel_props)
     
     if not np.isfinite(B) or B <= 0:
         raise ValueError(f"Non-physical Spalding number: B={B}")
@@ -452,7 +468,7 @@ def calculate_chamber_reaction_progress(
             "boiling_point": getattr(config.propellants.fuel, 'boiling_point', 489.0),
         }
     
-    tau_evaporation = calculate_evaporation_time_scale(Pc, T_react, smd, fuel_props)
+    tau_evaporation = calculate_evaporation_time_scale(Pc, T_react, smd, fuel_props, gamma=gamma, R_gas=R)
     
     # Calculate mixing time from actual flow velocities
     # Mean velocity from characteristic velocity

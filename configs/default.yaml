@@ -22,7 +22,7 @@ fluids:
     latent_heat: 300000.0         # L_vap [J/kg] - latent heat of vaporization
     molecular_weight: 170.0       # M [g/mol] - average molecular weight for RP-1
     Pc_ref: 2500000.0             # Reference pressure [Pa] for stable Bm calculation
-    # Antoine equation coefficients for vapor pressure: log10(P_mmHg) = A - B/(C + T_K)
+    # Antoine equation coefficients for vapor pressure: log10(P) = A - B/(C + T_K)
     # RP-1/kerosene approximation (similar to n-dodecane)
     A_antoine: 6.98               # Dimensionless
     B_antoine: 1501.0             # [K]
