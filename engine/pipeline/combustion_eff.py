@@ -127,6 +127,10 @@ def eta_cstar(
             Pc = advanced_params.get("Pc", DEFAULT_CHAMBER_PRESS_PA)
             Tc = advanced_params.get("Tc", DEFAULT_CHAMBER_TEMP_K)
             Tc_kinetics = advanced_params.get("Tc_kinetics", None)
+            
+            # DEBUG: advanced_params extraction
+            print(f"[EFF_DEBUG] Pc={Pc/1e6:.3f} MPa, Tc={Tc:.0f} K, Tc_kinetics={Tc_kinetics if Tc_kinetics else 'None'}")
+            
             cstar_ideal = advanced_params.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S)
             gamma = advanced_params.get("gamma", DEFAULT_GAMMA_ND)
             R = advanced_params.get("R", DEFAULT_GAS_CONST_J_KG_K)
@@ -168,6 +172,8 @@ def eta_cstar(
             )
             
             eta = results["eta_total"]
+            
+            print(f"[ADV_EFF_DEBUG] eta_total: {eta:.4f} (Lstar: {results['eta_Lstar']:.4f}, Kinetics: {results['eta_kinetics']:.4f}, Mixing: {results['eta_mixing']:.4f})")
             
             # Apply cooling efficiency (external factor)
             cooling_eff = float(np.clip(cooling_efficiency, config.cooling_efficiency_floor, 1.0))

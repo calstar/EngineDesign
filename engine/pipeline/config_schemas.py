@@ -365,6 +365,27 @@ class CombustionEfficiencyConfig(BaseModel):
         default=True,
         description="Use shifting equilibrium in nozzle (composition changes with expansion)"
     )
+    # Kinetics timescale calibration (for calculate_reaction_time_scale)
+    tau_ref: float = Field(
+        default=1e-5,
+        gt=0,
+        description="Reference chemical reaction time [s] at tau_ref_P and tau_ref_T. Default 10 μs for LOX/RP-1."
+    )
+    tau_ref_P: float = Field(
+        default=4.0e6,
+        gt=0,
+        description="Reference pressure for tau_ref [Pa]. Default 4 MPa."
+    )
+    tau_ref_T: float = Field(
+        default=3500.0,
+        gt=0,
+        description="Reference temperature for tau_ref [K]. Default 3500 K."
+    )
+    n_pressure: float = Field(
+        default=0.8,
+        ge=0,
+        description="Pressure exponent for kinetics scaling: tau_chem ~ (P_ref/Pc)^n. Default 0.8."
+    )
 
 
 class CombustionConfig(BaseModel):

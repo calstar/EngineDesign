@@ -526,7 +526,27 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
       {/* Results */}
       {results && results.performance && (
         <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
-          <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">✅ Optimization Results</h3>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">✅ Optimization Results</h3>
+            {results.config_yaml && (
+              <button
+                onClick={() => {
+                  const blob = new Blob([results.config_yaml!], { type: 'text/yaml' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'layer1_optimized_config.yaml';
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+                className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm font-medium shadow-sm"
+              >
+                <span>💾 Download Optimized Config (YAML)</span>
+              </button>
+            )}
+          </div>
           
           {/* Key Performance Metrics */}
           <div className="mb-6">

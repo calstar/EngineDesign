@@ -105,3 +105,25 @@ MACH_EXIT_MAX_NUMERICAL = 20.0  # dimensionless
 # Newton-Raphson solver parameters
 MACH_SOLVER_TOLERANCE = 1e-10
 MACH_SOLVER_MAX_ITERATIONS = 50
+
+# =============================================================================
+# Finite-Rate Gasification Model Parameters
+# =============================================================================
+
+# Default Prandtl number for hot combustion gas
+# Used to compute k_g = μ * cp / Pr
+PRANDTL_DEFAULT = 0.8  # dimensionless, typical for hot gas at ~3000K
+
+# Molecular diffusivity reference conditions
+# D_m = D_M_REF * (T / D_M_T_REF)^1.75 * (D_M_P_REF / P)
+D_M_REF = 5e-5        # m²/s at reference T, P
+D_M_T_REF = 1500.0    # K, reference temperature
+D_M_P_REF = 2.5e6     # Pa, reference pressure (2.5 MPa)
+
+# Droplet slip velocity cap
+# Prevents near-field turbulence from smuggling into evaporation efficiency
+U_SLIP_CAP = 50.0  # m/s
+
+# Minimum droplet diameter floor (numerical stability)
+D_MIN_GASIFICATION = 1e-6  # m (1 μm)
+

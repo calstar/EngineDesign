@@ -10,8 +10,10 @@ import traceback
 import numpy as np
 import threading
 import math
+import yaml
 
 from backend.state import app_state
+from backend.routers.config import config_to_dict
 from engine.pipeline.config_schemas import DesignRequirementsConfig
 from engine.optimizer.layers.layer1_static_optimization import run_layer1_optimization
 
@@ -310,6 +312,8 @@ async def run_layer1(
                 "geometry": results.get("optimized_parameters", {}),
                 "objective_history": objective_history,
                 "iteration_history": results.get("iteration_history", []),
+                "config": config_to_dict(optimized_config),
+                "config_yaml": yaml.dump(config_to_dict(optimized_config), default_flow_style=False),
             })
             _optimization_status["results"] = results_dict
             _optimization_status["progress"] = 1.0

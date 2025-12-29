@@ -57,13 +57,29 @@ def calculate_vapor_pressure(
     if fuel not in FUEL_SURROGATES:
         raise ValueError(f"Invalid fuel: {fuel}")
     
-
+    # Sanity check for Celsius/Kelvin confusion
+    if Ts < 200.0:
+        warnings.warn(
+            f"[VAPOR_PRESSURE] Ts={Ts:.1f} K is suspiciously low (< 200 K). "
+            "Check for Celsius/Kelvin confusion.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     
     # Get CoolProp fluid name from surrogate mapping
     coolprop_fluid = FUEL_SURROGATES.get(fuel, fuel)
 
-    Tc = PropsSI("Tcrit", coolprop_fluid)
-    Ts = min(Ts, Tc - 1e-4)
+    # Get critical temperature - saturation pressure is undefined at/above T_crit
+    T_crit = PropsSI("Tcrit", coolprop_fluid)
+    
+    # NO SILENT CLAMPING: Raise error if Ts >= T_crit
+    # The solver is responsible for enforcing domain boundaries
+    if Ts >= T_crit:
+        raise ValueError(
+            f"[VAPOR_PRESSURE] Ts={Ts:.1f} K >= T_crit={T_crit:.1f} K for {coolprop_fluid}. "
+            "Saturation pressure is undefined above critical temperature. "
+            "The solver must enforce T_s < T_crit."
+        )
     
     # Use CoolProp PropsSI: P = f(T, Q=0 for saturated liquid)
     P_sat = PropsSI("P", "T", Ts, "Q", 0, coolprop_fluid)
@@ -529,17 +545,51 @@ def solve_spalding_coupled(
     # Gas mixture molecular weight: W_g = R_u / R
     W_g = R_UNIVERSAL / R_gas
     
-    # Set temperature bounds
+    # =============================================================================
+    # CRITICAL TEMPERATURE DOMAIN ENFORCEMENT
+    # Saturation pressure is undefined above T_crit for real fluids.
+    # The solver must enforce T_s < T_crit to stay within model validity.
+    # =============================================================================
+    FUEL_SURROGATES = {
+        "RP-1": "n-Dodecane", "RP1": "n-Dodecane", "rp-1": "n-Dodecane", "rp1": "n-Dodecane",
+        "Ethanol": "Ethanol", "ethanol": "Ethanol",
+    }
+    coolprop_fluid = FUEL_SURROGATES.get(fuel, fuel)
+    T_crit = PropsSI("Tcrit", coolprop_fluid)
+    T_crit_margin = 1e-2  # 0.01 K margin below T_crit
+    T_crit_limit = T_crit - T_crit_margin
+    
+    # Warn once if T_inf is above T_crit (model is at edge of validity)
+    if T_inf >= T_crit_limit:
+        warnings.warn(
+            f"[SPALDING_REGIME] T_inf={T_inf:.1f} K >= T_crit_limit={T_crit_limit:.1f} K "
+            f"for {coolprop_fluid}. Model validity is limited (supercritical regime).",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    
+    # Set temperature bounds, enforcing T_max <= T_crit_limit
     if T_max is None:
-        T_max = T_inf
+        T_max = min(T_inf, T_crit_limit)
+    else:
+        T_max = min(T_max, T_crit_limit)
+    
     if T_min is None:
         T_min = 200.0  # Reasonable lower bound
     
+    # Sanity check: if T_max <= T_min, we have no valid domain
+    if T_max <= T_min:
+        raise ValueError(
+            f"[SPALDING_DOMAIN] No valid T_s domain: T_min={T_min:.1f} K >= T_max={T_max:.1f} K. "
+            f"T_crit_limit={T_crit_limit:.1f} K. Check fuel surrogate or input temperatures."
+        )
+    
     # Initial guess for surface temperature
     if T_s_init is not None:
-        T_s = T_s_init
+        T_s = min(T_s_init, T_max)  # Clamp to valid domain
     else:
-        T_s = 0.9 * T_inf  # Default: 90% of far-field temperature
+        # Default: 90% of far-field, but clamped to valid domain
+        T_s = min(0.9 * T_inf, T_max)
     
     # Clamp initial guess to bounds
     T_s = np.clip(T_s, T_min, T_max)
@@ -553,13 +603,39 @@ def solve_spalding_coupled(
     X_F_s = 0.0
     L_eff = L_vap
     
+    # =============================================================================
+    # ITERATION DIAGNOSTICS
+    # Track p_vap stalling and provide periodic status output
+    # =============================================================================
+    DIAG_INTERVAL = 5  # Print diagnostics every N iterations
+    p_s_prev = None
+    warned_pv_stall = False
+    T_s_clipped_count = 0
+    X_F_s_clipped_count = 0
+    
     for iteration in range(max_iter):
         # Step 1: Vapor pressure at current T_s
         try:
             p_s = calculate_vapor_pressure(T_s, fuel=fuel)
         except Exception as e:
-            # Fallback: if CoolProp fails, use a simple estimate
-            raise ValueError(f"Vapor pressure calculation failed at T_s = {T_s} K: {e}") from e
+            raise ValueError(f"Vapor pressure calculation failed at T_s = {T_s:.1f} K: {e}") from e
+        
+        # =============================================================================
+        # DIAGNOSTIC: Detect p_vap stall (constant vapor pressure despite T_s changes)
+        # =============================================================================
+        if p_s_prev is not None:
+            delta_pv_rel = abs(p_s - p_s_prev) / max(p_s, 1.0)
+            if delta_pv_rel < 1e-6 and iteration > 1 and not warned_pv_stall:
+                # Check if T_s is also changing - if so, this is a stall
+                T_s_change = abs(T_s - T_s_clipped_count)  # Reuse variable for last T_s
+                if T_s_change > 0.1:  # T_s is changing but p_vap is not
+                    warnings.warn(
+                        f"[SPALDING_DIAG] p_vap stalled: p_s={p_s:.0f} Pa unchanged for T_s≈{T_s:.1f} K. "
+                        "Check if T_s is near T_crit or if fuel surrogate data is wrong.",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    warned_pv_stall = True
         
         # Diagnostic: warn if vapor pressure exceeds total pressure
         if p_s > P:
@@ -571,8 +647,9 @@ def solve_spalding_coupled(
             )
         
         # Step 2: Surface mole fraction (with safety clamp)
-        X_F_s = p_s / P
-        X_F_s = np.clip(X_F_s, 0.0, 0.999999)
+        X_F_s_raw = p_s / P
+        X_F_s = np.clip(X_F_s_raw, 0.0, 0.999999)
+        X_F_s_clipped = (X_F_s != X_F_s_raw)
         
         # Step 3: Convert mole fraction to mass fraction
         # Y_{F,s} = X_{F,s} * W_F / (X_{F,s} * W_F + (1 - X_{F,s}) * W_g)
@@ -640,8 +717,30 @@ def solve_spalding_coupled(
         # Step 7: Under-relaxation
         T_s_new = (1.0 - alpha) * T_s + alpha * T_s_unrelaxed
         
-        # Step 8: Apply bounds
+        # Step 8: Apply bounds (domain enforcement: T_s must stay below T_crit)
+        T_s_pre_clip = T_s_new
         T_s_new = np.clip(T_s_new, T_min, T_max)
+        T_s_clipped = (T_s_new != T_s_pre_clip)
+        
+        # =============================================================================
+        # DIAGNOSTIC: Periodic iteration logging
+        # =============================================================================
+        if iteration % DIAG_INTERVAL == 0 or iteration == 0:
+            clip_flags = ""
+            if T_s_clipped:
+                clip_flags += "T_s_clip "
+            if X_F_s_clipped:
+                clip_flags += "X_F_s_clip "
+            warnings.warn(
+                f"[SPALDING_ITER {iteration:3d}] T_s={T_s:.1f}→{T_s_new:.1f} K (unrel={T_s_unrelaxed:.1f}), "
+                f"p_s={p_s:.0f} Pa, X_F_s={X_F_s:.4f}, Y_F_s={Y_F_s:.4f}, B_M={B_M:.4f}, "
+                f"log1p(B_M)={log_term:.4f} {clip_flags}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        
+        # Track previous p_s for stall detection
+        p_s_prev = p_s
         
         # Check convergence
         delta_T = abs(T_s_new - T_s)
@@ -685,4 +784,6 @@ def solve_spalding_coupled(
         "use_cea_props": use_cea_props,
         "iterations": iteration + 1,
         "converged": converged,
+        "T_crit": float(T_crit),
+        "T_crit_limit": float(T_crit_limit),
     }

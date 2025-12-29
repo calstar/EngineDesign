@@ -703,6 +703,8 @@ export interface Layer1Results {
     best_objective: number;
   }>;
   iteration_history?: Array<Record<string, unknown>>;
+  config?: EngineConfig;
+  config_yaml?: string;
 }
 
 export interface Layer1ResultsResponse {

@@ -154,6 +154,24 @@ class PintleEngineRunner:
         # Ensure chamber_geometry exists
         cg = ensure_chamber_geometry(self.config)
         
+        # Print chamber geometry at start of evaluation (exclude design parameters)
+        print("\n" + "="*80)
+        print("[CHAMBER GEOMETRY] Loaded configuration:")
+        print(f"  Volume:           {cg.volume*1e6:.2f} cm³ ({cg.volume:.6e} m³)")
+        print(f"  A_throat:         {cg.A_throat*1e6:.4f} mm² ({cg.A_throat:.6e} m²)")
+        print(f"  A_exit:           {cg.A_exit*1e6:.4f} mm² ({cg.A_exit:.6e} m²)")
+        print(f"  Expansion Ratio:  {cg.expansion_ratio:.4f}")
+        print(f"  Nozzle Efficiency:{cg.nozzle_efficiency:.4f}")
+        if cg.length:
+            print(f"  Length:           {cg.length*1000:.2f} mm")
+        if cg.Lstar:
+            print(f"  L* (config):      {cg.Lstar*1000:.2f} mm")
+        if cg.chamber_diameter:
+            print(f"  Chamber Diameter: {cg.chamber_diameter*1000:.2f} mm")
+        # if cg.contraction_ratio:
+        #     print(f"  Contraction Ratio:{cg.contraction_ratio:.4f}")
+        print("="*80 + "\n")
+        
         # Solve for chamber pressure
         Pc, diagnostics = self.solver.solve(P_tank_O, P_tank_F, Pc_guess)
         
@@ -364,6 +382,56 @@ class PintleEngineRunner:
             "elevation": elevation,  # Elevation from config (0 if not set)
             "diagnostics": diagnostics,
         }
+        
+        # Print comprehensive results summary
+        print("\n" + "="*80)
+        print("[PERFORMANCE SUMMARY]")
+        print(f"  Thrust:           {F/1000:.3f} kN ({F:.2f} N)")
+        print(f"  Specific Impulse: {Isp:.2f} s")
+        print(f"  Chamber Pressure: {Pc/6894.76:.2f} psi ({Pc/1e6:.4f} MPa)")
+        print(f"  Mixture Ratio:    {MR:.4f} (O/F)")
+        print(f"  Total Mass Flow:  {mdot_total:.4f} kg/s (O: {mdot_O:.4f}, F: {mdot_F:.4f})")
+        print(f"  c* (actual):      {cstar_actual:.2f} m/s")
+        print(f"  c* (ideal):       {diagnostics['cstar_ideal']:.2f} m/s")
+        print(f"  η_c*:             {diagnostics['eta_cstar']:.4f}")
+        print(f"  Cf (actual):      {Cf_actual:.4f}")
+        print(f"  Cf (ideal):       {Cf_ideal:.4f}")
+        print(f"  Exit Velocity:    {v_exit:.2f} m/s")
+        print(f"  Exit Mach:        {M_exit:.3f}")
+        print(f"  Exit Pressure:    {P_exit/6894.76:.2f} psi ({P_exit/1e3:.2f} kPa)")
+        print(f"  Temperatures:     Tc={Tc:.1f} K, T_throat={T_throat:.1f} K, T_exit={T_exit:.1f} K")
+        print(f"  γ (chamber/exit): {gamma:.4f} / {gamma_exit:.4f}")
+        print(f"  R (chamber/exit): {R:.2f} / {R_exit:.2f} J/(kg·K)")
+        print("-"*80)
+        
+        print("[INJECTOR PRESSURE DROPS]")
+        if injector_pressure_diagnostics.get("P_injector_O") is not None:
+            print(f"  P_injector (LOX): {injector_pressure_diagnostics['P_injector_O']/6894.76:.2f} psi")
+        if injector_pressure_diagnostics.get("P_injector_F") is not None:
+            print(f"  P_injector (Fuel):{injector_pressure_diagnostics['P_injector_F']/6894.76:.2f} psi")
+        if injector_pressure_diagnostics.get("delta_p_injector_O") is not None:
+            print(f"  ΔP_inj (LOX):     {injector_pressure_diagnostics['delta_p_injector_O']/6894.76:.2f} psi")
+        if injector_pressure_diagnostics.get("delta_p_injector_F") is not None:
+            print(f"  ΔP_inj (Fuel):    {injector_pressure_diagnostics['delta_p_injector_F']/6894.76:.2f} psi")
+        if injector_pressure_diagnostics.get("delta_p_feed_O") is not None:
+            print(f"  ΔP_feed (LOX):    {injector_pressure_diagnostics['delta_p_feed_O']/6894.76:.2f} psi")
+        if injector_pressure_diagnostics.get("delta_p_feed_F") is not None:
+            print(f"  ΔP_feed (Fuel):   {injector_pressure_diagnostics['delta_p_feed_F']/6894.76:.2f} psi")
+        print("-"*80)
+        
+        print("[CHAMBER INTRINSICS]")
+        if chamber_intrinsics:
+            print(f"  L*:               {chamber_intrinsics.get('Lstar', 0)*1000:.2f} mm")
+            print(f"  Residence Time:   {chamber_intrinsics.get('residence_time', 0)*1000:.3f} ms")
+            print(f"  Velocity (mean):  {chamber_intrinsics.get('velocity_mean', 0):.2f} m/s")
+            print(f"  Velocity (throat):{chamber_intrinsics.get('velocity_throat', 0):.2f} m/s")
+            print(f"  Gas Density:      {chamber_intrinsics.get('density', 0):.3f} kg/m³")
+            print(f"  Sound Speed:      {chamber_intrinsics.get('sound_speed', 0):.2f} m/s")
+            print(f"  Mach (chamber):   {chamber_intrinsics.get('mach_number', 0):.4f}")
+            print(f"  Reynolds Number:  {chamber_intrinsics.get('reynolds_number', 0):.2e}")
+        else:
+            print("  (Chamber intrinsics calculation failed)")
+        print("="*80 + "\n")
         
         return results
     

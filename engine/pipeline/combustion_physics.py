@@ -16,6 +16,140 @@ import numpy as np
 import warnings
 from engine.pipeline.config_schemas import CombustionEfficiencyConfig
 
+
+def compute_combustion_state(
+    Pc: float,
+    Tc: float,
+    R: float,
+    Ac: float,
+    At: float,
+    Lstar: float,
+    m_dot_total: float,
+    Dinj: float,
+    u_fuel: Optional[float] = None,
+    u_lox: Optional[float] = None,
+    C_L: float = 0.1,
+    C_u: float = 0.5,
+    U_rms_cap: float = 200.0,
+) -> Dict[str, float]:
+    """
+    Compute consistent combustion state for all sub-models.
+    
+    This helper ensures τ_res remains purely geometric and provides
+    consistent velocity scales for mixing and evaporation models.
+    
+    Parameters
+    ----------
+    Pc : float
+        Chamber pressure [Pa]
+    Tc : float
+        Chamber temperature [K]
+    R : float
+        Gas constant [J/(kg·K)]
+    Ac : float
+        Chamber cross-sectional area [m²]
+    At : float
+        Throat area [m²]
+    Lstar : float
+        Characteristic length [m]
+    m_dot_total : float
+        Total mass flow rate [kg/s]
+    Dinj : float
+        Characteristic injector diameter [m]
+    u_fuel : float, optional
+        Fuel injection velocity [m/s]
+    u_lox : float, optional
+        LOX injection velocity [m/s]
+    C_L : float
+        Near-field length scale coefficient (default 0.1)
+    C_u : float
+        RMS velocity contribution coefficient (default 0.5)
+    U_rms_cap : float
+        Cap on RMS velocity to prevent artificial η→1 [m/s] (default 200)
+    
+    Returns
+    -------
+    dict
+        Combustion state with keys:
+        - rho_ch: Gas density [kg/m³]
+        - U_bulk: Bulk chamber velocity [m/s]
+        - G_throat: Throat mass flux [kg/(m²·s)]
+        - tau_res: Geometric residence time [s] (NEVER scale by efficiency)
+        - L_mix: Near-field mixing length scale [m]
+        - U_rms: RMS injection velocity [m/s]
+        - U_rms_eff: Capped RMS velocity [m/s]
+        - dU: Velocity difference |u_F - u_O| [m/s]
+        - U_mix: Mixing velocity scale [m/s]
+    """
+    # Validate required parameters - no fallback defaults
+    if R <= 0:
+        raise ValueError(f"Invalid gas constant R={R}. Must be positive.")
+    if Tc <= 0:
+        raise ValueError(f"Invalid chamber temperature Tc={Tc}. Must be positive.")
+    if Ac <= 0:
+        raise ValueError(f"Invalid chamber area Ac={Ac}. Must be positive.")
+    if At <= 0:
+        raise ValueError(f"Invalid throat area At={At}. Must be positive.")
+    if Dinj <= 0:
+        raise ValueError(f"Invalid injector diameter Dinj={Dinj}. Must be positive.")
+    if Lstar <= 0:
+        raise ValueError(f"Invalid characteristic length Lstar={Lstar}. Must be positive.")
+    if m_dot_total <= 0:
+        raise ValueError(f"Invalid mass flow rate m_dot_total={m_dot_total}. Must be positive.")
+    
+    # Injection velocities are REQUIRED - no fallback
+    if u_fuel is None:
+        raise ValueError("Fuel injection velocity (u_fuel) is required. Cannot fall back to default.")
+    if u_lox is None:
+        raise ValueError("LOX injection velocity (u_lox) is required. Cannot fall back to default.")
+    
+    # Gas density
+    rho_ch = Pc / (R * Tc)
+    
+    # Bulk velocity
+    U_bulk = m_dot_total / (rho_ch * Ac)
+    
+    # Throat mass flux
+    G_throat = m_dot_total / At
+    
+    # Residence time - PURELY GEOMETRIC, never scale by efficiency
+    tau_res = (Lstar * rho_ch) / G_throat
+    
+    # Near-field mixing length scale (~1mm for typical 10mm injector)
+    L_mix = C_L * Dinj
+    
+    # Injection velocity scales (already validated above)
+    u_f = float(u_fuel)
+    u_o = float(u_lox)
+    
+    # RMS injection velocity
+    U_rms = np.sqrt(0.5 * (u_f**2 + u_o**2))
+    
+    # Capped RMS to prevent unrealistically large U_mix forcing η→1
+    U_rms_eff = min(U_rms, U_rms_cap)
+    
+    # Velocity difference (shear)
+    dU = abs(u_f - u_o)
+    
+    # Mixing velocity scale: combines shear and turbulent contributions
+    U_mix = np.sqrt(dU**2 + C_u * U_rms_eff**2)
+    
+    # Ensure U_mix has a minimum value for numerical stability
+    U_mix = max(U_mix, 0.1)
+    
+    return {
+        "rho_ch": float(rho_ch),
+        "U_bulk": float(U_bulk),
+        "G_throat": float(G_throat),
+        "tau_res": float(tau_res),
+        "L_mix": float(L_mix),
+        "U_rms": float(U_rms),
+        "U_rms_eff": float(U_rms_eff),
+        "dU": float(dU),
+        "U_mix": float(U_mix),
+    }
+
+
 def calculate_eta_Lstar(
     Tc: float,
     Pc: float,
@@ -25,16 +159,25 @@ def calculate_eta_Lstar(
     At: float,
     SMD: float,
     L_star: float,
+    Dinj: float = 0.01,
     mu: float = 7e-5,
-    Bm: float = None,  # Now optional - calculated from pressure-based formulation if not provided
+    Bm: float = None,
     phi: float = 3.0,
     D0: float = 2e-5,
     rho_l: float = 800.0,
-    gamma: float = None,  # For calculating cp_gas if available
-    fuel_props: dict = None,  # Fuel properties from config (T_boil, L_vap, P_sat_coeffs)
-) -> float:
+    gamma: float = None,
+    fuel_props: dict = None,
+    u_fuel: Optional[float] = None,
+    u_lox: Optional[float] = None,
+) -> Tuple[float, float]:
     """
-    Compute evaporation-based efficiency using L* and a d^2-law evaporation model.
+    Compute evaporation-based efficiency using FINITE-RATE GASIFICATION model.
+    
+    This function replaces the Spalding d²-law evaporation model for transcritical/
+    supercritical rocket combustor conditions where vapor-pressure equilibrium fails.
+    
+    NOTE: Spalding code is retained below for diagnostics but does NOT contribute
+    to the efficiency calculation. This is a regime correction, not a tuning change.
 
     Parameters
     ----------
@@ -49,17 +192,19 @@ def calculate_eta_Lstar(
     Ac : float
         Chamber cross-sectional area [m^2]
     At : float
-        Geometric throat area [m^2] (Consistent with nozzle solver geometric At)
+        Geometric throat area [m^2]
     SMD : float
         Sauter mean diameter d32 [m]
     L_star : float
         Characteristic length (L*) [m]
+    Dinj : float, optional
+        Characteristic injector diameter [m]
     mu : float, optional
         Dynamic viscosity [Pa·s]
     Bm : float, optional
-        Spalding mass number [-]. If None, calculated from pressure-based formulation.
+        Spalding mass number [-] (DIAGNOSTIC ONLY - not used for efficiency)
     phi : float, optional
-        LOX penalty constant [-]
+        LOX penalty constant [-] (DIAGNOSTIC ONLY)
     D0 : float, optional
         Reference diffusivity at 300 K, 1 atm [m^2/s]
     rho_l : float, optional
@@ -67,76 +212,384 @@ def calculate_eta_Lstar(
     gamma : float, optional
         Specific heat ratio for calculating cp_gas
     fuel_props : dict, optional
-        Fuel properties from config:
-        - T_boil: Boiling point [K]
-        - L_vap: Latent heat [J/kg]
-        - A_antoine, B_antoine, C_antoine: Antoine equation coefficients for P_sat
+        Fuel properties from config. Required keys:
+        - "latent_heat" or "L_vap": Latent heat [J/kg]
+        - "specific_heat": Liquid specific heat [J/(kg·K)]
+        - "temperature": Fuel injection temperature [K]
+    u_fuel : float, optional
+        Fuel injection velocity [m/s]
+    u_lox : float, optional
+        LOX injection velocity [m/s]
 
     Returns
     -------
     eta_Lstar : float
-        Evaporation/mixing efficiency associated with length L* [-]
+        Evaporation efficiency associated with length L* [-]
     Da_L : float
-        Length-based Damköhler number [-]
+        Damköhler number for evaporation [-]
     """
-    # ... (logic) ...
-    # (re-reading end of function)
-    # Gas density and bulk velocity (Chamber-average approximation)
-    rho_ch = Pc / (R * Tc)              # [kg/m^3]
+    from engine.pipeline.physics_constants import PRANDTL_DEFAULT
     
-    # U_bulk: chamber-average convective scale for droplet Re calculation
-    U_bulk = m_dot_total / (rho_ch * Ac) 
+    # Use shared helper for consistent state
+    state = compute_combustion_state(
+        Pc=Pc, Tc=Tc, R=R, Ac=Ac, At=At, Lstar=L_star,
+        m_dot_total=m_dot_total, Dinj=Dinj,
+        u_fuel=u_fuel, u_lox=u_lox
+    )
     
-    # G_throat: Throat mass flux for residence-time scaling
-    G_throat = m_dot_total / At if At > 0 else 1.0
-
-    # Effective diffusivity at Tc, Pc
-    D_eff = D0 * (Tc / 300.0)**1.75 * (101325.0 / Pc)  # m^2/s
-
-    # Dimensionless groups
-    Sc = mu / (rho_ch * D_eff)
-    Re = rho_ch * U_bulk * float(SMD) / mu          # based on droplet diameter and bulk flow
-
-    Sh = 2.0 + 0.6 * Re**0.5 * Sc**(1.0/3.0)
-
-    # Calculate Spalding number if not provided
-    # Using centralized spalding module for consistent calculations
-    if Bm is None:
-        from engine.pipeline.spalding import solve_spalding_coupled
-        
-        # Build required parameters from fuel_props
-        W_F = fuel_props.get("W", fuel_props.get("molecular_weight", 170.0)) if fuel_props else 170.0
-        L_vap = fuel_props.get("L_vap", fuel_props.get("latent_heat", 300e3)) if fuel_props else 300e3
-        
-        result = solve_spalding_coupled(
-            T_inf=Tc,
-            P=Pc,
-            W_F=W_F,
-            L_vap=L_vap,
-            gamma=gamma if gamma else 1.2,
-            R_gas=R,
-            fuel="RP-1",
+    rho_g = state["rho_ch"]
+    U_bulk = state["U_bulk"]
+    tau_res = state["tau_res"]  # Pure geometric, from helper
+    U_mix = state["U_mix"]
+    
+    # Droplet slip velocity: use max of bulk and mixing scales
+    U_slip = max(U_bulk, U_mix)
+    
+    # =========================================================================
+    # FINITE-RATE GASIFICATION MODEL (ACTIVE)
+    # Replaces Spalding d²-law for transcritical/supercritical regime
+    # =========================================================================
+    
+    # Validate fuel_props
+    if fuel_props is None:
+        raise ValueError(
+            "fuel_props is required for gasification efficiency. "
+            "Expected dict with keys 'latent_heat', 'specific_heat', 'temperature'."
         )
-        Bm = result["B_M"]
-
-    # Evaporation constant K [m^2/s]
-    K = ((8.0 * D_eff * rho_ch) / rho_l) * Sh * np.log(1.0 + Bm)
-
-    # LOX penalty → effective evaporation constant K_eff [m^2/s]
-    K_eff = K / (1.0 + phi)
-
-    # Length-based Damköhler number:
-    # tau_res = L* * rho_ch / G_throat = (V/At) * rho_ch / (mdot/At) = V*rho/mdot
-    # t_evap = SMD^2 / K_eff (approximate d^2 law time scale)
-    # Da_L = tau_res / t_evap = (K_eff * L_star * rho_ch) / (G_throat * SMD^2)
-    # Using G_throat (throat mass flux) ensures correct residence-time scaling for L*.
-    Da_L = (K_eff * L_star * rho_ch) / (G_throat * SMD**2) if G_throat > 0 else 0.0
-
-    # Efficiency from d^2-law over length L*
-    eta_Lstar = 1.0 - np.exp(-Da_L)
-
-
+    
+    # Extract required fuel properties
+    L_eff = fuel_props.get("L_vap") or fuel_props.get("latent_heat")
+    if L_eff is None:
+        raise ValueError(
+            f"fuel_props must contain 'L_vap' or 'latent_heat'. "
+            f"Got keys: {list(fuel_props.keys())}"
+        )
+    
+    cp_l = fuel_props.get("specific_heat", 2000.0)  # Default for RP-1
+    T_inj = fuel_props.get("temperature", 293.0)    # Default injection temp
+    
+    # Gas cp from gamma and R: cp = gamma * R / (gamma - 1)
+    if gamma is not None and gamma > 1.0:
+        cp_g = gamma * R / (gamma - 1.0)
+    else:
+        cp_g = 2200.0  # Default for hot combustion gas [J/(kg·K)]
+    
+    # Call gasification efficiency model
+    eta_Lstar, gasif_diagnostics = calculate_gasification_efficiency(
+        Tc=Tc,
+        Pc=Pc,
+        tau_res=tau_res,
+        SMD=SMD,
+        rho_l=rho_l,
+        cp_l=cp_l,
+        L_eff=L_eff,
+        T_inj=T_inj,
+        cp_g=cp_g,
+        rho_g=rho_g,
+        mu_g=mu,
+        U_slip=U_slip,
+        D_m=None,  # Auto-compute from T, P scaling
+        Pr=PRANDTL_DEFAULT,
+    )
+    
+    # Compute Da_L for diagnostics (tau_res / tau_vap)
+    tau_vap = gasif_diagnostics["tau_vap"]
+    Da_L = tau_res / tau_vap if tau_vap > 0 else np.inf
+    
+    # =========================================================================
+    # SPALDING MODEL (DISABLED - RETAINED FOR DIAGNOSTICS ONLY)
+    # This code does NOT contribute to eta_Lstar.
+    # Kept for future subcritical mode support and validation.
+    # =========================================================================
+    SPALDING_DIAGNOSTIC_ENABLED = False  # Set to True to run Spalding for comparison
+    
+    if SPALDING_DIAGNOSTIC_ENABLED:
+        print("[SPALDING_DIAGNOSTIC] Running Spalding model for comparison (does NOT affect efficiency)...")
+        
+        # Effective diffusivity at Tc, Pc (molecular)
+        D_eff = D0 * (Tc / 300.0)**1.75 * (101325.0 / Pc)
+        
+        # Dimensionless groups
+        Sc = mu / max(rho_g * D_eff, 1e-10)
+        Re = rho_g * U_slip * float(SMD) / mu
+        Sh = 2.0 + 0.6 * Re**0.5 * Sc**(1.0/3.0)
+        
+        # Calculate Spalding number if not provided
+        if Bm is None:
+            from engine.pipeline.spalding import solve_spalding_coupled
+            
+            W_F = fuel_props.get("W") or fuel_props.get("molecular_weight", 170.0)
+            L_vap = fuel_props.get("L_vap") or fuel_props.get("latent_heat", 300e3)
+            
+            try:
+                result = solve_spalding_coupled(
+                    T_inf=Tc,
+                    P=Pc,
+                    W_F=W_F,
+                    L_vap=L_vap,
+                    gamma=gamma,
+                    R_gas=R,
+                    fuel="RP-1",
+                )
+                Bm_calc = result["B_M"]
+                T_s = result["T_s"]
+                print(f"[SPALDING_DIAGNOSTIC] Converged: Bm={Bm_calc:.4f}, T_s={T_s:.1f} K")
+            except Exception as e:
+                print(f"[SPALDING_DIAGNOSTIC] Solver failed: {e}")
+                Bm_calc = 0.5  # Fallback
+        else:
+            Bm_calc = Bm
+        
+        # Evaporation constant K [m^2/s]
+        K = ((8.0 * D_eff * rho_g) / rho_l) * Sh * np.log1p(Bm_calc)
+        K_eff = K / (1.0 + phi)
+        tau_evap_spalding = SMD**2 / K_eff if K_eff > 0 else np.inf
+        Da_L_spalding = tau_res / tau_evap_spalding if tau_evap_spalding > 0 else 0.0
+        eta_Lstar_spalding = 1.0 - np.exp(-Da_L_spalding)
+        
+        print(f"[SPALDING_DIAGNOSTIC] tau_evap={tau_evap_spalding*1e3:.4f} ms, "
+              f"Da_L={Da_L_spalding:.4f}, eta_Spalding={eta_Lstar_spalding:.4f}")
+        print(f"[SPALDING_DIAGNOSTIC] vs Gasification: tau_vap={tau_vap*1e3:.4f} ms, "
+              f"Da_L={Da_L:.4f}, eta_Gasif={eta_Lstar:.4f}")
+    
     return eta_Lstar, Da_L
+
+
+
+
+def calculate_gasification_efficiency(
+    Tc: float,
+    Pc: float,
+    tau_res: float,
+    SMD: float,
+    rho_l: float,
+    cp_l: float,
+    L_eff: float,
+    T_inj: float,
+    cp_g: float,
+    rho_g: float,
+    mu_g: float,
+    U_slip: float,
+    D_m: Optional[float] = None,
+    Pr: float = 0.8,
+) -> Tuple[float, Dict[str, float]]:
+    """
+    Calculate evaporation efficiency using finite-rate gasification model.
+    
+    This model treats liquid-to-gas conversion as a TIME-LIMITED process,
+    not a surface-equilibrium constraint. Appropriate for transcritical/
+    supercritical injection where Spalding formulation fails.
+    
+    η_vap = 1 - exp(-τ_res / τ_vap)
+    
+    where τ_vap = τ_heat + τ_gasify
+    
+    Parameters
+    ----------
+    Tc : float
+        Chamber/gas temperature [K]
+    Pc : float
+        Chamber pressure [Pa]
+    tau_res : float
+        Residence time [s]
+    SMD : float
+        Sauter mean diameter [m]
+    rho_l : float
+        Liquid fuel density [kg/m³]
+    cp_l : float
+        Liquid fuel specific heat [J/(kg·K)]
+    L_eff : float
+        Effective gasification energy [J/kg] (includes sensible + latent)
+    T_inj : float
+        Fuel injection temperature [K]
+    cp_g : float
+        Gas specific heat [J/(kg·K)]
+    rho_g : float
+        Gas density [kg/m³]
+    mu_g : float
+        Gas dynamic viscosity [Pa·s]
+    U_slip : float
+        Droplet slip velocity [m/s] (capped internally to prevent mixing smuggling)
+    D_m : float, optional
+        Molecular diffusivity [m²/s]. If None, computed from T^1.75/P scaling.
+    Pr : float, optional
+        Prandtl number for gas thermal conductivity calculation. Default 0.8.
+    
+    Returns
+    -------
+    eta_vap : float
+        Gasification efficiency (0-1)
+    diagnostics : dict
+        Intermediate values for debugging:
+        - tau_heat: Heating timescale [s]
+        - tau_gasify: Gasification timescale [s]
+        - tau_vap: Total gasification timescale [s]
+        - T_star: Transition temperature [K]
+        - Nu: Nusselt number [-]
+        - Sh: Sherwood number [-]
+        - Phi: Energy-driven gasification factor [-]
+        - k_g: Gas thermal conductivity [W/(m·K)]
+        - D_m: Molecular diffusivity [m²/s]
+        - U_slip_capped: Capped slip velocity [m/s]
+        - Re: Reynolds number [-]
+        - Sc: Schmidt number [-]
+    
+    Notes
+    -----
+    This replaces the Spalding d²-law evaporation model for high-pressure
+    rocket combustor applications where vapor-pressure equilibrium assumptions
+    do not hold.
+    """
+    from engine.pipeline.physics_constants import (
+        D_M_REF, D_M_T_REF, D_M_P_REF, U_SLIP_CAP, D_MIN_GASIFICATION
+    )
+    
+    # Input validation
+    if Tc <= 0 or Pc <= 0 or tau_res <= 0:
+        raise ValueError(f"Invalid inputs: Tc={Tc}, Pc={Pc}, tau_res={tau_res}")
+    if SMD <= 0:
+        raise ValueError(f"Invalid SMD: {SMD}")
+    
+    # =========================================================================
+    # STEP 1: Compute D (droplet diameter) with minimum clamp
+    # =========================================================================
+    D = max(SMD, D_MIN_GASIFICATION)  # [m]
+    D_sq = D ** 2  # [m²]
+    
+    # =========================================================================
+    # STEP 2: Compute T_* (transition temperature)
+    # Anchored to Tc, not fuel critical temperature
+    # =========================================================================
+    T_star_upper = min(0.95 * Tc, Tc - 200.0)  # Track gas temperature
+    T_star = max(T_star_upper, T_inj + 50.0)    # Ensure ln term is well-defined
+    
+    # Additional safety: T_star must be < Tc for heating to make sense
+    if T_star >= Tc:
+        warnings.warn(
+            f"[GASIFICATION] T_star={T_star:.1f} K >= Tc={Tc:.1f} K. "
+            "Clamping T_star to Tc - 10 K.",
+            RuntimeWarning, stacklevel=2
+        )
+        T_star = Tc - 10.0
+    
+    # =========================================================================
+    # STEP 3: Gas thermal conductivity from k_g = μ·cp/Pr
+    # =========================================================================
+    k_g = mu_g * cp_g / Pr  # [W/(m·K)]
+    
+    # =========================================================================
+    # STEP 4: Molecular diffusivity (if not provided)
+    # D_m ∝ T^1.75 / P scaling
+    # =========================================================================
+    if D_m is None:
+        D_m = D_M_REF * (Tc / D_M_T_REF) ** 1.75 * (D_M_P_REF / max(Pc, 1e3))
+    
+    # =========================================================================
+    # STEP 5: Cap U_slip to prevent mixing smuggling
+    # =========================================================================
+    U_slip_capped = min(abs(U_slip), U_SLIP_CAP)
+    U_slip_capped = max(U_slip_capped, 0.1)  # Minimum for Re calculation
+    
+    # =========================================================================
+    # STEP 6: Dimensionless numbers (Re, Pr, Sc, Nu, Sh)
+    # =========================================================================
+    # Reynolds number based on capped slip velocity
+    Re = rho_g * U_slip_capped * D / max(mu_g, 1e-10)
+    
+    # Schmidt number: Sc = ν/D_m = μ/(ρ·D_m)
+    Sc = mu_g / (rho_g * max(D_m, 1e-12))
+    
+    # Nusselt number: Nu = 2 + 0.6·Re^0.5·Pr^(1/3) (Ranz-Marshall)
+    Nu = 2.0 + 0.6 * np.sqrt(max(Re, 0.0)) * (Pr ** (1.0 / 3.0))
+    
+    # Sherwood number: Sh = 2 + 0.6·Re^0.5·Sc^(1/3)
+    Sh = 2.0 + 0.6 * np.sqrt(max(Re, 0.0)) * (Sc ** (1.0 / 3.0))
+    
+    # =========================================================================
+    # STEP 7: Heating timescale τ_heat (lumped capacitance)
+    # τ_heat = (ρ_l·cp_l·D²) / (6·Nu·k_g) · ln((Tc - T_inj) / (Tc - T_*))
+    # =========================================================================
+    dT_initial = Tc - T_inj  # Temperature difference at start
+    dT_final = Tc - T_star   # Temperature difference at transition
+    
+    # Safety: ensure log argument is positive and > 1
+    if dT_final <= 0 or dT_initial <= dT_final:
+        warnings.warn(
+            f"[GASIFICATION] Invalid temperature profile: dT_initial={dT_initial:.1f}, "
+            f"dT_final={dT_final:.1f}. Using tau_heat = 0.",
+            RuntimeWarning, stacklevel=2
+        )
+        tau_heat = 1e-9  # Near-zero
+    else:
+        log_arg = dT_initial / dT_final
+        log_term = np.log(log_arg)
+        tau_heat = (rho_l * cp_l * D_sq) / (6.0 * Nu * k_g) * log_term
+    
+    # =========================================================================
+    # STEP 8: Energy-driven gasification factor Φ
+    # Φ = cp_g·(Tc - T_*) / [cp_g·(Tc - T_*) + L_eff]
+    # =========================================================================
+    energy_available = cp_g * (Tc - T_star)  # Energy from hot gas cooling
+    energy_required = energy_available + L_eff  # Total energy needed
+    
+    # Phi is bounded [0, 1] by construction
+    Phi = energy_available / max(energy_required, 1e-6)
+    Phi = np.clip(Phi, 1e-6, 1.0)  # Safety clamp
+    
+    # =========================================================================
+    # STEP 9: Gasification timescale τ_gasify
+    # τ_gasify = (ρ_l·D²) / (6·ρ_g·D_m·Sh·Φ)
+    # =========================================================================
+    denominator = 6.0 * rho_g * D_m * Sh * Phi
+    if denominator <= 0:
+        tau_gasify = np.inf
+    else:
+        tau_gasify = (rho_l * D_sq) / denominator
+    
+    # =========================================================================
+    # STEP 10: Combined timescale and efficiency
+    # τ_vap = τ_heat + τ_gasify
+    # η_vap = 1 - exp(-τ_res / τ_vap)
+    # =========================================================================
+    tau_vap = tau_heat + tau_gasify
+    
+    # Compute efficiency (bounded [0, 1] by exp mapping)
+    if tau_vap <= 0 or not np.isfinite(tau_vap):
+        eta_vap = 1.0  # Instantaneous gasification if tau_vap is invalid
+    else:
+        eta_vap = 1.0 - np.exp(-tau_res / tau_vap)
+    
+    # =========================================================================
+    # DEBUG OUTPUT
+    # =========================================================================
+    print(f"[GASIFICATION_DEBUG] === Finite-Rate Gasification Model ===")
+    print(f"[GASIFICATION_DEBUG] Inputs: Tc={Tc:.0f} K, Pc={Pc/1e6:.2f} MPa, tau_res={tau_res*1e3:.3f} ms")
+    print(f"[GASIFICATION_DEBUG] Inputs: D={D*1e6:.1f} μm, T_inj={T_inj:.0f} K, L_eff={L_eff/1e3:.1f} kJ/kg")
+    print(f"[GASIFICATION_DEBUG] T_star={T_star:.0f} K (transition temperature)")
+    print(f"[GASIFICATION_DEBUG] Gas props: k_g={k_g:.4f} W/(m·K), D_m={D_m:.2e} m²/s, Pr={Pr:.2f}")
+    print(f"[GASIFICATION_DEBUG] U_slip_capped={U_slip_capped:.1f} m/s (input was {U_slip:.1f} m/s)")
+    print(f"[GASIFICATION_DEBUG] Dimensionless: Re={Re:.1f}, Sc={Sc:.1f}, Nu={Nu:.2f}, Sh={Sh:.2f}")
+    print(f"[GASIFICATION_DEBUG] Phi={Phi:.4f} (energy ratio)")
+    print(f"[GASIFICATION_DEBUG] Timescales: tau_heat={tau_heat*1e3:.4f} ms, tau_gasify={tau_gasify*1e3:.4f} ms")
+    print(f"[GASIFICATION_DEBUG] tau_vap={tau_vap*1e3:.4f} ms -> eta_vap={eta_vap:.4f}")
+    
+    diagnostics = {
+        "tau_heat": float(tau_heat),
+        "tau_gasify": float(tau_gasify),
+        "tau_vap": float(tau_vap),
+        "T_star": float(T_star),
+        "Nu": float(Nu),
+        "Sh": float(Sh),
+        "Phi": float(Phi),
+        "k_g": float(k_g),
+        "D_m": float(D_m),
+        "U_slip_capped": float(U_slip_capped),
+        "Re": float(Re),
+        "Sc": float(Sc),
+        "D": float(D),
+    }
+    
+    return float(eta_vap), diagnostics
 
 
 def calculate_residence_time(
@@ -198,46 +651,51 @@ def calculate_reaction_time_scale(
     Tc: float,
     MR: float,
     gamma: float,
+    tau_ref: float = 1e-5,  # Reference time [s], default 10 μs for LOX/RP-1
+    P_ref: float = 4.0e6,   # Reference pressure [Pa]
+    T_ref: float = 3500.0,  # Reference temperature [K]
+    n_pressure: float = 0.8,  # Pressure exponent
 ) -> float:
     """
-    Estimate chemical reaction time scale.
+    Estimate chemical reaction time scale for rocket combustion.
     
     Uses Arrhenius-like scaling with pressure and temperature.
     Higher pressure → faster reactions (collision frequency)
     Higher temperature → faster reactions (activation energy)
     
-    τ_chem ≈ A × P^(-n) × exp(Ea / (R_gas × T))
-    
-    Simplified model:
     τ_chem ≈ τ_ref × (P_ref / P)^n × exp(Ea_norm × (T_ref / T - 1))
     
-    Parameters:
-    -----------
+    NOTE: tau_ref is a calibrated surrogate parameter for rocket combustion,
+    not a measured universal constant. For LOX/RP-1 at ~3300K, typical
+    chemical timescales are O(10-100 μs), so tau_ref defaults to 10 μs.
+    
+    Parameters
+    ----------
     Pc : float
         Chamber pressure [Pa]
     Tc : float
-        Chamber temperature [K]
+        Chamber temperature [K] - should be ideal/CEA Tc, not degraded
     MR : float
         Mixture ratio
     gamma : float
-        Specific heat ratio
+        Specific heat ratio (unused, kept for signature compatibility)
+    tau_ref : float
+        Reference reaction time [s] at P_ref, T_ref (default 10 μs = 1e-5)
+    P_ref : float
+        Reference pressure [Pa] (default 4 MPa)
+    T_ref : float
+        Reference temperature [K] (default 3500 K)
+    n_pressure : float
+        Pressure exponent (default 0.8)
     
-    Returns:
-    --------
+    Returns
+    -------
     tau_chem : float
         Chemical reaction time scale [s]
     """
-    # Reference conditions (typical rocket chamber)
-    P_ref = 4.0e6  # 4 MPa
-    T_ref = 3500.0  # 3500 K
-    
-    # Pressure exponent (typically 0.5-1.0 for gas-phase reactions)
-    n_pressure = 1.5
-    
     # Normalized activation energy (dimensionless)
     # Higher for more complex reactions (e.g., hydrocarbon combustion)
     # Lower for simpler reactions (e.g., H2/O2)
-    # Typical range: 5-15
     if MR < 1.5:  # Fuel-rich (more complex chemistry)
         Ea_norm = 12.0
     elif MR > 3.0:  # Oxidizer-rich (simpler chemistry)
@@ -245,21 +703,27 @@ def calculate_reaction_time_scale(
     else:  # Near-stoichiometric
         Ea_norm = 10.0
     
-    # Reference reaction time (typical: 1-10 ms)
-    tau_ref = 5e-5  # 5 ms
-    
     # Pressure effect (higher pressure → faster reactions)
     pressure_factor = (P_ref / max(Pc, 1e5)) ** n_pressure
     
-    # Temperature effect (higher temperature → faster reactions)
-    temp_factor = np.exp(Ea_norm * (T_ref / max(Tc, 1000.0) - 1.0))
+    # Temperature effect with clamped exponent to prevent numerical overflow
+    exp_arg = Ea_norm * (T_ref / max(Tc, 1000.0) - 1.0)
+    exp_arg_clamped = np.clip(exp_arg, -20.0, 20.0)  # Prevent exp overflow
+    temp_factor = np.exp(exp_arg_clamped)
     
     tau_chem = tau_ref * pressure_factor * temp_factor
     
-    # Clamp to reasonable range (0.1 ms to 100 ms)
-    tau_chem = np.clip(tau_chem, 0.1e-5, 1e-2)
-    # print(f"tau_chem: {tau_chem}")
+    # Warning if tau_chem seems unrealistically high for rocket conditions
+    # (indicates miscalibration of tau_ref)
+    if tau_chem > 1e-3 and Tc > 2500 and Pc > 0.5e6:
+        warnings.warn(
+            f"[KINETICS_WARN] tau_chem={tau_chem*1e3:.2f} ms is high for "
+            f"Tc={Tc:.0f} K, Pc={Pc/1e6:.2f} MPa. Consider reducing tau_ref "
+            f"(current: {tau_ref*1e6:.1f} μs). Typical LOX/RP-1: 10-100 μs."
+        )
+    
     return float(tau_chem)
+
 
 
 def calculate_damkohler_number(
@@ -295,10 +759,6 @@ def calculate_damkohler_number(
 
 
 def calculate_mixing_efficiency(
-    SMD: float,
-    evaporation_length: float,
-    chamber_length: float,
-    turbulence_intensity: float,
     Tc: float,
     Pc: float,
     R: float,
@@ -309,25 +769,17 @@ def calculate_mixing_efficiency(
     Lstar: float,
     u_fuel: Optional[float] = None,
     u_lox: Optional[float] = None,
-    target_smd: float = 50e-6,  # 50 microns
-    beta: float = 8.0,  # recirculation/mixing strength factor
+    turbulence_intensity: float = 0.08,
 ) -> float:
     """
-    Calculate mixing efficiency based on spray quality and evaporation.
+    Calculate mixing efficiency based on near-field stirring physics.
     
-    Poor mixing (large droplets, long evaporation) → lower efficiency.
-    Good mixing (small droplets, short evaporation) → higher efficiency.
+    This function models STIRRING/MIXING ONLY (no evaporation penalties).
+    Uses near-field length scale L_mix = C_L × Dinj (~1mm) instead of
+    macro chamber recirculation length (~30mm).
     
-    Parameters:
-    -----------
-    SMD : float
-        Sauter Mean Diameter [m]
-    evaporation_length : float
-        Evaporation length [m]
-    chamber_length : float
-        Chamber length [m]
-    turbulence_intensity : float
-        Turbulence intensity (0-1)
+    Parameters
+    ----------
     Tc : float
         Chamber temperature [K]
     Pc : float
@@ -335,9 +787,11 @@ def calculate_mixing_efficiency(
     R : float
         Gas constant [J/(kg·K)]
     Ac : float
-        Chamber area [m^2]
+        Chamber area [m²]
+    At : float
+        Throat area [m²]
     Dinj : float
-        Characteristic injector diameter (e.g., pintle tip) [m]
+        Characteristic injector diameter [m]
     m_dot_total : float
         Total mass flow rate [kg/s]
     Lstar : float
@@ -346,150 +800,116 @@ def calculate_mixing_efficiency(
         Fuel injection velocity [m/s]
     u_lox : float, optional
         LOX injection velocity [m/s]
-    target_smd : float
-        Target SMD for good atomization [m]
-    beta : float
-        Recirculation enhancement factor (dimensionless)
+    turbulence_intensity : float
+        User-provided turbulence intensity (0-1)
     
-    Returns:
-    --------
+    Returns
+    -------
     eta_mix : float
         Mixing efficiency (0-1)
     """
-    # Calculate gas density and bulk velocity from chamber conditions (Chamber approximation)
-    rho_ch = Pc / max(R * Tc, 1e-6)
-    
-    # U_bulk: chamber-average convective scale
-    U_bulk = m_dot_total / max(rho_ch * Ac, 1e-8)
-
-    # --- turbulence-based transport properties ---
-    # Use representative hot-gas viscosity for Reynolds number calculation
-    mu_g = 7.0e-5  # Pa·s, representative hot-gas viscosity
-
-    # Calculate Reynolds number based on injector diameter and bulk flow
-    Re = rho_ch * U_bulk * Dinj / max(mu_g, 1e-8)
-    #print(f"rho_ch: {rho_ch}, U_bulk: {U_bulk}, Dinj: {Dinj}, mu_g: {mu_g}")
-    Re = max(Re, 1.0)
-
-    # Estimate turbulence intensity from canonical high-Re pipe flow correlation
-    I_est = np.clip(0.055 * Re ** (-0.0407), 0.02, 0.3)
-
-    # Use maximum of estimated and user-provided turbulence intensity
-    I_eff = max(I_est, turbulence_intensity)
-
-    # Integral length scale: typically 7% of injector diameter for pipe flow
-    Lt = max(0.07 * Dinj, 1e-5)
-
-    # k-epsilon model constant (standard value)
-    C_mu = 0.09
-
-    # Turbulent kinetic energy: k = (3/2) * (u'^2) where u' = U_bulk * I
-    k_est = 1.5 * (U_bulk * I_eff) ** 2
-
-    # Dissipation rate: epsilon = C_mu^(3/4) * k^(3/2) / Lt (k-epsilon scaling)
-    epsilon_est = C_mu ** 0.75 * k_est ** 1.5 / max(Lt, 1e-6)
-    epsilon_est = max(epsilon_est, 1e-8)
-
-    # Eddy viscosity: mu_t = rho * C_mu * k^2 / epsilon
-    mu_t = rho_ch * C_mu * (k_est ** 2) / epsilon_est
-    mu_t = max(mu_t, 0.0)
-
-    # Turbulent diffusivity: D_t = mu_t / rho (turbulent Schmidt number ≈ 1)
-    D_t = mu_t / max(rho_ch, 1e-8)
-
-    # Molecular diffusivity: scales with temperature^1.75 and inversely with pressure
-    D_m = 2.0e-5 * (Tc / 300.0) ** 1.75 * (101325.0 / max(Pc, 1e3))
-
-    # Total effective diffusivity: sum of molecular and turbulent contributions
-    D_total = max(D_m + D_t, 1e-8)
-
-    # Physics-based evaporation factor
-    from engine.pipeline.physics_based_replacements import (
-        calculate_evaporation_factor_physics,
-        calculate_smd_factor_physics,
-        calculate_recirculation_length_physics,
-    )
-    
-    # Calculate Reynolds number for physics-based calculations
-    Re_chamber = rho_ch * U_bulk * np.sqrt(4.0 * Ac / np.pi) / max(mu_g, 1e-8)
-    
-    if chamber_length > 0:
-        evap_factor = calculate_evaporation_factor_physics(
-            evaporation_length=evaporation_length,
-            chamber_length=chamber_length,
-            SMD=SMD,
-            target_smd=target_smd,
-            Pc=Pc,
-            Tc=Tc,
-        )
-    else:
-        evap_factor = 0.5  # Unknown
-    # print(f"evaporation_length: {evaporation_length}, evap_factor: {evap_factor}")
-    
-    # Correct residence time for mixing: tau_res = V * rho / mdot = (Lstar * At) * rho / mdot
-    # Using G_throat = mdot / At: tau_res = Lstar * rho / G_throat
-    G_throat = m_dot_total / max(At, 1e-8)
-    tau_res_eff = (Lstar * rho_ch / max(G_throat, 1e-4)) * (1.0 / evap_factor)
-
-    # Physics-based recirculation length
-    Dc = np.sqrt(4.0 * Ac / np.pi)
-    
-    # Use provided injection velocities (near-field) if available, otherwise fall back to chamber bulk velocity
+    # Require injection velocities for mixing physics
     if u_fuel is None or u_lox is None:
-        # Log/Warn if fallback is used to indicate proxy usage
-        # In a real system, use a proper logger
-        # print(f"[MIXING_WARN] u_fuel or u_lox missing, falling back to U_bulk={U_bulk:.2f} m/s proxy")
-        pass
-
-    u_f_inj = u_fuel if u_fuel is not None else U_bulk
-    u_o_inj = u_lox if u_lox is not None else U_bulk
+        raise ValueError(
+            f"u_fuel and u_lox are required for mixing efficiency calculation. "
+            f"Got u_fuel={u_fuel}, u_lox={u_lox}."
+        )
     
-    # Sanity checks for injection velocities
-    u_f_inj = float(np.clip(u_f_inj, 1.0, 500.0))
-    u_o_inj = float(np.clip(u_o_inj, 1.0, 500.0))
-    
-    L_recirc = calculate_recirculation_length_physics(
-        D_chamber=Dc,
-        d_pintle_tip=Dinj,  # Use injector diameter as proxy for pintle tip
-        fuel_velocity=u_f_inj,
-        lox_velocity=u_o_inj,
-        Re_chamber=Re_chamber,
+    # Use shared helper for consistent state
+    state = compute_combustion_state(
+        Pc=Pc, Tc=Tc, R=R, Ac=Ac, At=At, Lstar=Lstar,
+        m_dot_total=m_dot_total, Dinj=Dinj,
+        u_fuel=u_fuel, u_lox=u_lox
     )
-    # print(f"Dc: {Dc}, L_recirc: {L_recirc}")
-
-    # Physics-based SMD factor
-    # Calculate injector Reynolds and Weber for physics-based calculation
-    Re_injector = Re_chamber  # Approximate
-    We_injector = 20.0  # Typical for pintle injectors
-    smd_factor = calculate_smd_factor_physics(
-        SMD=SMD,
-        target_smd=target_smd,
-        Re_injector=Re_injector,
-        We_injector=We_injector,
-    )
-
-    #print(f"D_total: {D_total}")
-    tau_mix = (L_recirc ** 2) / (beta * D_total)
-    tau_mix = tau_mix / max(smd_factor, 0.1)
-    tau_mix = max(tau_mix, 1e-6)
-
-    Da_mix = tau_res_eff / tau_mix
-    Da_mix = np.clip(Da_mix, 0.0, 50.0)
     
-    # Debug prints for mixing efficiency diagnosis
-    print(f"[MIXING_DEBUG] === Mixing Efficiency Breakdown ===")
-    print(f"[MIXING_DEBUG] Gas Properties: rho_ch={rho_ch:.4f} kg/m³, U_bulk={U_bulk:.2f} m/s")
-    print(f"[MIXING_DEBUG] Turbulence: I_est={I_est:.4f}, I_eff={I_eff:.4f}, Re={Re:.0f}")
-    print(f"[MIXING_DEBUG] k-epsilon: k={k_est:.2f} m²/s², epsilon={epsilon_est:.2f} m²/s³, Lt={Lt*1e3:.2f} mm")
-    print(f"[MIXING_DEBUG] Diffusivity: D_m={D_m:.2e} m²/s, D_t={D_t:.2e} m²/s, D_total={D_total:.2e} m²/s")
-    print(f"[MIXING_DEBUG] Geometry: Dc={Dc*1e3:.1f} mm, L_recirc={L_recirc*1e3:.1f} mm")
-    print(f"[MIXING_DEBUG] Factors: evap_factor={evap_factor:.4f}, smd_factor={smd_factor:.4f}")
-    print(f"[MIXING_DEBUG] Time Scales: tau_res_eff={tau_res_eff*1e3:.3f} ms, tau_mix={tau_mix*1e3:.3f} ms")
-    print(f"[MIXING_DEBUG] Da_mix={Da_mix:.4f} -> eta_m_raw={1.0 - np.exp(-Da_mix):.4f}")
+    rho_ch = state["rho_ch"]
+    tau_res = state["tau_res"]  # Pure geometric, from helper
+    L_mix = state["L_mix"]  # Near-field shear-layer thickness: C_L × Dinj (~1mm)
+    U_mix = state["U_mix"]  # Near-field mixing velocity (capped)
     
-    eta_m = 1.0 - np.exp(-Da_mix)
+    # === NEAR-FIELD SHEAR-LAYER TURBULENCE CLOSURE ===
+    # (Replaces pipe-flow correlations which are not appropriate for impingement region)
     
-    return float(np.clip(eta_m, 0.0, 1.0))
+    # A) Turbulence intensity from user input with physical bounds validation
+    # In injector near-field, turbulence is dominated by jet/sheet breakup and shear,
+    # not internal fully-developed pipe turbulence. Use provided value with bounds check.
+    I_min, I_max = 0.01, 0.30
+    if turbulence_intensity < I_min or turbulence_intensity > I_max:
+        warnings.warn(
+            f"[MIXING_WARN] turbulence_intensity={turbulence_intensity:.4f} outside physical range "
+            f"[{I_min}, {I_max}]. Clamping for stability."
+        )
+    I_eff = float(np.clip(turbulence_intensity, I_min, I_max))
+    
+    # B) Integral length scale = near-field mixing region thickness
+    # The eddies driving turbulent diffusion are constrained by the shear-layer/impingement
+    # sheet thickness, which is exactly what L_mix represents.
+    Lt = max(L_mix, 1e-5)  # [m]
+    
+    # C) k-ε closure anchored to near-field scales
+    C_mu = 0.09
+    k = 1.5 * (U_mix * I_eff) ** 2  # Turbulent kinetic energy [m²/s²]
+    epsilon = C_mu ** 0.75 * k ** 1.5 / Lt  # Dissipation rate [m²/s³]
+    epsilon = max(epsilon, 1e-12)  # Numerical safety only, not physics boost
+    
+    # Turbulent kinematic viscosity: nu_t = C_mu * k² / ε
+    nu_t = C_mu * (k ** 2) / epsilon
+    
+    # Turbulent diffusivity (Schmidt_t ≈ 1)
+    D_t = nu_t  # [m²/s]
+    
+    # D) Molecular diffusivity (surrogate for gas-phase species diffusion)
+    D_m = 2.0e-5 * (Tc / 300.0) ** 1.75 * (101325.0 / max(Pc, 1e3))  # [m²/s]
+    
+    # Effective diffusivity (no artificial floor that accelerates mixing)
+    D_eff = D_m + D_t
+    
+    # === TIMESCALES WITH SINGULARITY PROTECTION ===
+    # Clamp timescales, not diffusivity, to prevent division-by-zero without
+    # forcing diffusion to be faster than physics.
+    tiny = 1e-12
+    tau_conv = max(L_mix / U_mix, 1e-8)  # Convective time [s]
+    tau_diff = max(L_mix ** 2 / max(D_eff, tiny), 1e-8)  # Diffusive time [s]
+    
+    # Harmonic blend (limiting process dominates)
+    tau_mix = 1.0 / (1.0 / tau_conv + 1.0 / tau_diff)
+    
+    # Damköhler number for mixing
+    Da_mix = tau_res / tau_mix
+    
+    # Efficiency (no floor per user requirements)
+    eta_mix = 1.0 - np.exp(-Da_mix)
+    
+    # === DIAGNOSTIC WARNINGS FOR SANITY CHECKS ===
+    # Warn if D_t is unrealistically large relative to molecular diffusivity
+    D_t_D_m_ratio = D_t / max(D_m, 1e-12)
+    if D_t_D_m_ratio > 1e6:
+        warnings.warn(
+            f"[MIXING_WARN] D_t/D_m = {D_t_D_m_ratio:.2e} is extremely high. "
+            f"Check turbulence_intensity={turbulence_intensity:.4f} or U_mix={U_mix:.1f} m/s."
+        )
+    
+    # Warn if tau_diff is suspiciously small for mm-scale L_mix
+    if tau_diff < 1e-7 and L_mix > 1e-4:
+        warnings.warn(
+            f"[MIXING_WARN] tau_diff={tau_diff:.2e} s is very small for L_mix={L_mix*1e3:.2f} mm. "
+            f"This may indicate unrealistic turbulence estimate. D_t={D_t:.2e} m²/s."
+        )
+    
+    # Debug output showing near-field turbulence variables explicitly
+    print(f"[MIXING_DEBUG] === Near-Field Shear-Layer Mixing Model ===")
+    print(f"[MIXING_DEBUG] State: rho_ch={rho_ch:.4f} kg/m³, tau_res={tau_res*1e3:.3f} ms")
+    print(f"[MIXING_DEBUG] Velocities: U_mix={U_mix:.2f} m/s, dU={state['dU']:.2f} m/s, U_rms_eff={state['U_rms_eff']:.2f} m/s")
+    print(f"[MIXING_DEBUG] Near-field scales: L_mix={L_mix*1e3:.3f} mm, Lt={Lt*1e3:.3f} mm")
+    print(f"[MIXING_DEBUG] Turbulence: I_eff={I_eff:.4f}, k={k:.2f} m²/s², ε={epsilon:.2e} m²/s³, ν_t={nu_t:.2e} m²/s")
+    print(f"[MIXING_DEBUG] Diffusivity: D_m={D_m:.2e}, D_t={D_t:.2e}, D_eff={D_eff:.2e} m²/s, D_t/D_m={D_t_D_m_ratio:.1f}")
+    print(f"[MIXING_DEBUG] Times: tau_conv={tau_conv*1e3:.4f} ms, tau_diff={tau_diff*1e3:.4f} ms, tau_mix={tau_mix*1e3:.4f} ms")
+    print(f"[MIXING_DEBUG] Da_mix={Da_mix:.4f} -> eta_mix={eta_mix:.4f}")
+    
+    return float(eta_mix)
+
+
+
 
 def calculate_combustion_efficiency_advanced(
     Lstar: float,
@@ -579,8 +999,21 @@ def calculate_combustion_efficiency_advanced(
         - tau_res: Residence time [s]
         - tau_chem: Chemical reaction time [s]
     """
+    # Validate required parameters - no fallbacks
+    if u_fuel is None:
+        raise ValueError(
+            "u_fuel (fuel injection velocity) is required for advanced efficiency calculation. "
+            "Check that diagnostics contains 'u_F' key."
+        )
+    if u_lox is None:
+        raise ValueError(
+            "u_lox (LOX injection velocity) is required for advanced efficiency calculation. "
+            "Check that diagnostics contains 'u_O' key."
+        )
+    
     # Use Tc_kinetics for reaction-rate limited processes if provided
     T_react = Tc_kinetics if Tc_kinetics is not None else Tc
+
 
     # 1. L*-based efficiency (finite residence time)
     # Uses Tc (Ideal) for conservative residence time (shorter)
@@ -590,67 +1023,88 @@ def calculate_combustion_efficiency_advanced(
         eta_Lstar = 1.0 - config.C * (1.0 - Lstar / 1.0)
         eta_Lstar = np.clip(eta_Lstar, 0.0, 1.0)
     else:  # exponential (default)
-        if spray_diagnostics is not None:
-            SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
-        else:
-            SMD = 100e-6  # Default SMD if diagnostics not available
-            raise ValueError("SMD is required for eta_Lstar calculation")
+        # SMD is REQUIRED - no fallback
+        if spray_diagnostics is None:
+            raise ValueError(
+                "spray_diagnostics is required for eta_Lstar calculation in exponential model. "
+                "Expected dict with 'D32_O' or 'D32_F' keys."
+            )
         
-        # Use Tc (Ideal) for residence time part, but T_react (Actual) for evaporation physics
-        eta_Lstar, Da_L = calculate_eta_Lstar(Tc, Pc, R, m_dot_total, Ac, At, SMD, Lstar, gamma=gamma, fuel_props=fuel_props)
+        SMD = spray_diagnostics.get("D32_O") or spray_diagnostics.get("D32_F")
+        if SMD is None or SMD <= 0:
+            raise ValueError(
+                f"spray_diagnostics must contain non-zero 'D32_O' or 'D32_F' for SMD. "
+                f"Got keys: {list(spray_diagnostics.keys())}, D32_O={spray_diagnostics.get('D32_O')}, D32_F={spray_diagnostics.get('D32_F')}"
+            )
+
+        
+        # Use Tc (Ideal) for residence time, call with new signature
+        eta_Lstar, Da_L = calculate_eta_Lstar(
+            Tc=Tc, Pc=Pc, R=R, m_dot_total=m_dot_total, Ac=Ac, At=At,
+            SMD=SMD, L_star=Lstar, Dinj=Dinj, gamma=gamma, fuel_props=fuel_props,
+            u_fuel=u_fuel, u_lox=u_lox
+        )
 
     if config.model != "exponential":
         # Back-calculate Da_L for logging if using non-exponential models
         Da_L = np.inf if eta_Lstar > 0.999 else -np.log(max(1.0 - eta_Lstar, 1e-10))
 
-    
-    # Clamp L* efficiency
-    eta_Lstar_raw = eta_Lstar
-    eta_Lstar = np.clip(eta_Lstar, config.mixture_efficiency_floor, 1.0)
-    if eta_Lstar != eta_Lstar_raw:
-        warnings.warn(f"[ETA_CLAMP] eta_Lstar clamped from {eta_Lstar_raw:.4f} to {eta_Lstar:.4f}")
+    # Log warning if eta_Lstar is low (no clamp per user requirements)
+    if eta_Lstar < 0.5:
+        warnings.warn(f"[PHYSICS_WARN] eta_Lstar={eta_Lstar:.4f} is low, check evaporation model inputs.")
     
     # 2. Reaction kinetics efficiency (Damköhler number)
-    # tau_res uses Tc (Ideal) -> shorter time (conservative)
+    # =========================================================================
+    # PRINCIPLE: "Da inputs come from baseline state only"
+    # =========================================================================
+    # To avoid circular dependency where efficiency → degraded state → lower Da → lower efficiency:
+    #   - tau_res: Uses Tc_ideal (CEA), Pc (solver guess), m_dot_total (upstream from injector flows)
+    #   - tau_chem: Uses Tc_ideal (CEA), config kinetics params
+    #   - rho_ch = Pc / (R * Tc_ideal)  ← NOT from degraded T_react
+    #   - G_throat = m_dot_total / At   ← m_dot_total is upstream injector supply, NOT back-solved from c*
+    # =========================================================================
     tau_res = calculate_residence_time(Lstar, Pc, cstar_ideal, gamma, R, Tc, Ac, At, m_dot_total)
-    # tau_chem uses T_react (Actual) -> longer time (conservative)
-    tau_chem = calculate_reaction_time_scale(Pc, T_react, MR, gamma)
+    
+    # tau_chem uses IDEAL Tc to break circular dependency (per user requirement)
+    # Config provides calibrated kinetics parameters for LOX/RP-1
+    tau_chem = calculate_reaction_time_scale(
+        Pc=Pc,
+        Tc=Tc,  # Use ideal Tc, not T_react, to decouple from efficiency
+        MR=MR,
+        gamma=gamma,
+        tau_ref=config.tau_ref,
+        P_ref=config.tau_ref_P,
+        T_ref=config.tau_ref_T,
+        n_pressure=config.n_pressure,
+    )
     Da = calculate_damkohler_number(tau_res, tau_chem)
     
-    # Efficiency based on Damköhler number
-    eta_kinetics_raw = 1 - np.exp(-Da**0.5)
-    eta_kinetics = np.clip(eta_kinetics_raw, 0.5, 1.0)
-    if eta_kinetics != eta_kinetics_raw:
-        warnings.warn(f"[ETA_CLAMP] eta_kinetics clamped from {eta_kinetics_raw:.4f} to {eta_kinetics:.4f}")
+    # Efficiency based on Damköhler number (no clamp per user requirements)
+    eta_kinetics = 1.0 - np.exp(-np.sqrt(Da))
     
-    # 3. Mixing efficiency
-    if spray_diagnostics is not None:
-        SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
-        x_star = spray_diagnostics.get("x_star", 0.0) or 0.1
-        
-        if chamber_length is None:
-            raise ValueError("chamber_length is required for mixing efficiency calculation")
-            
-        # Use Tc (Ideal) for mixing physics to be conservative on residence time (shorter window)
-        eta_mixing = calculate_mixing_efficiency(
-            SMD, x_star, chamber_length, turbulence_intensity,
-            Tc, Pc, R, Ac, At, Dinj, m_dot_total, Lstar,
-            u_fuel=u_fuel, u_lox=u_lox,
-            target_smd=config.target_smd_microns * 1e-6 if hasattr(config, 'target_smd_microns') else 50e-6
-        )
-    else:
-        eta_mixing = 1.0  # Assume perfect mixing if no diagnostics
+    # DEBUG: Kinetics detail showing state sourcing
+    if Da < 5.0 or eta_kinetics < 0.9:
+        print(f"[KINETICS_DEBUG] Da: {Da:.4f} | tau_res: {tau_res*1e3:.3f} ms | tau_chem: {tau_chem*1e6:.1f} µs | eta: {eta_kinetics:.4f}")
+        print(f"[KINETICS_DEBUG] Using Tc_ideal={Tc:.0f} K (not T_react={T_react:.0f} K) to break circular coupling")
     
-    # Apply spray quality penalty if enabled
-    if config.use_spray_correction and spray_diagnostics is not None:
-        spray_quality_good = spray_diagnostics.get("constraints_satisfied", True)
-        if not spray_quality_good:
-            eta_mixing *= config.spray_penalty_factor
+    # 3. Mixing efficiency - uses near-field model (pure stirring, no evap penalties)
+    eta_mixing = calculate_mixing_efficiency(
+        Tc=Tc, Pc=Pc, R=R, Ac=Ac, At=At, Dinj=Dinj,
+        m_dot_total=m_dot_total, Lstar=Lstar,
+        u_fuel=u_fuel, u_lox=u_lox,
+        turbulence_intensity=turbulence_intensity
+    )
     
-    eta_mixing_raw = eta_mixing
-    eta_mixing = np.clip(eta_mixing, config.mixture_efficiency_floor, 1.0)
-    if eta_mixing != eta_mixing_raw:
-        warnings.warn(f"[ETA_CLAMP] eta_mixing clamped from {eta_mixing_raw:.4f} to {eta_mixing:.4f}")
+    # Sanity warning for implausibly low mixing (no clamp per user requirements)
+    if eta_mixing < 0.2 and Pc > 2e6:
+        u_f = u_fuel or 0
+        u_o = u_lox or 0
+        if u_f > 10 and u_o > 10:
+            warnings.warn(
+                f"[PHYSICS_CHECK] Low mixing η={eta_mixing:.2%} at Pc={Pc/1e6:.1f}MPa "
+                f"with injection speeds u_F={u_f:.0f}, u_O={u_o:.0f} m/s. "
+                f"Check L_mix scale."
+            )
     
     # 4. Turbulence efficiency (enhancement)
     if turbulence_intensity < 0.05:
@@ -661,10 +1115,15 @@ def calculate_combustion_efficiency_advanced(
         eta_turbulence_raw = 1.0 - 0.1 * ((turbulence_intensity - 0.15) / 0.35)
     
     eta_turbulence = np.clip(eta_turbulence_raw, 0.85, 1.0)
-    if eta_turbulence != eta_turbulence_raw:
-        warnings.warn(f"[ETA_CLAMP] eta_turbulence clamped from {eta_turbulence_raw:.4f} to {eta_turbulence:.4f}")
     
-    # 5. Combined efficiency
+    # 5. Combined efficiency (no final clamp per user requirements)
+    eta_total = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
+    
+    # Get SMD for debug output (may not be available)
+    SMD = 100e-6  # default
+    if spray_diagnostics is not None:
+        SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
+    
     print(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc_ideal={Tc:.0f} K, T_react={T_react:.0f} K, Lstar={Lstar:.3f} m")
     print(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², At={At*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
     print(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, u_fuel_inj={u_fuel if u_fuel else 0:.1f} m/s, u_lox_inj={u_lox if u_lox else 0:.1f} m/s")
@@ -676,17 +1135,7 @@ def calculate_combustion_efficiency_advanced(
     print(f"[ETA_DEBUG] DERIVED: rho_ch={rho_ch:.4f} kg/m³, U_bulk={U_bulk:.2f} m/s, G_throat={G_throat:.1f} kg/m²s")
     print(f"[ETA_DEBUG] DERIVED: tau_res_ch={tau_res*1e3:.3f} ms, Da_kinetics={Da:.4f}, Da_L={Da_L:.4f}")
     print(f"[ETA_DEBUG] OUTPUTS: eta_Lstar={eta_Lstar:.4f}, eta_kinetics={eta_kinetics:.4f}, eta_mixing={eta_mixing:.4f}, eta_turbulence={eta_turbulence:.4f}")
-    
-    eta_total_raw = eta_Lstar * eta_kinetics * eta_mixing * eta_turbulence
-    
-    # Apply cooling efficiency if provided (external)
-    # This would be multiplied in by the caller
-    
-    # Final clamp
-    lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
-    eta_total = np.clip(eta_total_raw, lower_bound, 1.0)
-    if eta_total != eta_total_raw:
-        warnings.warn(f"[ETA_CLAMP] eta_total clamped from {eta_total_raw:.4f} to {eta_total:.4f}")
+    print(f"[ETA_DEBUG] eta_total={eta_total:.4f}")
     
     return {
         "eta_total": float(eta_total),

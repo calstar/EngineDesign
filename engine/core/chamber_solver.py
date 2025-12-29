@@ -29,6 +29,60 @@ from engine.pipeline.constants import (
 from engine.core.closure import flows
 
 
+def blend_efficiency_sigmoid(
+    Pc: float,
+    eta_advanced: float,
+    eta_simple: float,
+    Pc_low: float = 0.8e6,
+    Pc_high: float = 1.2e6,
+) -> float:
+    """
+    Sigmoid blend between simple and advanced efficiency models.
+    
+    Designed so:
+    - w(Pc_low) ≈ 0.05 (mostly simple)
+    - w(Pc_high) ≈ 0.95 (mostly advanced)
+    
+    Uses log-pressure space for better behavior across orders of magnitude.
+    
+    Parameters
+    ----------
+    Pc : float
+        Chamber pressure [Pa]
+    eta_advanced : float
+        Advanced model efficiency
+    eta_simple : float
+        Simple model efficiency
+    Pc_low : float
+        Pressure at which w ≈ 0.05 (mostly simple) [Pa]
+    Pc_high : float
+        Pressure at which w ≈ 0.95 (mostly advanced) [Pa]
+    
+    Returns
+    -------
+    eta : float
+        Blended efficiency
+    """
+    # Work in log space for better behavior
+    log_Pc = np.log10(max(Pc, 1e5))
+    log_low = np.log10(Pc_low)
+    log_high = np.log10(Pc_high)
+    log_center = 0.5 * (log_low + log_high)
+    
+    # Scale factor: sigmoid(x) = 0.05 at x = -3, 0.95 at x = 3
+    # So k * (log_low - log_center) = -3 → k = 6 / (log_high - log_low)
+    half_width = 0.5 * (log_high - log_low)
+    k = 3.0 / max(half_width, 0.01)  # Prevent divide by zero
+    
+    x = k * (log_Pc - log_center)
+    w = 1.0 / (1.0 + np.exp(-x))
+    
+    # Blend
+    eta = w * eta_advanced + (1.0 - w) * eta_simple
+    
+    return float(eta)
+
+
 class ChamberSolver:
     """Solves for chamber pressure by balancing supply and demand"""
     
@@ -40,6 +94,7 @@ class ChamberSolver:
         cg = ensure_chamber_geometry(config)
         
         # Calculate L* once (use config value if provided, otherwise calculate)
+
         self.Lstar = calculate_Lstar(
             cg.volume,
             cg.A_throat,
@@ -161,29 +216,61 @@ class ChamberSolver:
             "fuel_props": self._get_fuel_props(),
         }
 
-        # Decide which efficiency model to use based on pressure gating
-        pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
+        # Add injection velocities to advanced_params if available in diagnostics
+        if "u_F" in diagnostics:
+            advanced_params["u_fuel"] = diagnostics["u_F"]
+        if "u_O" in diagnostics:
+            advanced_params["u_lox"] = diagnostics["u_O"]
+        
+        # DEBUG: Solver progress
+        print(f"[SOLVER_DEBUG] Pc Guess: {Pc_val/1e6:.4f} MPa | Supply mdot: {mdot_supply:.4f} kg/s | MR: {MR:.3f}")
+        
+        # Calculate efficiency using sigmoid blending (no hard gating)
         use_advanced = self.config.combustion.efficiency.use_advanced_model
         
-        if use_advanced and Pc_val < pc_gate:
-            # Below gate pressure, use simple model for stability
-            if Pc_val < 1.1e5: # Only log at bottom bound (Pc_min) to avoid spam during iterations
-                print(f"[ETA_GATE] Pc={Pc_val/1e6:.2f} MPa < Pc_gate={pc_gate/1e6:.2f} MPa -> using simple eta_cstar")
-            use_advanced = False
-
-        eta = eta_cstar(
-            self.Lstar,
-            self.config.combustion.efficiency,
-            self.spray_quality_good,
-            mixture_efficiency=mixture_eff,
-            cooling_efficiency=cooling_eff,
-            use_advanced_model=use_advanced,
-            advanced_params=advanced_params,
-        )
+        if use_advanced:
+            # Get both simple and advanced efficiencies
+            eta_simple = eta_cstar(
+                self.Lstar,
+                self.config.combustion.efficiency,
+                self.spray_quality_good,
+                mixture_efficiency=mixture_eff,
+                cooling_efficiency=cooling_eff,
+                use_advanced_model=False,
+                advanced_params=advanced_params,
+            )
+            eta_advanced = eta_cstar(
+                self.Lstar,
+                self.config.combustion.efficiency,
+                self.spray_quality_good,
+                mixture_efficiency=mixture_eff,
+                cooling_efficiency=cooling_eff,
+                use_advanced_model=True,
+                advanced_params=advanced_params,
+            )
+            
+            # Get gate pressures from config
+            pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
+            Pc_low = 0.8 * pc_gate  # ~0.8 MPa
+            Pc_high = 1.2 * pc_gate  # ~1.2 MPa
+            
+            # Sigmoid blend: w≈0.05 at Pc_low, w≈0.95 at Pc_high
+            eta = blend_efficiency_sigmoid(Pc_val, eta_advanced, eta_simple, Pc_low, Pc_high)
+        else:
+            eta = eta_cstar(
+                self.Lstar,
+                self.config.combustion.efficiency,
+                self.spray_quality_good,
+                mixture_efficiency=mixture_eff,
+                cooling_efficiency=cooling_eff,
+                use_advanced_model=False,
+                advanced_params=advanced_params,
+            )
         
         # Validate efficiency
         if not np.isfinite(eta) or eta <= 0 or eta > 1.0:
             return np.nan
+
         
         # Actual c* accounting for finite chamber volume
         cstar_actual = eta * cstar_ideal

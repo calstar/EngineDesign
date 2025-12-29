@@ -283,10 +283,8 @@ def calculate_evaporation_time_scale(
     tau_evap : float
         Evaporation time scale [s]
     """
-    from engine.pipeline.spalding import (
-        solve_spalding_coupled,
-        calculate_film_diffusivity,
-    )
+    from engine.pipeline.combustion_physics import calculate_gasification_efficiency
+    from engine.pipeline.physics_constants import PRANDTL_DEFAULT
     
     if not np.isfinite(Pc) or Pc <= 0:
         raise ValueError(f"Invalid pressure: {Pc} Pa")
@@ -297,45 +295,51 @@ def calculate_evaporation_time_scale(
     
     # Default fuel properties (RP-1)
     if fuel_props is None:
-        fuel_props = {
-            "density": 810.0,  # kg/m³
-            "latent_heat": 300e3,  # J/kg
-            "boiling_point": 489.0,  # K
-        }
+        fuel_props = {}
     
-    # Build required parameters for coupled solver
-    W_F = fuel_props.get("W", fuel_props.get("molecular_weight", 170.0))
-    L_vap = fuel_props.get("L_vap", fuel_props.get("latent_heat", 300e3))
+    # Extract properties with defaults
+    rho_l = fuel_props.get("density", 810.0)
+    L_eff = fuel_props.get("L_vap") or fuel_props.get("latent_heat", 300e3)
+    cp_l = fuel_props.get("specific_heat", 2000.0)
+    T_inj = fuel_props.get("temperature", 293.0)
     
-    # Use coupled solver for consistent Spalding number calculation
-    result = solve_spalding_coupled(
-        T_inf=Tc,
-        P=Pc,
-        W_F=W_F,
-        L_vap=L_vap,
-        gamma=gamma,
-        R_gas=R_gas,
-        fuel="RP-1",
-    )
-    B = result["B_M"]
-    Tf = result["T_film"]
+    # Estimate gas properties
+    # rho_g = P / (R_gas * T)
+    rho_g = Pc / (R_gas * Tc)
     
-    # Calculate diffusivity at film temperature
-    D = calculate_film_diffusivity(Tf, Pc)
+    # cp_g = gamma * R / (gamma - 1)
+    if gamma > 1.0:
+        cp_g = gamma * R_gas / (gamma - 1.0)
+    else:
+        cp_g = 2200.0
+        
+    mu_g = 7e-5  # Approximation for hot gas
     
-    if not np.isfinite(B) or B <= 0:
-        raise ValueError(f"Non-physical Spalding number: B={B}")
-    
-    # D² law: τ = d² / (8 × D × ln(1 + B))
-    log_term = np.log(1.0 + B)
-    if not np.isfinite(log_term) or log_term <= 0:
-        raise ValueError(f"Non-physical log term: ln(1+B)={log_term}, B={B}")
-    
-    tau_evap = droplet_diameter ** 2 / (8.0 * D * log_term)
-    
-    if not np.isfinite(tau_evap) or tau_evap <= 0:
-        raise ValueError(f"Non-physical evaporation time: τ={tau_evap}")
-    
+    # Call gasification model
+    # We pass a dummy tau_res because we only need the timescale diagnostics
+    # U_slip is estimated as modest value (convection aids evaporation)
+    try:
+        _, diagnostics = calculate_gasification_efficiency(
+            Tc=Tc,
+            Pc=Pc,
+            tau_res=1.0,  # Dummy value
+            SMD=droplet_diameter,
+            rho_l=rho_l,
+            cp_l=cp_l,
+            L_eff=L_eff,
+            T_inj=T_inj,
+            cp_g=cp_g,
+            rho_g=rho_g,
+            mu_g=mu_g,
+            U_slip=20.0,  # Assumed slip for reaction progress estimate
+            Pr=PRANDTL_DEFAULT
+        )
+        tau_evap = diagnostics["tau_vap"]
+    except Exception as e:
+        # Fallback if model fails (rare)
+        warnings.warn(f"Gasification model failed in reaction_chemistry: {e}. Using fallback.")
+        tau_evap = 1e-3  # 1 ms default fallback
+        
     return float(tau_evap)
 
 
