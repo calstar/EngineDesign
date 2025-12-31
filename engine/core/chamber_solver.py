@@ -1,6 +1,7 @@
 """Chamber pressure solver: solve supply(Pc) = demand(Pc)"""
 
 import numpy as np
+import logging
 from scipy.optimize import brentq, newton
 from typing import Tuple, Dict, Any, List, Optional
 
@@ -27,60 +28,6 @@ from engine.pipeline.constants import (
     DEFAULT_TURBULENCE_INTENSITY_ND,
 )
 from engine.core.closure import flows
-
-
-def blend_efficiency_sigmoid(
-    Pc: float,
-    eta_advanced: float,
-    eta_simple: float,
-    Pc_low: float = 0.8e6,
-    Pc_high: float = 1.2e6,
-) -> float:
-    """
-    Sigmoid blend between simple and advanced efficiency models.
-    
-    Designed so:
-    - w(Pc_low) ≈ 0.05 (mostly simple)
-    - w(Pc_high) ≈ 0.95 (mostly advanced)
-    
-    Uses log-pressure space for better behavior across orders of magnitude.
-    
-    Parameters
-    ----------
-    Pc : float
-        Chamber pressure [Pa]
-    eta_advanced : float
-        Advanced model efficiency
-    eta_simple : float
-        Simple model efficiency
-    Pc_low : float
-        Pressure at which w ≈ 0.05 (mostly simple) [Pa]
-    Pc_high : float
-        Pressure at which w ≈ 0.95 (mostly advanced) [Pa]
-    
-    Returns
-    -------
-    eta : float
-        Blended efficiency
-    """
-    # Work in log space for better behavior
-    log_Pc = np.log10(max(Pc, 1e5))
-    log_low = np.log10(Pc_low)
-    log_high = np.log10(Pc_high)
-    log_center = 0.5 * (log_low + log_high)
-    
-    # Scale factor: sigmoid(x) = 0.05 at x = -3, 0.95 at x = 3
-    # So k * (log_low - log_center) = -3 → k = 6 / (log_high - log_low)
-    half_width = 0.5 * (log_high - log_low)
-    k = 3.0 / max(half_width, 0.01)  # Prevent divide by zero
-    
-    x = k * (log_Pc - log_center)
-    w = 1.0 / (1.0 + np.exp(-x))
-    
-    # Blend
-    eta = w * eta_advanced + (1.0 - w) * eta_simple
-    
-    return float(eta)
 
 
 class ChamberSolver:
@@ -188,7 +135,7 @@ class ChamberSolver:
         
         # Apply combustion efficiency for FINITE CHAMBER
         # This corrects CEA's infinite-area assumption
-        mixture_eff = self._compute_mixture_efficiency(diagnostics)
+
 
         cooling_results, cooling_eff, _ = self._evaluate_cooling_models(
             Pc_val,
@@ -222,50 +169,17 @@ class ChamberSolver:
         if "u_O" in diagnostics:
             advanced_params["u_lox"] = diagnostics["u_O"]
         
-        # DEBUG: Solver progress
-        print(f"[SOLVER_DEBUG] Pc Guess: {Pc_val/1e6:.4f} MPa | Supply mdot: {mdot_supply:.4f} kg/s | MR: {MR:.3f}")
+        if hasattr(self, '_debug') and self._debug:
+            logging.getLogger("evaluate").info(f"[SOLVER_DEBUG] Pc Guess: {Pc_val/1e6:.4f} MPa | Supply mdot: {mdot_supply:.4f} kg/s | MR: {MR:.3f}")
         
-        # Calculate efficiency using sigmoid blending (no hard gating)
-        use_advanced = self.config.combustion.efficiency.use_advanced_model
-        
-        if use_advanced:
-            # Get both simple and advanced efficiencies
-            eta_simple = eta_cstar(
-                self.Lstar,
-                self.config.combustion.efficiency,
-                self.spray_quality_good,
-                mixture_efficiency=mixture_eff,
-                cooling_efficiency=cooling_eff,
-                use_advanced_model=False,
-                advanced_params=advanced_params,
-            )
-            eta_advanced = eta_cstar(
-                self.Lstar,
-                self.config.combustion.efficiency,
-                self.spray_quality_good,
-                mixture_efficiency=mixture_eff,
-                cooling_efficiency=cooling_eff,
-                use_advanced_model=True,
-                advanced_params=advanced_params,
-            )
-            
-            # Get gate pressures from config
-            pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
-            Pc_low = 0.8 * pc_gate  # ~0.8 MPa
-            Pc_high = 1.2 * pc_gate  # ~1.2 MPa
-            
-            # Sigmoid blend: w≈0.05 at Pc_low, w≈0.95 at Pc_high
-            eta = blend_efficiency_sigmoid(Pc_val, eta_advanced, eta_simple, Pc_low, Pc_high)
-        else:
-            eta = eta_cstar(
-                self.Lstar,
-                self.config.combustion.efficiency,
-                self.spray_quality_good,
-                mixture_efficiency=mixture_eff,
-                cooling_efficiency=cooling_eff,
-                use_advanced_model=False,
-                advanced_params=advanced_params,
-            )
+        # Calculate efficiency using advanced physics-based model
+        eta = eta_cstar(
+            self.Lstar,
+            self.config.combustion.efficiency,
+            cooling_eff,
+            advanced_params,
+            debug=self._debug if hasattr(self, '_debug') else False,
+        )
         
         # Validate efficiency
         if not np.isfinite(eta) or eta <= 0 or eta > 1.0:
@@ -299,7 +213,8 @@ class ChamberSolver:
         self,
         P_tank_O: float,
         P_tank_F: float,
-        Pc_guess: float = None
+        Pc_guess: float = None,
+        debug: bool = False
     ) -> Tuple[float, Dict[str, Any]]:
         """
         Solve for chamber pressure.
@@ -347,6 +262,15 @@ class ChamberSolver:
             Pc_guess = (Pc_min + Pc_max) / 2
         
         # Create residual function with tank pressures bound
+        # Create residual function with tank pressures bound
+        # Also pass debug to residual if needed in future (currently residual uses instance state, but we can't easily pass debug to it without changing signature broadly or storing state)
+        # However, residual calls eta_cstar which needs debug...
+        # Wait, residual() calls eta_cstar() inside.
+        # I need to update residual() to use debug flag.
+        # I'll store `self._debug = debug` temporarily or modify residual validation.
+        # Storing on self is easiest for this scope.
+        self._debug = debug
+
         def residual_func(Pc):
             return self.residual(Pc, P_tank_O, P_tank_F)
         
@@ -432,13 +356,32 @@ class ChamberSolver:
                         cea_props_test = self.cea_cache.eval(MR_test, Pc_max, 101325.0, eps_default)
                         cstar_ideal_test = cea_props_test.get("cstar_ideal", 0.0)
                         
+                        # Build advanced_params for diagnostics
+                        geometry_test = self._get_chamber_geometry()
+                        advanced_params_test = {
+                            "Pc": Pc_max,
+                            "Tc": cea_props_test.get("Tc", DEFAULT_CHAMBER_TEMP_K),
+                            "cstar_ideal": cstar_ideal_test,
+                            "gamma": cea_props_test.get("gamma", DEFAULT_GAMMA_ND),
+                            "R": cea_props_test.get("R", DEFAULT_GAS_CONST_J_KG_K),
+                            "MR": MR_test,
+                            "Ac": geometry_test["area_cross"],
+                            "At": cg.A_throat,
+                            "chamber_length": geometry_test["length"],
+                            "Dinj": self.injector_diameter,
+                            "m_dot_total": mdot_supply_test,
+                            "spray_diagnostics": diag_test,
+                            "turbulence_intensity": diag_test.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
+                            "fuel_props": self._get_fuel_props(),
+                        }
+                        
                         # Calculate efficiency
                         eta_test = eta_cstar(
                             self.Lstar,
                             self.config.combustion.efficiency,
-                            diag_test.get("constraints_satisfied", True),
-                            mixture_efficiency=diag_test.get("mixture_efficiency", 1.0),
-                            cooling_efficiency=diag_test.get("cooling_efficiency", 1.0),
+                            diag_test.get("cooling_efficiency", 1.0),
+                            advanced_params_test,
+                            debug=debug if 'debug' in locals() else False, 
                         )
                         cstar_actual_test = eta_test * cstar_ideal_test
                         cg = ensure_chamber_geometry(self.config)
@@ -642,50 +585,48 @@ class ChamberSolver:
                     "calculation_failed": True,
                 }
         
-        mixture_eff = self._compute_mixture_efficiency(closure_diag)
+        # Extract and validate mixture diagnostics (diagnostics-only, no efficiency impact)
+        # Enable mixture coupling diagnostics if configured
+        eff_cfg = self.config.combustion.efficiency
+        if getattr(eff_cfg, 'use_mixture_coupling', False) and isinstance(closure_diag, dict):
+            # Extract mixture diagnostics in non-strict mode (warn but don't fail)
+            mixture_diag = self._extract_and_validate_mixture_diagnostics(closure_diag, strict=False)
+            # Log diagnostics for informational purposes
+            if debug:
+                self._log_mixture_diagnostics(mixture_diag)
+            # Store in closure_diag for later analysis/logging
+            closure_diag['mixture_diagnostics'] = mixture_diag
 
-        # Use advanced combustion efficiency model if enabled
-        pc_gate = getattr(self.config.combustion.efficiency, 'Pc_gate', 1000000.0)
-        use_advanced = getattr(self.config.combustion.efficiency, 'use_advanced_model', True)
-        
-        # Apply pressure gating for final diagnostics consistency
-        if use_advanced and Pc_val < pc_gate:
-            print(f"[ETA_GATE] Final diagnostics: Pc={Pc_val/1e6:.2f} MPa < Pc_gate={pc_gate/1e6:.2f} MPa -> using simple eta_cstar")
-            use_advanced = False
 
-        advanced_params = None
+        # Build advanced parameters for combustion efficiency calculation
+        geometry = self._get_chamber_geometry()
         
-        if use_advanced:
-            geometry = self._get_chamber_geometry()
-            
-            advanced_params = {
-                "Pc": Pc_val,
-                "Tc": cea_props["Tc"],  # Ideal Tc (Conservative Residence Time)
-                "Tc_kinetics": effective_Tc, # Actual Tc (Conservative Kinetics)
-                "cstar_ideal": cea_props.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S),
-                "gamma": cea_props.get("gamma", DEFAULT_GAMMA_ND),
-                "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
-                "MR": MR,
-                "Ac": geometry["area_cross"],
-                "At": cg.A_throat,
-                "chamber_length": geometry["length"],
-                "Dinj": self.injector_diameter,
-                "m_dot_total": mdot_total,
-                "u_fuel": closure_diag.get("u_F"),
-                "u_lox": closure_diag.get("u_O"),
-                "spray_diagnostics": closure_diag,
-                "turbulence_intensity": closure_diag.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
-                "fuel_props": self._get_fuel_props(),
-            }
+        advanced_params = {
+            "Pc": Pc_val,
+            "Tc": cea_props["Tc"],  # Ideal Tc (Conservative Residence Time)
+            "Tc_kinetics": effective_Tc, # Actual Tc (Conservative Kinetics)
+            "cstar_ideal": cea_props.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S),
+            "gamma": cea_props.get("gamma", DEFAULT_GAMMA_ND),
+            "R": cea_props.get("R", DEFAULT_GAS_CONST_J_KG_K),
+            "MR": MR,
+            "Ac": geometry["area_cross"],
+            "At": cg.A_throat,
+            "chamber_length": geometry["length"],
+            "Dinj": self.injector_diameter,
+            "m_dot_total": mdot_total,
+            "u_fuel": closure_diag.get("u_F"),
+            "u_lox": closure_diag.get("u_O"),
+            "spray_diagnostics": closure_diag,
+            "turbulence_intensity": closure_diag.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
+            "fuel_props": self._get_fuel_props(),
+        }
         
         eta = eta_cstar(
             self.Lstar,
             self.config.combustion.efficiency,
-            self.spray_quality_good,
-            mixture_efficiency=mixture_eff,
-            cooling_efficiency=cooling_eff,
-            use_advanced_model=use_advanced,
-            advanced_params=advanced_params,
+            cooling_eff,
+            advanced_params,
+            debug=debug,
         )
         
         # Comprehensive validation of final solution
@@ -693,10 +634,11 @@ class ChamberSolver:
         gamma = cea_props["gamma"]
         R = cea_props["R"]
 
-        print(
-            f"[CSTAR] eta={eta:.4f} | c*_ideal={cea_props['cstar_ideal']:.1f} m/s -> c*_actual={cstar_actual:.1f} m/s | "
-            f"ratio={cstar_actual/cea_props['cstar_ideal']:.4f}"
-        )   
+        if debug:
+            logging.getLogger("evaluate").info(
+                f"[CSTAR] eta={eta:.4f} | c*_ideal={cea_props['cstar_ideal']:.1f} m/s -> c*_actual={cstar_actual:.1f} m/s | "
+                f"ratio={cstar_actual/cea_props['cstar_ideal']:.4f}"
+            )   
         
         # Calculate Isp for validation
         # CRITICAL FIX: Correct Isp formula
@@ -731,7 +673,6 @@ class ChamberSolver:
             "Tc_ideal": cea_props["Tc"],  # Store original ideal temperature
             "cstar_actual": cstar_actual,
             "eta_cstar": eta,
-            "mixture_efficiency": mixture_eff,
             "cooling_efficiency": cooling_eff,
             "Tc": effective_Tc,  # Use effective temperature after cooling (accounts for energy removal)
             "Tc_ideal": cea_props["Tc"],  # Store original CEA temperature for reference
@@ -748,68 +689,185 @@ class ChamberSolver:
 
         return Pc_val, diagnostics
 
-    def _compute_mixture_efficiency(self, closure_diag: Dict[str, Any]) -> float:
-        eff_cfg = self.config.combustion.efficiency
-        if not eff_cfg.use_mixture_coupling or not isinstance(closure_diag, dict):
-            return 1.0
-
-        actual_smd = max(
-            float(closure_diag.get("D32_O") or 0.0),
-            float(closure_diag.get("D32_F") or 0.0),
-        ) * 1e6  # convert to microns
-
-        if not np.isfinite(actual_smd) or actual_smd <= 0:
-            smd_factor = 1.0
-        else:
-            # Less conservative: use square root of ratio to reduce penalty severity
-            # If actual SMD is 2x target, old: factor = (0.5)^1.0 = 0.5
-            # New: factor = (0.5)^0.5 = 0.707 (less severe)
-            ratio = eff_cfg.target_smd_microns / max(actual_smd, 1e-9)
-            # Use reduced exponent: 0.5 instead of full exponent for less severe penalty
-            # CRITICAL FIX: Remove arbitrary 0.5 multiplier and 0.5 floor
-            # Use the configured exponent directly, and use configurable floor
-            effective_exponent = eff_cfg.smd_penalty_exponent  # Remove arbitrary 0.5 multiplier
-            smd_factor = np.clip(ratio ** effective_exponent, eff_cfg.mixture_efficiency_floor, 1.0)  # Use configurable floor
-
-        x_star_m = float(closure_diag.get("x_star") or 0.0)
-        x_star_mm = x_star_m * 1000.0
-        if not np.isfinite(x_star_mm) or x_star_mm <= 0:
-            xstar_factor = 1.0
-        else:
-            # Less conservative: reduce penalty severity
-            excess = max(0.0, x_star_mm - eff_cfg.xstar_limit_mm) / max(eff_cfg.xstar_limit_mm, 1e-3)
-            # CRITICAL FIX: Remove arbitrary 0.5 multiplier and 0.5 floor
-            effective_exponent = eff_cfg.xstar_penalty_exponent  # Remove arbitrary 0.5 multiplier
-            xstar_factor = float(np.clip(np.exp(-effective_exponent * excess), eff_cfg.mixture_efficiency_floor, 1.0))  # Use configurable floor
-
-        we_o = float(closure_diag.get("We_O") or 0.0)
-        we_f = float(closure_diag.get("We_F") or 0.0)
-        we_min_actual = min(value for value in [we_o, we_f] if np.isfinite(value) and value > 0) if any(np.isfinite(value) and value > 0 for value in [we_o, we_f]) else None
-        if we_min_actual is None:
-            we_factor = 1.0
-        else:
-            # Less conservative: use square root for less severe penalty
-            we_ratio = we_min_actual / eff_cfg.we_reference
-            # CRITICAL FIX: Remove arbitrary 0.5 multiplier and 0.7 floor
-            effective_exponent = eff_cfg.we_penalty_exponent  # Remove arbitrary 0.5 multiplier
-            we_factor = np.clip(we_ratio ** effective_exponent, eff_cfg.mixture_efficiency_floor, 1.0)  # Use configurable floor
- 
-        turbulence_factor = 1.0
-        if eff_cfg.use_turbulence_coupling:
-            I_mix = float(closure_diag.get("turbulence_intensity_mix") or 0.0)
-            if I_mix > 0 and eff_cfg.target_turbulence_intensity > 0:
-                ratio = I_mix / eff_cfg.target_turbulence_intensity
-                turbulence_factor = ratio ** eff_cfg.turbulence_penalty_exponent
+    def _extract_and_validate_mixture_diagnostics(
+        self, 
+        closure_diag: Dict[str, Any], 
+        strict: bool = True
+    ) -> Dict[str, float]:
+        """
+        Extract and validate mixture quality diagnostics from closure diagnostics.
+        
+        DIAGNOSTICS-ONLY - no efficiency impact. Physics comes from:
+        - eta_Lstar: actual SMD via gasification model
+        - eta_mixing: actual turbulence/velocities via diffusion
+        - eta_kinetics: actual T/P via Damköhler number
+        
+        Parameters:
+        - closure_diag: Injector diagnostics dict
+        - strict: If True, raise on missing critical data. If False, warn.
+        
+        Returns: Dict with actual_smd_microns, x_star_mm, We_O, We_F, etc.
+        """
+        if not isinstance(closure_diag, dict):
+            if strict:
+                raise ValueError("closure_diag must be a dictionary")
             else:
-                turbulence_factor = eff_cfg.turbulence_efficiency_floor
-            turbulence_factor = float(np.clip(turbulence_factor, eff_cfg.turbulence_efficiency_floor, 1.0))
-
-        mixture_eff = smd_factor * xstar_factor * we_factor * turbulence_factor
-        # CRITICAL FIX: Remove arbitrary 0.85 floor - use configured floor value
-        # The configured floor should be set appropriately, not overridden
-        mixture_eff_floor = eff_cfg.mixture_efficiency_floor  # Use configured value, don't override
-        mixture_eff = float(np.clip(mixture_eff, mixture_eff_floor, 1.0))
-        return mixture_eff
+                import warnings
+                warnings.warn("closure_diag is not a dictionary, cannot extract mixture diagnostics")
+                return {}
+        
+        diagnostics = {}
+        
+        # === EXTRACT SMD (CRITICAL) ===
+        D32_O = closure_diag.get("D32_O")
+        D32_F = closure_diag.get("D32_F")
+        
+        if D32_O is None and D32_F is None:
+            msg = "Missing SMD data: both D32_O and D32_F are None in closure diagnostics"
+            if strict:
+                raise ValueError(msg)
+            else:
+                import warnings
+                warnings.warn(msg)
+        else:
+            actual_smd_m = max(
+                float(D32_O) if D32_O is not None else 0.0,
+                float(D32_F) if D32_F is not None else 0.0,
+            )
+            actual_smd_microns = actual_smd_m * 1e6
+            
+            if not np.isfinite(actual_smd_microns):
+                msg = (
+                    f"Non-finite SMD: {actual_smd_microns:.2f} microns. "
+                    f"D32_O={D32_O}, D32_F={D32_F}. Check spray breakup calculations."
+                )
+                if strict:
+                    raise ValueError(msg)
+                else:
+                    import warnings
+                    warnings.warn(msg)
+            elif actual_smd_microns <= 0:
+                msg = (
+                    f"Invalid SMD: {actual_smd_microns:.2f} microns (must be > 0). "
+                    f"D32_O={D32_O}, D32_F={D32_F}. Check spray breakup calculations."
+                )
+                if strict:
+                    raise ValueError(msg)
+                else:
+                    import warnings
+                    warnings.warn(msg)
+            else:
+                diagnostics["actual_smd_microns"] = float(actual_smd_microns)
+        
+        # === EXTRACT IMPINGEMENT DISTANCE (CRITICAL) ===
+        x_star_m = closure_diag.get("x_star")
+        
+        if x_star_m is None:
+            msg = "Missing x_star in closure diagnostics. Check spray impingement calculations."
+            if strict:
+                raise ValueError(msg)
+            else:
+                import warnings
+                warnings.warn(msg)
+        else:
+            x_star_mm = float(x_star_m) * 1000.0
+            
+            if not np.isfinite(x_star_mm):
+                msg = f"Non-finite x_star: {x_star_mm} mm. Must be finite."
+                if strict:
+                    raise ValueError(msg)
+                else:
+                    import warnings
+                    warnings.warn(msg)
+            else:
+                # x_star <= 0 is valid (upstream/no impingement)
+                diagnostics["x_star_mm"] = float(x_star_mm)
+        
+        # === EXTRACT WEBER NUMBERS (NON-CRITICAL) ===
+        We_O = closure_diag.get("We_O")
+        We_F = closure_diag.get("We_F")
+        
+        if We_O is not None:
+            we_o = float(We_O)
+            if np.isfinite(we_o) and we_o >= 0:
+                diagnostics["We_O"] = we_o
+            elif strict:
+                raise ValueError(f"Invalid We_O: {we_o}. Must be finite and non-negative.")
+        
+        if We_F is not None:
+            we_f = float(We_F)
+            if np.isfinite(we_f) and we_f >= 0:
+                diagnostics["We_F"] = we_f
+            elif strict:
+                raise ValueError(f"Invalid We_F: {we_f}. Must be finite and non-negative.")
+        
+        # Compute We_min if both present
+        if "We_O" in diagnostics and "We_F" in diagnostics:
+            we_o = diagnostics["We_O"]
+            we_f = diagnostics["We_F"]
+            
+            # Use minimum of positive values, or max if one is zero
+            if we_o > 0 and we_f > 0:
+                diagnostics["We_min"] = min(we_o, we_f)
+            else:
+                diagnostics["We_min"] = max(we_o, we_f)
+        
+        # === EXTRACT TURBULENCE INTENSITY (OPTIONAL) ===
+        I_mix = closure_diag.get("turbulence_intensity_mix")
+        
+        if I_mix is not None:
+            I_mix_val = float(I_mix)
+            
+            if not np.isfinite(I_mix_val):
+                msg = f"Non-finite turbulence intensity: {I_mix_val}"
+                if strict:
+                    raise ValueError(msg)
+                else:
+                    import warnings
+                    warnings.warn(msg)
+            elif I_mix_val <= 0 or I_mix_val > 1:
+                msg = (
+                    f"Turbulence intensity out of range: {I_mix_val:.4f} (expected 0-1). "
+                    f"Check turbulence calculations."
+                )
+                if strict:
+                    raise ValueError(msg)
+                else:
+                    import warnings
+                    warnings.warn(msg)
+            else:
+                diagnostics["turbulence_intensity_mix"] = I_mix_val
+        
+        return diagnostics
+    
+    def _log_mixture_diagnostics(self, diag: Dict[str, float]) -> None:
+        """
+        Log mixture quality diagnostics for informational purposes.
+        
+        DIAGNOSTICS-ONLY - no efficiency impact.
+        """
+        if not diag:
+            return
+        
+        parts = []
+        
+        if "actual_smd_microns" in diag:
+            parts.append(f"SMD={diag['actual_smd_microns']:.1f} μm")
+        
+        if "x_star_mm" in diag:
+            parts.append(f"x*={diag['x_star_mm']:.2f} mm")
+        
+        if "We_O" in diag and "We_F" in diag:
+            parts.append(f"We_O={diag['We_O']:.1f}, We_F={diag['We_F']:.1f}")
+            if "We_min" in diag:
+                parts.append(f"We_min={diag['We_min']:.1f}")
+        
+        if "turbulence_intensity_mix" in diag:
+            parts.append(f"I_mix={diag['turbulence_intensity_mix']:.3f}")
+        
+        if parts:
+            import logging
+            logging.getLogger("evaluate").info(f"[MIXTURE_DIAG] {', '.join(parts)}")
 
     def _compute_cooling_efficiency(
         self,
@@ -1137,11 +1195,21 @@ class ChamberSolver:
                 return None
             
             # Extract as dict with fallbacks to RP-1 defaults
-            return {
+            props = {
                 "boiling_point": getattr(fuel_cfg, "boiling_point", 489.0),
                 "latent_heat": getattr(fuel_cfg, "latent_heat", 300e3),
                 "molecular_weight": getattr(fuel_cfg, "molecular_weight", 170.0),
                 "Pc_ref": getattr(fuel_cfg, "Pc_ref", 2.5e6),
             }
+            
+            # Add T_star fuel interface cap from combustion efficiency config
+            T_star_fuel_cap_K = getattr(
+                self.config.combustion.efficiency,
+                "T_star_fuel_cap_K",
+                1000.0  # Default for RP-1
+            )
+            props["T_star_fuel_cap_K"] = T_star_fuel_cap_K
+            
+            return props
         except Exception:
             return None

@@ -19,6 +19,7 @@ from engine.core.spray import (
     weber_number,
     ohnesorge_number,
     smd_lefebvre,
+    smd_pintle,
     tau_evap,
     xstar,
     check_spray_constraints,
@@ -223,30 +224,37 @@ class PintleInjector(InjectorModel):
             )
             turbulence_intensity_mix = float(np.clip(turbulence_intensity_mix, 0.02, 0.35))
 
-            D32_O = smd_lefebvre(
-                injector_geom.lox.d_orifice,
-                We_O,
-                Oh_O,
-                spray_cfg.smd.C,
-                spray_cfg.smd.m,
-                spray_cfg.smd.p,
+            # PHYSICS-BASED PINTLE SMD: Use relative velocity and gap height
+            # ----------------------------------------------------------------
+            # V_rel = sqrt(u_O^2 + u_F^2) (orthogonal 90 deg impingement)
+            # L_open = h_gap
+            V_rel = float(np.sqrt(u_O**2 + u_F**2))  # Magnitude of relative velocity vector
+            L_open = injector_geom.fuel.h_gap
+            
+            # Use physics-based correlation: SMD = C * L_open * We_rel^(-n) * (1 + B * Oh_f)^p
+            # We_rel and Oh_f are computed inside smd_pintle using fuel properties (sheet)
+            D32 = smd_pintle(
+                L_open,
+                V_rel,
+                rho_F,
+                mu_F,
+                sigma_F,
+                spray_cfg.pintle.C,
+                spray_cfg.pintle.B,
+                spray_cfg.pintle.n,
+                spray_cfg.pintle.p,
             )
-            D32_F = smd_lefebvre(
-                d_hyd_F,
-                We_F,
-                Oh_F,
-                spray_cfg.smd.C,
-                spray_cfg.smd.m,
-                spray_cfg.smd.p,
-            )
+            
+            # Assign coupled SMD to both streams
+            D32_O = D32
+            D32_F = D32
 
             if spray_cfg.use_turbulence_corrections:
-                breakup_gain = max(spray_cfg.turbulence_breakup_gain, 0.0)
-                penetration_gain = max(spray_cfg.turbulence_penetration_gain, 0.0)
-                breakup_multiplier = 1.0 / (1.0 + breakup_gain * turbulence_intensity_mix)
-                breakup_multiplier = float(np.clip(breakup_multiplier, 0.3, 1.0))
-                D32_O *= breakup_multiplier
-                D32_F *= breakup_multiplier
+                # For pintle physics mode, we typically RELY on V_rel (shear) as the primary mechanism
+                # Turbulence gains might double-count or be less relevant than shear.
+                # Per plan: Bypass or cap generic turbulence corrections for pintle SMD.
+                # We log it but do not apply it to SMD.
+                breakup_multiplier = 1.0  # Disabled for pintle mode
             else:
                 breakup_multiplier = 1.0
 
@@ -290,6 +298,8 @@ class PintleInjector(InjectorModel):
                     "theta": theta,
                     "We_O": We_O,
                     "We_F": We_F,
+                    "V_rel": V_rel,
+                    "L_open": L_open,
                     "D32_O": D32_O,
                     "D32_F": D32_F,
                     "x_star": x_star_combined,

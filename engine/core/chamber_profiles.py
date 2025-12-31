@@ -107,26 +107,58 @@ def calculate_chamber_pressure_profile(
     x_norm = positions / Lstar if Lstar > 0 else np.zeros_like(positions)
     
     # Pressure profile
-    # P(x) = P_injection * (1 - x_norm)^alpha
+    # P(x) = P_injection - (P_injection - Pc) * x_norm^alpha
+    # At injection (x_norm=0): P = P_injection
     # At throat (x_norm=1): P = Pc
-    # So: Pc = P_injection * (1 - 1)^alpha = P_injection * 0 = 0 (problem!)
-    # Better: P(x) = P_injection - (P_injection - Pc) * x_norm^alpha
     P_injection = Pc * P_injection_ratio
     pressures = P_injection - (P_injection - Pc) * (x_norm ** alpha)
     
-    # Ensure monotonic (pressure decreases toward throat)
-    # CRITICAL FIX: Remove arbitrary 0.999 factor - use proper monotonic enforcement
+    # Validate all pressures are finite
+    if not np.all(np.isfinite(pressures)):
+        raise ValueError(
+            f"Non-finite pressures in chamber profile. "
+            f"Pc={Pc:.3e} Pa, Lstar={Lstar:.4f} m, alpha={alpha:.4f}, "
+            f"P_injection_ratio={P_injection_ratio:.4f}"
+        )
+    
+    # Validate monotonicity (pressure must decrease toward throat)
     for i in range(1, len(pressures)):
         if pressures[i] > pressures[i-1]:
-            pressures[i] = pressures[i-1]  # Enforce strict monotonicity, not 0.999 factor
+            raise ValueError(
+                f"Non-monotonic pressure profile at position {i}. "
+                f"P[{i-1}]={pressures[i-1]:.3e} Pa, P[{i}]={pressures[i]:.3e} Pa. "
+                f"Pressure must decrease monotonically from injection to throat. "
+                f"Check alpha={alpha:.4f}, Lstar={Lstar:.4f} m."
+            )
     
-    # Validate all pressures
-    pressures = np.clip(pressures, Pc * 0.8, Pc * 1.2)  # Physical bounds
+    # Validate throat pressure matches Pc (within tolerance)
+    P_throat_val = float(pressures[-1])
+    relative_error = abs(P_throat_val - Pc) / Pc
+    if relative_error > 0.05:  # 5% tolerance
+        raise ValueError(
+            f"Throat pressure mismatch: P_throat={P_throat_val:.3e} Pa, Pc={Pc:.3e} Pa. "
+            f"Relative error: {relative_error*100:.2f}%. Should be < 5%. "
+            f"Check pressure profile model and alpha parameter."
+        )
+    
+    # Validate injection pressure is reasonable (should be slightly higher than Pc)
+    P_injection_val = float(pressures[0])
+    if P_injection_val < Pc:
+        raise ValueError(
+            f"Invalid injection pressure: P_injection={P_injection_val:.3e} Pa < Pc={Pc:.3e} Pa. "
+            f"Injection pressure must be higher than chamber pressure. "
+            f"Check P_injection_ratio={P_injection_ratio:.4f}."
+        )
+    
+    if P_injection_val > Pc * 1.5:
+        raise ValueError(
+            f"Unrealistic injection pressure: P_injection={P_injection_val:.3e} Pa = {P_injection_val/Pc:.2f}×Pc. "
+            f"Should be < 1.5×Pc for typical rocket engines. "
+            f"Check P_injection_ratio={P_injection_ratio:.4f}."
+        )
     
     # Key points
     P_mid = float(pressures[len(pressures) // 2])
-    P_injection_val = float(pressures[0])
-    P_throat_val = float(pressures[-1])  # Should equal Pc
     
     return {
         "positions": positions.tolist(),

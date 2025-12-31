@@ -86,10 +86,28 @@ for Pc_psia in chamber_pressures:
             
             # Apply CHAMBER-DRIVEN corrections
             # 1. Combustion efficiency (L* correction)
+            # Build minimal advanced_params for validation
+            from engine.pipeline.constants import DEFAULT_TURBULENCE_INTENSITY_ND
+            advanced_params = {
+                "Pc": Pc_Pa,
+                "Tc": Tc_ideal,
+                "cstar_ideal": cstar_ideal,
+                "gamma": gamma_ideal,
+                "R": R,
+                "MR": MR,
+                "Ac": cg.area_cross,
+                "At": cg.A_throat,
+                "chamber_length": cg.length,
+                "Dinj": 0.002,  # Typical injector diameter for validation
+                "m_dot_total": 3.0,  # Typical mass flow for validation
+                "spray_diagnostics": None,
+                "turbulence_intensity": DEFAULT_TURBULENCE_INTENSITY_ND,
+            }
             eta = eta_cstar(
                 Lstar,
                 config.combustion.efficiency,
-                spray_quality_good=True  # Assume good spray for validation
+                cooling_efficiency=1.0,  # No cooling losses for validation
+                advanced_params=advanced_params,
             )
             
             # 2. Actual c* accounting for finite chamber

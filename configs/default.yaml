@@ -194,6 +194,11 @@ spray:
     C: 0.5
     m: 0.6
     p: 0.0
+  pintle:
+    C: 15.0
+    B: 2.0
+    n: 0.5
+    p: 0.2
   evaporation:
     K: 300000.0
     x_star_limit: 0.05
@@ -220,28 +225,29 @@ combustion:
     - 15.0
     n_points: 34
   efficiency:
+    # === PHYSICS-BASED EFFICIENCY MODEL ===
+    # Efficiency calculated from: eta_cstar = eta_Lstar × eta_kinetics × eta_mixing × cooling_eff
+    # - eta_Lstar: Evaporation/gasification efficiency (uses actual SMD, residence time)
+    # - eta_kinetics: Reaction completion (Damköhler number from actual P/T)
+    # - eta_mixing: Turbulent mixing (actual velocities, turbulence intensity)
+    # - cooling_eff: Heat removal effects (from cooling models)
+    
     model: exponential
     C: 0.3
     K: 0.15
     use_spray_correction: false
     spray_penalty_factor: 0.8
-    use_mixture_coupling: true
-    use_cooling_coupling: true
-    use_turbulence_coupling: true
-    mixture_efficiency_floor: 0.01
-    cooling_efficiency_floor: 0.25
-    turbulence_efficiency_floor: 0.3
-    target_turbulence_intensity: 0.08
-    turbulence_penalty_exponent: 1.0
-    target_smd_microns: 50.0
-    xstar_limit_mm: 50.0
-    xstar_penalty_exponent: 2.0
-    we_reference: 100.0
-    we_penalty_exponent: 0.5
-    smd_penalty_exponent: 1.0
+    
+    # Diagnostics and coupling
+    use_mixture_coupling: false         # Diagnostics-only (does not affect efficiency)
+    use_cooling_coupling: true          # Apply cooling efficiency corrections
+    cooling_efficiency_floor: 0.25      # Minimum cooling efficiency
+    
+    # Advanced physics models
     use_advanced_model: true
     use_finite_rate_chemistry: true
     use_shifting_equilibrium: true
+    T_star_fuel_cap_K: 1000.0  # Effective fuel interface temperature cap for gasification [K]
 # =============================================================================
 # CHAMBER GEOMETRY - All inputs for solve_chamber_geometry_with_cea
 # =============================================================================

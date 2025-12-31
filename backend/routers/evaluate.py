@@ -56,7 +56,7 @@ async def evaluate(request: EvaluateRequest):
     
     try:
         # Get raw results from runner - ambient pressure computed from config elevation
-        results = app_state.runner.evaluate(P_tank_O, P_tank_F)
+        results = app_state.runner.evaluate(P_tank_O, P_tank_F, debug=True)
         
         # Convert numpy types to JSON-serializable and return directly
         # Frontend uses the same field names as runner.py outputs

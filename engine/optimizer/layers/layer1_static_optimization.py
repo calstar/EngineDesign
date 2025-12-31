@@ -681,10 +681,12 @@ def run_layer1_optimization(
         # Convert x to config
         config, _, _ = apply_x_to_config(x_clipped, config_base)
         
-        # Feasibility pre-checks (cheap): injector sizing and O/F area sanity
+        # Feasibility pre-checks (cheap): injector sizing, geometry, and O/F area sanity
         from engine.pipeline.config_schemas import ensure_chamber_geometry
         cg = ensure_chamber_geometry(config)
         A_throat_check = float(cg.A_throat or 0.0)
+        D_chamber_inner = float(cg.chamber_diameter or 0.0)
+        A_chamber_check = np.pi * (D_chamber_inner / 2) ** 2
         
         geom = getattr(getattr(config, "injector", None), "geometry", None)
         has_pintle = bool(getattr(getattr(config, "injector", None), "type", None) == "pintle" and geom is not None)
@@ -696,6 +698,37 @@ def run_layer1_optimization(
         area_ratio_error = np.nan
         
         infeasibility_score = 0.0
+        
+        # --- Geometric Validation Rules ---
+        
+        # 1. Throat area must be less than chamber area (with some margin)
+        # Typically contraction ratio (A_chamber / A_throat) is between 2 and 10
+        if A_chamber_check > 0 and A_throat_check > 0:
+            contraction_ratio_check = A_chamber_check / A_throat_check
+            # Constraint: A_throat < A_chamber (contraction_ratio > 1.0)
+            infeasibility_score += max(0.0, (A_throat_check * 1.1) / A_chamber_check - 1.0) ** 2
+            
+            # Preferred range for contraction ratio: [1.5, 15.0]
+            if contraction_ratio_check < 1.5:
+                infeasibility_score += (1.5 - contraction_ratio_check) ** 2
+            elif contraction_ratio_check > 15.0:
+                infeasibility_score += (contraction_ratio_check - 15.0) ** 2
+
+        # 2. Pintle diameter must be less than chamber diameter
+        if has_pintle and D_chamber_inner > 0:
+            d_pintle_tip_check = float(geom.fuel.d_pintle_tip)
+            # Constraint: d_pintle_tip < D_chamber_inner (with 10% margin)
+            infeasibility_score += max(0.0, (d_pintle_tip_check * 1.1) / D_chamber_inner - 1.0) ** 2
+
+        # 3. Nozzle exit diameter vs throat diameter
+        D_exit_check = float(cg.exit_diameter or 0.0)
+        R_throat_check = np.sqrt(max(0, A_throat_check / np.pi))
+        D_throat_check = 2 * R_throat_check
+        if D_exit_check > 0 and D_throat_check > 0:
+            # Expansion ratio should be >= 1.0 (already handled by bounds, but for safety)
+            infeasibility_score += max(0.0, D_throat_check / D_exit_check - 1.0) ** 2
+
+        # --- Injector and O/F Validation ---
         
         if has_pintle and A_throat_check > 0:
             A_lox_injector = float(geom.lox.n_orifices * np.pi * (geom.lox.d_orifice / 2) ** 2)
@@ -1384,7 +1417,28 @@ def run_layer1_optimization(
     
     thrust_check_passed = initial_thrust_error < thrust_tol * 1.0
     of_check_passed = initial_MR_error < 0.15
-    pressure_candidate_valid = thrust_check_passed and of_check_passed and stability_check_passed
+    
+    # Geometry validation (consistency check for final result)
+    A_throat_final = float(getattr(optimized_config.chamber_geometry, 'A_throat', 0.0))
+    D_chamber_final = float(getattr(optimized_config.chamber_geometry, 'chamber_diameter', 0.0))
+    A_chamber_final = np.pi * (D_chamber_final / 2) ** 2
+    
+    geometry_check_passed = True
+    geometry_failure_reasons = []
+    
+    if A_chamber_final > 0 and A_throat_final > 0:
+        contraction_ratio_final = A_chamber_final / A_throat_final
+        if contraction_ratio_final < 1.1:
+            geometry_check_passed = False
+            geometry_failure_reasons.append(f"Throat area too large for chamber (contraction ratio {contraction_ratio_final:.2f} < 1.1)")
+    
+    if hasattr(optimized_config.injector, 'geometry') and hasattr(optimized_config.injector.geometry, 'fuel'):
+        d_pintle_final = float(optimized_config.injector.geometry.fuel.d_pintle_tip)
+        if d_pintle_final >= D_chamber_final:
+            geometry_check_passed = False
+            geometry_failure_reasons.append(f"Pintle diameter {d_pintle_final*1000:.1f}mm >= chamber diameter {D_chamber_final*1000:.1f}mm")
+
+    pressure_candidate_valid = thrust_check_passed and of_check_passed and stability_check_passed and geometry_check_passed
     
     # Build failure reasons
     failure_reasons = []
@@ -1392,6 +1446,8 @@ def run_layer1_optimization(
         failure_reasons.append(f"Thrust error {initial_thrust_error*100:.1f}% > {thrust_tol*100:.0f}% limit")
     if not of_check_passed:
         failure_reasons.append(f"O/F error {initial_MR_error*100:.1f}% > 15% limit")
+    if not geometry_check_passed:
+        failure_reasons.extend(geometry_failure_reasons)
     if not stability_check_passed:
         required_parts = []
         if require_stable_state:
@@ -1436,6 +1492,7 @@ def run_layer1_optimization(
     final_performance["thrust_check_passed"] = thrust_check_passed
     final_performance["of_check_passed"] = of_check_passed
     final_performance["stability_check_passed"] = stability_check_passed
+    final_performance["geometry_check_passed"] = geometry_check_passed
     final_performance["failure_reasons"] = failure_reasons
     # Add individual stability margins at root level for easy access
     final_performance["chugging_margin"] = chugging_margin

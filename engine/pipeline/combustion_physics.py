@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 import numpy as np
 import warnings
+import logging
 from engine.pipeline.config_schemas import CombustionEfficiencyConfig
 
 
@@ -125,8 +126,22 @@ def compute_combustion_state(
     # RMS injection velocity
     U_rms = np.sqrt(0.5 * (u_f**2 + u_o**2))
     
-    # Capped RMS to prevent unrealistically large U_mix forcing η→1
-    U_rms_eff = min(U_rms, U_rms_cap)
+    # Validate U_rms
+    if not np.isfinite(U_rms):
+        raise ValueError(f"Non-finite U_rms. u_fuel={u_f} m/s, u_lox={u_o} m/s")
+    
+    if U_rms < 0:
+        raise ValueError(f"Negative U_rms={U_rms} m/s. This is physically impossible.")
+    
+    # Check if U_rms_cap parameter is being used to hide unrealistic velocities
+    if U_rms > U_rms_cap:
+        raise ValueError(
+            f"RMS injection velocity U_rms={U_rms:.1f} m/s exceeds cap={U_rms_cap:.1f} m/s. "
+            f"This indicates unrealistic injection velocities: u_fuel={u_f:.1f} m/s, u_lox={u_o:.1f} m/s. "
+            f"Check injector model and pressure drops. Do NOT artificially cap velocities."
+        )
+    
+    U_rms_eff = U_rms  # No capping - use actual value
     
     # Velocity difference (shear)
     dU = abs(u_f - u_o)
@@ -134,8 +149,18 @@ def compute_combustion_state(
     # Mixing velocity scale: combines shear and turbulent contributions
     U_mix = np.sqrt(dU**2 + C_u * U_rms_eff**2)
     
-    # Ensure U_mix has a minimum value for numerical stability
-    U_mix = max(U_mix, 0.1)
+    # Validate U_mix
+    if not np.isfinite(U_mix):
+        raise ValueError(
+            f"Non-finite U_mix. dU={dU} m/s, U_rms_eff={U_rms_eff} m/s, C_u={C_u}"
+        )
+    
+    if U_mix <= 0:
+        raise ValueError(
+            f"U_mix={U_mix:.4f} m/s is too low. This indicates stagnant flow or zero injection velocities. "
+            f"u_fuel={u_f:.1f} m/s, u_lox={u_o:.1f} m/s, dU={dU:.1f} m/s. "
+            f"Check injector configuration and pressure drops."
+        )
     
     return {
         "rho_ch": float(rho_ch),
@@ -169,6 +194,7 @@ def calculate_eta_Lstar(
     fuel_props: dict = None,
     u_fuel: Optional[float] = None,
     u_lox: Optional[float] = None,
+    debug: bool = False,
 ) -> Tuple[float, float]:
     """
     Compute evaporation-based efficiency using FINITE-RATE GASIFICATION model.
@@ -290,6 +316,8 @@ def calculate_eta_Lstar(
         U_slip=U_slip,
         D_m=None,  # Auto-compute from T, P scaling
         Pr=PRANDTL_DEFAULT,
+        fuel_props=fuel_props,  # Pass fuel props for T_star_fuel_cap_K
+        debug=debug,
     )
     
     # Compute Da_L for diagnostics (tau_res / tau_vap)
@@ -304,7 +332,8 @@ def calculate_eta_Lstar(
     SPALDING_DIAGNOSTIC_ENABLED = False  # Set to True to run Spalding for comparison
     
     if SPALDING_DIAGNOSTIC_ENABLED:
-        print("[SPALDING_DIAGNOSTIC] Running Spalding model for comparison (does NOT affect efficiency)...")
+        if debug:
+            logging.getLogger("evaluate").info("[SPALDING_DIAGNOSTIC] Running Spalding model for comparison (does NOT affect efficiency)...")
         
         # Effective diffusivity at Tc, Pc (molecular)
         D_eff = D0 * (Tc / 300.0)**1.75 * (101325.0 / Pc)
@@ -333,9 +362,11 @@ def calculate_eta_Lstar(
                 )
                 Bm_calc = result["B_M"]
                 T_s = result["T_s"]
-                print(f"[SPALDING_DIAGNOSTIC] Converged: Bm={Bm_calc:.4f}, T_s={T_s:.1f} K")
+                if debug:
+                    logging.getLogger("evaluate").info(f"[SPALDING_DIAGNOSTIC] Converged: Bm={Bm_calc:.4f}, T_s={T_s:.1f} K")
             except Exception as e:
-                print(f"[SPALDING_DIAGNOSTIC] Solver failed: {e}")
+                if debug:
+                    logging.getLogger("evaluate").info(f"[SPALDING_DIAGNOSTIC] Solver failed: {e}")
                 Bm_calc = 0.5  # Fallback
         else:
             Bm_calc = Bm
@@ -347,10 +378,11 @@ def calculate_eta_Lstar(
         Da_L_spalding = tau_res / tau_evap_spalding if tau_evap_spalding > 0 else 0.0
         eta_Lstar_spalding = 1.0 - np.exp(-Da_L_spalding)
         
-        print(f"[SPALDING_DIAGNOSTIC] tau_evap={tau_evap_spalding*1e3:.4f} ms, "
-              f"Da_L={Da_L_spalding:.4f}, eta_Spalding={eta_Lstar_spalding:.4f}")
-        print(f"[SPALDING_DIAGNOSTIC] vs Gasification: tau_vap={tau_vap*1e3:.4f} ms, "
-              f"Da_L={Da_L:.4f}, eta_Gasif={eta_Lstar:.4f}")
+        if debug:
+            logging.getLogger("evaluate").info(f"[SPALDING_DIAGNOSTIC] tau_evap={tau_evap_spalding*1e3:.4f} ms, "
+                  f"Da_L={Da_L_spalding:.4f}, eta_Spalding={eta_Lstar_spalding:.4f}")
+            logging.getLogger("evaluate").info(f"[SPALDING_DIAGNOSTIC] vs Gasification: tau_vap={tau_vap*1e3:.4f} ms, "
+                  f"Da_L={Da_L:.4f}, eta_Gasif={eta_Lstar:.4f}")
     
     return eta_Lstar, Da_L
 
@@ -372,6 +404,8 @@ def calculate_gasification_efficiency(
     U_slip: float,
     D_m: Optional[float] = None,
     Pr: float = 0.8,
+    fuel_props: Optional[dict] = None,
+    debug: bool = False,
 ) -> Tuple[float, Dict[str, float]]:
     """
     Calculate evaporation efficiency using finite-rate gasification model.
@@ -458,19 +492,43 @@ def calculate_gasification_efficiency(
     
     # =========================================================================
     # STEP 2: Compute T_* (transition temperature)
-    # Anchored to Tc, not fuel critical temperature
+    # T_star is an effective INTERFACE temperature cap (wet-bulb/pyrolysis onset),
+    # NOT gas temperature tracking. This represents the scale at which
+    # evaporation/gasification enters its high-rate regime.
+    # For RP-1, this is typically 800-1200 K (NOT ~3000 K like Tc).
     # =========================================================================
-    T_star_upper = min(0.95 * Tc, Tc - 200.0)  # Track gas temperature
-    T_star = max(T_star_upper, T_inj + 50.0)    # Ensure ln term is well-defined
+    # Get fuel interface cap from config (default 1000 K for RP-1)
+    T_star_fuel_cap_K = fuel_props.get("T_star_fuel_cap_K", 1000.0) if fuel_props else 1000.0
     
-    # Additional safety: T_star must be < Tc for heating to make sense
-    if T_star >= Tc:
+    # Numerical safety margins
+    dT_min = 200.0  # Minimum safety margin [K]
+    dT_frac = 0.10 * Tc  # Fractional safety margin (10% of Tc)
+    dT_safe = max(dT_min, dT_frac)  # Use whichever is larger
+    
+    # Compute upper bound: min of fuel cap and (Tc - safety margin)
+    T_star_upper = min(T_star_fuel_cap_K, Tc - dT_safe)
+    
+    # Compute lower bound: ensure log term is well-defined
+    T_star_lower = T_inj + 50.0
+    
+    # Clamp T_star between bounds
+    T_star = np.clip(T_star_upper, T_star_lower, Tc - dT_safe)
+    
+    # Warnings for pathological cases
+    if T_star_upper <= T_star_lower:
         warnings.warn(
-            f"[GASIFICATION] T_star={T_star:.1f} K >= Tc={Tc:.1f} K. "
-            "Clamping T_star to Tc - 10 K.",
+            f"[GASIFICATION] T_star bounds invalid: T_star_upper={T_star_upper:.1f} K <= "
+            f"T_star_lower={T_star_lower:.1f} K. Fuel cap ({T_star_fuel_cap_K:.1f} K) may be "
+            f"too low or Tc ({Tc:.1f} K) too low. Using T_star={T_star:.1f} K.",
             RuntimeWarning, stacklevel=2
         )
-        T_star = Tc - 10.0
+    
+    if Tc - T_star < dT_safe:
+        warnings.warn(
+            f"[GASIFICATION] T_star={T_star:.1f} K too close to Tc={Tc:.1f} K "
+            f"(margin {Tc-T_star:.1f} K < {dT_safe:.1f} K). This may cause numerical issues.",
+            RuntimeWarning, stacklevel=2
+        )
     
     # =========================================================================
     # STEP 3: Gas thermal conductivity from k_g = μ·cp/Pr
@@ -548,10 +606,18 @@ def calculate_gasification_efficiency(
     
     # =========================================================================
     # STEP 10: Combined timescale and efficiency
-    # τ_vap = τ_heat + τ_gasify
+    # Use effective rate combination (concurrent processes, not sequential):
+    # 1/tau_eff = 1/tau_heat + 1/tau_gasify
+    # This reflects that heating and gasification happen simultaneously,
+    # not as a strict "heat fully then gasify" sequence.
     # η_vap = 1 - exp(-τ_res / τ_vap)
     # =========================================================================
-    tau_vap = tau_heat + tau_gasify
+    # Guard against zero/negative timescales
+    tau_heat_safe = max(tau_heat, 1e-12)
+    tau_gasify_safe = max(tau_gasify, 1e-12)
+    
+    # Effective rate combination
+    tau_vap = 1.0 / (1.0/tau_heat_safe + 1.0/tau_gasify_safe)
     
     # Compute efficiency (bounded [0, 1] by exp mapping)
     if tau_vap <= 0 or not np.isfinite(tau_vap):
@@ -560,18 +626,42 @@ def calculate_gasification_efficiency(
         eta_vap = 1.0 - np.exp(-tau_res / tau_vap)
     
     # =========================================================================
-    # DEBUG OUTPUT
+    # DEBUG OUTPUT AND PATHOLOGICAL CASE WARNINGS
     # =========================================================================
-    print(f"[GASIFICATION_DEBUG] === Finite-Rate Gasification Model ===")
-    print(f"[GASIFICATION_DEBUG] Inputs: Tc={Tc:.0f} K, Pc={Pc/1e6:.2f} MPa, tau_res={tau_res*1e3:.3f} ms")
-    print(f"[GASIFICATION_DEBUG] Inputs: D={D*1e6:.1f} μm, T_inj={T_inj:.0f} K, L_eff={L_eff/1e3:.1f} kJ/kg")
-    print(f"[GASIFICATION_DEBUG] T_star={T_star:.0f} K (transition temperature)")
-    print(f"[GASIFICATION_DEBUG] Gas props: k_g={k_g:.4f} W/(m·K), D_m={D_m:.2e} m²/s, Pr={Pr:.2f}")
-    print(f"[GASIFICATION_DEBUG] U_slip_capped={U_slip_capped:.1f} m/s (input was {U_slip:.1f} m/s)")
-    print(f"[GASIFICATION_DEBUG] Dimensionless: Re={Re:.1f}, Sc={Sc:.1f}, Nu={Nu:.2f}, Sh={Sh:.2f}")
-    print(f"[GASIFICATION_DEBUG] Phi={Phi:.4f} (energy ratio)")
-    print(f"[GASIFICATION_DEBUG] Timescales: tau_heat={tau_heat*1e3:.4f} ms, tau_gasify={tau_gasify*1e3:.4f} ms")
-    print(f"[GASIFICATION_DEBUG] tau_vap={tau_vap*1e3:.4f} ms -> eta_vap={eta_vap:.4f}")
+    # Calculate log term for diagnostics
+    dT_initial = Tc - T_inj
+    dT_final = Tc - T_star
+    log_term = np.log(dT_initial / dT_final) if dT_final > 0 and dT_initial > dT_final else 0.0
+    
+    # Warnings for numerical issues (once per call)
+    if log_term > 3.0 and not debug:
+        warnings.warn(
+            f"[GASIFICATION] Large log_term={log_term:.2f} detected. T_star={T_star:.0f} K may be "
+            f"too close to Tc={Tc:.0f} K. This indicates potential numerical issues.",
+            RuntimeWarning, stacklevel=2
+        )
+    
+    if tau_vap > 10.0 * tau_res and not debug:
+        warnings.warn(
+            f"[GASIFICATION] tau_vap={tau_vap*1e3:.2f} ms >> tau_res={tau_res*1e3:.2f} ms. "
+            f"Very low vaporization efficiency expected. Consider increasing L* or reducing SMD.",
+            RuntimeWarning, stacklevel=2
+        )
+    
+    if debug:
+        logger = logging.getLogger("evaluate")
+        logger.info(f"[GASIFICATION_DEBUG] === Finite-Rate Gasification Model ===")
+        logger.info(f"[GASIFICATION_DEBUG] Inputs: Tc={Tc:.0f} K, Pc={Pc/1e6:.2f} MPa, tau_res={tau_res*1e3:.3f} ms")
+        logger.info(f"[GASIFICATION_DEBUG] Inputs: D={D*1e6:.1f} μm, T_inj={T_inj:.0f} K, L_eff={L_eff/1e3:.1f} kJ/kg")
+        logger.info(f"[GASIFICATION_DEBUG] T_star={T_star:.0f} K (fuel interface cap, NOT Tc tracking)")
+        logger.info(f"[GASIFICATION_DEBUG] T_margins: (Tc - T_star)={Tc-T_star:.0f} K, log_term={log_term:.3f}")
+        logger.info(f"[GASIFICATION_DEBUG] Gas props: k_g={k_g:.4f} W/(m·K), D_m={D_m:.2e} m²/s, Pr={Pr:.2f}")
+        logger.info(f"[GASIFICATION_DEBUG] U_slip_capped={U_slip_capped:.1f} m/s (input was {U_slip:.1f} m/s)")
+        logger.info(f"[GASIFICATION_DEBUG] Dimensionless: Re={Re:.1f}, Sc={Sc:.1f}, Nu={Nu:.2f}, Sh={Sh:.2f}")
+        logger.info(f"[GASIFICATION_DEBUG] Phi={Phi:.4f} (energy ratio)")
+        logger.info(f"[GASIFICATION_DEBUG] Timescales: tau_heat={tau_heat*1e3:.4f} ms, tau_gasify={tau_gasify*1e3:.4f} ms")
+        logger.info(f"[GASIFICATION_DEBUG] tau_vap={tau_vap*1e3:.4f} ms (CONCURRENT, not sum) -> eta_vap={eta_vap:.4f}")
+        logger.info(f"[GASIFICATION_DEBUG] Efficiency ratio: tau_res/tau_vap={tau_res/tau_vap if tau_vap > 0 else np.inf:.3f}")
     
     diagnostics = {
         "tau_heat": float(tau_heat),
@@ -770,6 +860,7 @@ def calculate_mixing_efficiency(
     u_fuel: Optional[float] = None,
     u_lox: Optional[float] = None,
     turbulence_intensity: float = 0.08,
+    debug: bool = False,
 ) -> float:
     """
     Calculate mixing efficiency based on near-field stirring physics.
@@ -897,14 +988,16 @@ def calculate_mixing_efficiency(
         )
     
     # Debug output showing near-field turbulence variables explicitly
-    print(f"[MIXING_DEBUG] === Near-Field Shear-Layer Mixing Model ===")
-    print(f"[MIXING_DEBUG] State: rho_ch={rho_ch:.4f} kg/m³, tau_res={tau_res*1e3:.3f} ms")
-    print(f"[MIXING_DEBUG] Velocities: U_mix={U_mix:.2f} m/s, dU={state['dU']:.2f} m/s, U_rms_eff={state['U_rms_eff']:.2f} m/s")
-    print(f"[MIXING_DEBUG] Near-field scales: L_mix={L_mix*1e3:.3f} mm, Lt={Lt*1e3:.3f} mm")
-    print(f"[MIXING_DEBUG] Turbulence: I_eff={I_eff:.4f}, k={k:.2f} m²/s², ε={epsilon:.2e} m²/s³, ν_t={nu_t:.2e} m²/s")
-    print(f"[MIXING_DEBUG] Diffusivity: D_m={D_m:.2e}, D_t={D_t:.2e}, D_eff={D_eff:.2e} m²/s, D_t/D_m={D_t_D_m_ratio:.1f}")
-    print(f"[MIXING_DEBUG] Times: tau_conv={tau_conv*1e3:.4f} ms, tau_diff={tau_diff*1e3:.4f} ms, tau_mix={tau_mix*1e3:.4f} ms")
-    print(f"[MIXING_DEBUG] Da_mix={Da_mix:.4f} -> eta_mix={eta_mix:.4f}")
+    if debug:
+        logger = logging.getLogger("evaluate")
+        logger.info(f"[MIXING_DEBUG] === Near-Field Shear-Layer Mixing Model ===")
+        logger.info(f"[MIXING_DEBUG] State: rho_ch={rho_ch:.4f} kg/m³, tau_res={tau_res*1e3:.3f} ms")
+        logger.info(f"[MIXING_DEBUG] Velocities: U_mix={U_mix:.2f} m/s, dU={state['dU']:.2f} m/s, U_rms_eff={state['U_rms_eff']:.2f} m/s")
+        logger.info(f"[MIXING_DEBUG] Near-field scales: L_mix={L_mix*1e3:.3f} mm, Lt={Lt*1e3:.3f} mm")
+        logger.info(f"[MIXING_DEBUG] Turbulence: I_eff={I_eff:.4f}, k={k:.2f} m²/s², ε={epsilon:.2e} m²/s³, ν_t={nu_t:.2e} m²/s")
+        logger.info(f"[MIXING_DEBUG] Diffusivity: D_m={D_m:.2e}, D_t={D_t:.2e}, D_eff={D_eff:.2e} m²/s, D_t/D_m={D_t_D_m_ratio:.1f}")
+        logger.info(f"[MIXING_DEBUG] Times: tau_conv={tau_conv*1e3:.4f} ms, tau_diff={tau_diff*1e3:.4f} ms, tau_mix={tau_mix*1e3:.4f} ms")
+        logger.info(f"[MIXING_DEBUG] Da_mix={Da_mix:.4f} -> eta_mix={eta_mix:.4f}")
     
     return float(eta_mix)
 
@@ -931,6 +1024,7 @@ def calculate_combustion_efficiency_advanced(
     chamber_length: Optional[float] = None,
     Tc_kinetics: Optional[float] = None,
     fuel_props: Optional[Dict] = None,
+    debug: bool = False,
 ) -> Dict[str, float]:
     """
     Advanced combustion efficiency calculation with physics-based corrections.
@@ -942,14 +1036,16 @@ def calculate_combustion_efficiency_advanced(
     4. Turbulence effects
     
     Model:
-    η_c* = η_L* × η_kinetics × η_mixing × η_turbulence × η_cooling
+    η_c* = η_L* × η_kinetics × η_mixing × η_turbulence
     
     where:
     - η_L*: L*-based efficiency (finite residence time)
     - η_kinetics: Reaction kinetics efficiency (Damköhler number)
     - η_mixing: Mixing efficiency (spray quality)
     - η_turbulence: Turbulence enhancement
-    - η_cooling: Cooling losses (if provided)
+    
+    NOTE: Cooling losses (η_cooling) are NOT applied in this function.
+    They are applied externally in eta_cstar() to avoid double-counting.
     
     Parameters:
     -----------
@@ -1042,7 +1138,7 @@ def calculate_combustion_efficiency_advanced(
         eta_Lstar, Da_L = calculate_eta_Lstar(
             Tc=Tc, Pc=Pc, R=R, m_dot_total=m_dot_total, Ac=Ac, At=At,
             SMD=SMD, L_star=Lstar, Dinj=Dinj, gamma=gamma, fuel_props=fuel_props,
-            u_fuel=u_fuel, u_lox=u_lox
+            u_fuel=u_fuel, u_lox=u_lox, debug=debug
         )
 
     if config.model != "exponential":
@@ -1083,16 +1179,17 @@ def calculate_combustion_efficiency_advanced(
     eta_kinetics = 1.0 - np.exp(-np.sqrt(Da))
     
     # DEBUG: Kinetics detail showing state sourcing
-    if Da < 5.0 or eta_kinetics < 0.9:
-        print(f"[KINETICS_DEBUG] Da: {Da:.4f} | tau_res: {tau_res*1e3:.3f} ms | tau_chem: {tau_chem*1e6:.1f} µs | eta: {eta_kinetics:.4f}")
-        print(f"[KINETICS_DEBUG] Using Tc_ideal={Tc:.0f} K (not T_react={T_react:.0f} K) to break circular coupling")
+    if debug and (Da < 5.0 or eta_kinetics < 0.9):
+        logging.getLogger("evaluate").info(f"[KINETICS_DEBUG] Da: {Da:.4f} | tau_res: {tau_res*1e3:.3f} ms | tau_chem: {tau_chem*1e6:.1f} µs | eta: {eta_kinetics:.4f}")
+        logging.getLogger("evaluate").info(f"[KINETICS_DEBUG] Using Tc_ideal={Tc:.0f} K (not T_react={T_react:.0f} K) to break circular coupling")
     
     # 3. Mixing efficiency - uses near-field model (pure stirring, no evap penalties)
     eta_mixing = calculate_mixing_efficiency(
         Tc=Tc, Pc=Pc, R=R, Ac=Ac, At=At, Dinj=Dinj,
         m_dot_total=m_dot_total, Lstar=Lstar,
         u_fuel=u_fuel, u_lox=u_lox,
-        turbulence_intensity=turbulence_intensity
+        turbulence_intensity=turbulence_intensity,
+        debug=debug
     )
     
     # Sanity warning for implausibly low mixing (no clamp per user requirements)
@@ -1124,18 +1221,20 @@ def calculate_combustion_efficiency_advanced(
     if spray_diagnostics is not None:
         SMD = spray_diagnostics.get("D32_O", 0.0) or spray_diagnostics.get("D32_F", 0.0) or 100e-6
     
-    print(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc_ideal={Tc:.0f} K, T_react={T_react:.0f} K, Lstar={Lstar:.3f} m")
-    print(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², At={At*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
-    print(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, u_fuel_inj={u_fuel if u_fuel else 0:.1f} m/s, u_lox_inj={u_lox if u_lox else 0:.1f} m/s")
-    
-    rho_ch = Pc / (R * Tc)
-    U_bulk = m_dot_total / (rho_ch * Ac)
-    G_throat = m_dot_total / At
-    
-    print(f"[ETA_DEBUG] DERIVED: rho_ch={rho_ch:.4f} kg/m³, U_bulk={U_bulk:.2f} m/s, G_throat={G_throat:.1f} kg/m²s")
-    print(f"[ETA_DEBUG] DERIVED: tau_res_ch={tau_res*1e3:.3f} ms, Da_kinetics={Da:.4f}, Da_L={Da_L:.4f}")
-    print(f"[ETA_DEBUG] OUTPUTS: eta_Lstar={eta_Lstar:.4f}, eta_kinetics={eta_kinetics:.4f}, eta_mixing={eta_mixing:.4f}, eta_turbulence={eta_turbulence:.4f}")
-    print(f"[ETA_DEBUG] eta_total={eta_total:.4f}")
+    if debug:
+        logger = logging.getLogger("evaluate")
+        logger.info(f"[ETA_DEBUG] INPUTS: Pc={Pc/1e6:.3f} MPa, Tc_ideal={Tc:.0f} K, T_react={T_react:.0f} K, Lstar={Lstar:.3f} m")
+        logger.info(f"[ETA_DEBUG] INPUTS: SMD={SMD*1e6:.1f} µm, Ac={Ac*1e6:.2f} mm², At={At*1e6:.2f} mm², Dinj={Dinj*1e3:.2f} mm")
+        logger.info(f"[ETA_DEBUG] INPUTS: m_dot_total={m_dot_total:.4f} kg/s, u_fuel_inj={u_fuel if u_fuel else 0:.1f} m/s, u_lox_inj={u_lox if u_lox else 0:.1f} m/s")
+        
+        rho_ch = Pc / (R * Tc)
+        U_bulk = m_dot_total / (rho_ch * Ac)
+        G_throat = m_dot_total / At
+        
+        logger.info(f"[ETA_DEBUG] DERIVED: rho_ch={rho_ch:.4f} kg/m³, U_bulk={U_bulk:.2f} m/s, G_throat={G_throat:.1f} kg/m²s")
+        logger.info(f"[ETA_DEBUG] DERIVED: tau_res_ch={tau_res*1e3:.3f} ms, Da_kinetics={Da:.4f}, Da_L={Da_L:.4f}")
+        logger.info(f"[ETA_DEBUG] OUTPUTS: eta_Lstar={eta_Lstar:.4f}, eta_kinetics={eta_kinetics:.4f}, eta_mixing={eta_mixing:.4f}, eta_turbulence={eta_turbulence:.4f}")
+        logger.info(f"[ETA_DEBUG] eta_total={eta_total:.4f}")
     
     return {
         "eta_total": float(eta_total),

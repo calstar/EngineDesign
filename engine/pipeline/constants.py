@@ -4,6 +4,28 @@ Physical and engineering constants used throughout the pintle engine pipeline.
 This module centralizes all magic numbers and default values to improve maintainability
 and make the physical meaning of constants explicit.
 
+⚠️ IMPORTANT: DEPRECATED DEFAULT/FALLBACK CONSTANTS ⚠️
+===========================================================
+Many constants in this file with names starting with DEFAULT_* or FALLBACK_*
+are DEPRECATED and should NOT be used to hide missing values or failed calculations.
+
+WRONG usage (DO NOT DO THIS):
+    gamma = cea_props.get("gamma", DEFAULT_GAMMA_ND)  # WRONG!
+    density = max(calculated_density, MIN_DENS_KG_M3)  # WRONG!
+
+CORRECT usage:
+    if "gamma" not in cea_props:
+        raise KeyError("Missing gamma in CEA properties")
+    gamma = cea_props["gamma"]
+    if not (1.0 < gamma < 2.0):
+        raise ValueError(f"Invalid gamma: {gamma}")
+
+These constants should only be used for:
+1. Physical limits (e.g., GRAVITATIONAL_ACCEL_M_S2)
+2. Model parameters explicitly chosen by design (not fallbacks)
+3. Testing with explicit test data
+===========================================================
+
 Naming Convention:
 - All constants include units in their names (e.g., _K, _PA, _M, _M_S)
 - Dimensionless constants use _ND suffix (non-dimensional)
@@ -238,14 +260,41 @@ DEFAULT_WEBER_MIN_ND = 15.0
 EPSILON_SMALL = 1e-6
 EPSILON_TINY = 1e-8
 
-# Default minimum values to prevent division by zero
+# ============================================================================
+# DEPRECATED: DO NOT USE THESE DEFAULT/FALLBACK CONSTANTS
+# ============================================================================
+# 
+# These constants were previously used to hide missing values or failed
+# calculations. This practice is now FORBIDDEN in the codebase.
+# 
+# **DO NOT USE THESE** - They are kept only for reference and to prevent
+# breaking old code during transition. Any new code using these will be rejected.
+# 
+# Instead of using defaults/fallbacks:
+# 1. Explicitly validate that required values are present
+# 2. Raise clear ValueError/KeyError if values are missing
+# 3. Fix the root cause (missing config, failed calculation, etc.)
+# 
+# Examples of INCORRECT usage (DO NOT DO THIS):
+#   density = some_dict.get("density", FALLBACK_DENS_KG_M3)  # WRONG!
+#   velocity = max(calculated_velocity, MIN_VELOCITY_M_S)  # WRONG!
+# 
+# Examples of CORRECT usage:
+#   if "density" not in some_dict:
+#       raise KeyError("Missing 'density' in results")
+#   density = some_dict["density"]
+#   if density <= 0:
+#       raise ValueError(f"Invalid density: {density}")
+# ============================================================================
+
+# DEPRECATED - DO NOT USE
 MIN_DENS_KG_M3 = 0.01  # kg/m³
 MIN_TEMP_K = 1.0  # K
 MIN_PRESS_PA = 1e5  # Pa (1 bar)
 MIN_VELOCITY_M_S = 0.0  # m/s
 MIN_AREA_M2 = 1e-6  # m²
 
-# Default fallback values for calculations
+# DEPRECATED - DO NOT USE  
 FALLBACK_DENS_KG_M3 = 1.0  # kg/m³
 FALLBACK_SOUND_SPEED_M_S = 1000.0  # m/s
 FALLBACK_VELOCITY_M_S = 50.0  # m/s

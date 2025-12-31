@@ -6,6 +6,7 @@ This module provides both:
 """
 
 import numpy as np
+import logging
 from typing import Optional, Dict, Any
 from .config_schemas import CombustionEfficiencyConfig
 from .constants import (
@@ -55,30 +56,12 @@ def calculate_Lstar(
 def eta_cstar(
     Lstar: float,
     config: CombustionEfficiencyConfig,
-    spray_quality_good: bool = True,
-    mixture_efficiency: float = 1.0,
-    cooling_efficiency: float = 1.0,
-    use_advanced_model: bool = True,
-    advanced_params: Optional[Dict[str, Any]] = {
-        "Pc": DEFAULT_CHAMBER_PRESS_PA,
-        "Tc": DEFAULT_CHAMBER_TEMP_K,
-        "cstar_ideal": DEFAULT_CSTAR_IDEAL_M_S,
-        "gamma": DEFAULT_GAMMA_ND,
-        "R": DEFAULT_GAS_CONST_J_KG_K,
-        "MR": DEFAULT_MIXTURE_RATIO_ND,
-        "Ac": 0.005666174318,
-        "m_dot_total": 3,
-        "Dinj": 0.002,
-        "spray_diagnostics": None,
-        "turbulence_intensity": DEFAULT_TURBULENCE_INTENSITY_ND,
-    },
+    cooling_efficiency: float,
+    advanced_params: Dict[str, Any],
+    debug: bool = False,
 ) -> float:
     """
-    Calculate combustion efficiency based on characteristic length L*.
-    
-    Can use either:
-    1. Simple model: η_c* = 1 - C × e^(-K×L*) (default, backward compatible)
-    2. Advanced model: Physics-based with kinetics, mixing, turbulence (if use_advanced_model=True)
+    Calculate combustion efficiency using advanced physics-based model.
     
     This corrects CEA's infinite-area equilibrium assumption for finite chambers.
     
@@ -86,7 +69,7 @@ def eta_cstar(
     - Finite residence time (L*)
     - Incomplete mixing
     - Finite-rate chemistry effects
-    - Heat losses
+    - Heat losses (applied externally via cooling_efficiency)
     
     Parameters:
     -----------
@@ -94,142 +77,127 @@ def eta_cstar(
         Characteristic length [m]
     config : CombustionEfficiencyConfig
         Efficiency configuration
-    spray_quality_good : bool
-        Whether spray constraints are satisfied (affects efficiency if enabled)
-    mixture_efficiency : float
-        Mixture efficiency factor (from spray diagnostics)
     cooling_efficiency : float
-        Cooling efficiency factor (from heat transfer)
-    use_advanced_model : bool
-        If True, use advanced physics-based model
-    advanced_params : dict, optional
-        Parameters for advanced model:
+        Cooling efficiency factor (from heat transfer), applied externally
+    advanced_params : dict
+        Required parameters for advanced model:
         - Pc: Chamber pressure [Pa]
         - Tc: Chamber temperature [K]
         - cstar_ideal: Ideal c* [m/s]
         - gamma: Specific heat ratio
         - R: Gas constant [J/(kg·K)]
         - MR: Mixture ratio
-        - spray_diagnostics: Spray diagnostics dict
-        - turbulence_intensity: Turbulence intensity (0-1)
+        - Ac: Chamber cross-sectional area [m²]
+        - At: Throat area [m²]
+        - m_dot_total: Total mass flow rate [kg/s]
+        - chamber_length: Chamber length [m]
+        - Dinj: Injector diameter [m] (optional, estimated from Ac if not provided)
+        - u_fuel: Fuel injection velocity [m/s] (optional)
+        - u_lox: LOX injection velocity [m/s] (optional)
+        - spray_diagnostics: Spray diagnostics dict (optional)
+        - turbulence_intensity: Turbulence intensity 0-1 (optional)
+        - Tc_kinetics: Temperature for kinetics [K] (optional)
+        - fuel_props: Fuel properties dict (optional)
+    debug : bool
+        Enable debug logging
     
     Returns:
     --------
     eta : float
         Combustion efficiency (0-1)
     """
-    # Use advanced model if requested and parameters provided
-    if use_advanced_model and advanced_params is not None:
-        try:
-            from .combustion_physics import calculate_combustion_efficiency_advanced
-            
-            # Extract parameters
-            Pc = advanced_params.get("Pc", DEFAULT_CHAMBER_PRESS_PA)
-            Tc = advanced_params.get("Tc", DEFAULT_CHAMBER_TEMP_K)
-            Tc_kinetics = advanced_params.get("Tc_kinetics", None)
-            
-            # DEBUG: advanced_params extraction
-            print(f"[EFF_DEBUG] Pc={Pc/1e6:.3f} MPa, Tc={Tc:.0f} K, Tc_kinetics={Tc_kinetics if Tc_kinetics else 'None'}")
-            
-            cstar_ideal = advanced_params.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S)
-            gamma = advanced_params.get("gamma", DEFAULT_GAMMA_ND)
-            R = advanced_params.get("R", DEFAULT_GAS_CONST_J_KG_K)
-            MR = advanced_params.get("MR", DEFAULT_MIXTURE_RATIO_ND)
-            Ac = advanced_params.get("Ac", None)
-            At = advanced_params.get("At", None)
-            chamber_length = advanced_params.get("chamber_length", None)
-            m_dot_total = advanced_params.get("m_dot_total", None)
-            u_fuel = advanced_params.get("u_fuel", None)
-            u_lox = advanced_params.get("u_lox", None)
-            Dinj = advanced_params.get("Dinj", None)
-            spray_diagnostics = advanced_params.get("spray_diagnostics", None)
-            turbulence_intensity = advanced_params.get("turbulence_intensity", DEFAULT_TURBULENCE_INTENSITY_ND)
-            fuel_props = advanced_params.get("fuel_props", None)
-            
-            # Validate required parameters
-            if Ac is None or m_dot_total is None:
-                raise ValueError("Ac and m_dot_total are required for advanced combustion efficiency model")
-            if At is None:
-                raise ValueError("At is required for advanced combustion efficiency model")
-            
-            if chamber_length is None:
-                raise ValueError("chamber_length is required for advanced combustion efficiency model")
-            
-            if Dinj is None:
-                Dinj = float(np.sqrt(4.0 * Ac / np.pi))
-            Dinj = float(max(Dinj, 1e-6))
-            
-            # Calculate advanced efficiency
-            results = calculate_combustion_efficiency_advanced(
-                Lstar, Pc, Tc, cstar_ideal, gamma, R, MR, config,
-                Ac, At, Dinj, m_dot_total,
-                u_fuel=u_fuel, u_lox=u_lox,
-                spray_diagnostics=spray_diagnostics, 
-                turbulence_intensity=turbulence_intensity,
-                chamber_length=chamber_length,
-                Tc_kinetics=Tc_kinetics,
-                fuel_props=fuel_props
-            )
-            
-            eta = results["eta_total"]
-            
-            print(f"[ADV_EFF_DEBUG] eta_total: {eta:.4f} (Lstar: {results['eta_Lstar']:.4f}, Kinetics: {results['eta_kinetics']:.4f}, Mixing: {results['eta_mixing']:.4f})")
-            
-            # Apply cooling efficiency (external factor)
-            cooling_eff = float(np.clip(cooling_efficiency, config.cooling_efficiency_floor, 1.0))
-            eta *= cooling_eff
-            
-            # Final clamp
-            lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
-            eta = np.clip(eta, lower_bound, 1.0)
-            
-            return float(eta)
-            
-        except ImportError:
-            # Fall back to simple model if advanced module not available
-            print("the advanced module is not available, falling back to simple model")
-            pass
-        except Exception as exc:
-            import traceback
-            import warnings
-            traceback.print_exc()
-            warnings.warn(f"Advanced eta_cstar failed: {exc}")
-            pass
-    # Simple model (backward compatible)
-    if config.model == "constant":
-        eta = 1.0 - config.C
-    elif config.model == "linear":
-        eta = 1.0 - config.C * (1.0 - Lstar / 1.0)  # Normalized to 1 m
-        eta = np.clip(eta, 0.0, 1.0)
-    else:  # exponential (default)
-        # Less conservative: reduce C factor by 50% for more realistic efficiency
-        # Typical rocket engines achieve 85-95% efficiency, not 55-77%
-        C_adjusted = config.C * 0.5  # Reduce penalty by 50%
-        eta = 1.0 - C_adjusted * np.exp(-config.K * Lstar)
-        # Ensure minimum efficiency of 85% for well-designed engines
-        eta = max(eta, 0.85)
+    from .combustion_physics import calculate_combustion_efficiency_advanced
     
-    # Apply spray quality correction if enabled
-    if config.use_spray_correction and not spray_quality_good:
-        eta *= config.spray_penalty_factor
-
-    mixture_efficiency = float(np.clip(mixture_efficiency, config.mixture_efficiency_floor, 1.0))
-    cooling_efficiency = float(np.clip(cooling_efficiency, config.cooling_efficiency_floor, 1.0))
-    eta *= mixture_efficiency * cooling_efficiency
+    # Extract parameters
+    Pc = advanced_params.get("Pc", DEFAULT_CHAMBER_PRESS_PA)
+    Tc = advanced_params.get("Tc", DEFAULT_CHAMBER_TEMP_K)
+    Tc_kinetics = advanced_params.get("Tc_kinetics", None)
     
-    # Clamp to reasonable range using user-configured floor values
-    # Removed hardcoded 0.85 override - respects user config
-    lower_bound = min(config.mixture_efficiency_floor, config.cooling_efficiency_floor)
-    
-    # Warn if efficiency is unusually low (may indicate design issues)
-    if eta < 0.85:
-        import warnings
-        warnings.warn(
-            f"Combustion efficiency {eta:.2%} is below 85% typical floor. "
-            f"This may indicate design issues or very conservative models."
+    # DEBUG: advanced_params extraction
+    if debug:
+        logging.getLogger("evaluate").info(
+            f"[EFF_DEBUG] Pc={Pc/1e6:.3f} MPa, Tc={Tc:.0f} K, "
+            f"Tc_kinetics={Tc_kinetics if Tc_kinetics else 'None'}"
         )
     
-    eta = np.clip(eta, lower_bound, 1.0)
+    cstar_ideal = advanced_params.get("cstar_ideal", DEFAULT_CSTAR_IDEAL_M_S)
+    gamma = advanced_params.get("gamma", DEFAULT_GAMMA_ND)
+    R = advanced_params.get("R", DEFAULT_GAS_CONST_J_KG_K)
+    MR = advanced_params.get("MR", DEFAULT_MIXTURE_RATIO_ND)
+    Ac = advanced_params.get("Ac", None)
+    At = advanced_params.get("At", None)
+    chamber_length = advanced_params.get("chamber_length", None)
+    m_dot_total = advanced_params.get("m_dot_total", None)
+    u_fuel = advanced_params.get("u_fuel", None)
+    u_lox = advanced_params.get("u_lox", None)
+    Dinj = advanced_params.get("Dinj", None)
+    spray_diagnostics = advanced_params.get("spray_diagnostics", None)
+    turbulence_intensity = advanced_params.get("turbulence_intensity", DEFAULT_TURBULENCE_INTENSITY_ND)
+    fuel_props = advanced_params.get("fuel_props", None)
+    
+    # Validate required parameters
+    if Ac is None or m_dot_total is None:
+        raise ValueError("Ac and m_dot_total are required for combustion efficiency calculation")
+    if At is None:
+        raise ValueError("At is required for combustion efficiency calculation")
+    if chamber_length is None:
+        raise ValueError("chamber_length is required for combustion efficiency calculation")
+    
+    # Estimate Dinj from chamber area if not provided
+    if Dinj is None:
+        Dinj = float(np.sqrt(4.0 * Ac / np.pi))
+    Dinj = float(max(Dinj, 1e-6))
+    
+    # Calculate advanced efficiency
+    results = calculate_combustion_efficiency_advanced(
+        Lstar, Pc, Tc, cstar_ideal, gamma, R, MR, config,
+        Ac, At, Dinj, m_dot_total,
+        u_fuel=u_fuel, u_lox=u_lox,
+        spray_diagnostics=spray_diagnostics, 
+        turbulence_intensity=turbulence_intensity,
+        chamber_length=chamber_length,
+        Tc_kinetics=Tc_kinetics,
+        fuel_props=fuel_props,
+        debug=debug
+    )
+    
+    eta = results["eta_total"]
+    
+    if debug:
+        logging.getLogger("evaluate").info(
+            f"[ADV_EFF_DEBUG] eta_total: {eta:.4f} "
+            f"(Lstar: {results['eta_Lstar']:.4f}, Kinetics: {results['eta_kinetics']:.4f}, "
+            f"Mixing: {results['eta_mixing']:.4f})"
+        )
+    
+    # Apply cooling efficiency (external factor)
+    # NOTE: The advanced model does NOT include cooling losses internally.
+    # We apply cooling_efficiency here as an external multiplicative factor.
+    # This is by design to avoid double-counting and maintain clear separation.
+    
+    # Validate cooling efficiency - no clipping, raise error if invalid
+    if not np.isfinite(cooling_efficiency):
+        raise ValueError(f"Invalid cooling_efficiency: {cooling_efficiency}. Must be finite.")
+    if cooling_efficiency < 0.0 or cooling_efficiency > 1.0:
+        raise ValueError(
+            f"Invalid cooling_efficiency: {cooling_efficiency:.4f}. Must be in [0, 1]. "
+            f"Check heat transfer calculations and cooling model configuration."
+        )
+    
+    cooling_eff = float(cooling_efficiency)
+    eta *= cooling_eff
+    
+    # Validate final efficiency - no clipping, raise error if invalid
+    if not np.isfinite(eta):
+        raise ValueError(f"Invalid combustion efficiency: {eta}. Must be finite.")
+    if eta < 0.0 or eta > 1.0:
+        raise ValueError(
+            f"Invalid combustion efficiency: {eta:.4f}. Must be in [0, 1]. "
+            f"Check L*={Lstar:.4f} m, mixing quality (eta_mixing={results['eta_mixing']:.4f}), "
+            f"kinetics (eta_kinetics={results['eta_kinetics']:.4f}), "
+            f"residence time effects (eta_Lstar={results['eta_Lstar']:.4f}), "
+            f"and cooling efficiency ({cooling_eff:.4f})."
+        )
     
     return float(eta)
 
@@ -294,11 +262,29 @@ def calculate_frozen_flow_correction(
     correction_factor : float
         Factor to multiply gamma_ideal by
     """
+    # Validate inputs
+    if Lstar <= 0:
+        raise ValueError(f"Invalid Lstar: {Lstar}. Must be positive.")
+    if gamma_ideal <= 1.0:
+        raise ValueError(f"Invalid gamma_ideal: {gamma_ideal}. Must be > 1.0 for physical gas.")
+    if alpha < 0 or alpha > 1:
+        raise ValueError(f"Invalid alpha: {alpha}. Must be in [0, 1].")
+    
     # Estimate efficiency from L* (simplified)
     # Using default C=0.3, K=0.15
     eta_est = 1.0 - 0.3 * np.exp(-0.15 * Lstar)
     
     correction = 1.0 - alpha * (1.0 - eta_est)
-    correction = np.clip(correction, 0.9, 1.0)  # Reasonable bounds
+    
+    # Validate correction factor - no clipping, raise error if invalid
+    if not np.isfinite(correction):
+        raise ValueError(f"Invalid frozen flow correction: {correction}. Check Lstar={Lstar}, alpha={alpha}.")
+    if correction < 0.5 or correction > 1.1:
+        raise ValueError(
+            f"Frozen flow correction out of reasonable range: {correction:.4f}. "
+            f"Expected [0.5, 1.1] for typical rocket engines. "
+            f"Lstar={Lstar:.4f} m, gamma_ideal={gamma_ideal:.4f}, alpha={alpha:.4f}. "
+            f"This suggests a fundamental issue with the model or inputs."
+        )
     
     return float(correction)

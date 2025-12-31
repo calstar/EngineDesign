@@ -335,6 +335,86 @@ def check_spray_constraints(
                 f"x* >= x_limit ({x_star:.4f} >= {config.evaporation.x_star_limit:.4f} m)"
             )
     
+
     constraints_satisfied = len(violations) == 0
     return constraints_satisfied, violations
+
+
+def smd_pintle(
+    L_open: float,
+    V_rel: float,
+    rho_f: float,
+    mu_f: float,
+    sigma_f: float,
+    C: float,
+    B: float,
+    n: float,
+    p: float,
+) -> float:
+    """
+    Calculate Sauter Mean Diameter (SMD) for pintle injector using relative velocity physics.
+    
+    Formula: SMD = C * L_open * We_rel^(-n) * (1 + B * Oh_f)^p
+    
+    Parameters:
+    -----------
+    L_open : float
+        Characteristic length (Pintle Opening / Gap Height) [m]
+    V_rel : float
+        Relative velocity magnitude between streams [m/s]
+    rho_f : float
+        Fuel (sheet) density [kg/m³]
+    mu_f : float
+        Fuel (sheet) dynamic viscosity [Pa·s]
+    sigma_f : float
+        Fuel surface tension [N/m]
+    C, B, n, p : float
+        Correlation constants
+        
+    Returns:
+    --------
+    D32 : float [m]
+    """
+    if L_open <= 0:
+        raise ValueError(f"smd_pintle: L_open must be positive, got {L_open}")
+    if rho_f <= 0:
+        raise ValueError(f"smd_pintle: rho_f must be positive, got {rho_f}")
+    if sigma_f <= 0:
+        raise ValueError(f"smd_pintle: sigma_f must be positive, got {sigma_f}")
+    if mu_f < 0:
+        raise ValueError(f"smd_pintle: mu_f must be non-negative, got {mu_f}")
+    
+    if C <= 0:
+        raise ValueError(f"smd_pintle: C must be positive, got {C}")
+    if n <= 0:
+        raise ValueError(f"smd_pintle: n must be positive, got {n}")
+    if B < 0:
+        raise ValueError(f"smd_pintle: B must be non-negative, got {B}")
+    if p < 0:
+        raise ValueError(f"smd_pintle: p must be non-negative, got {p}")
+
+    if V_rel < 0:
+        raise ValueError(f"smd_pintle: V_rel must be non-negative, got {V_rel}")
+    
+    if V_rel == 0:
+        import warnings
+        warnings.warn("smd_pintle: V_rel is 0.0, We=0. SMD calculation relying on Ohnesorge term only.")
+
+    # Calculate Weber number based on relative velocity
+    # We = rho * V^2 * L / sigma
+    We_rel = (rho_f * (V_rel ** 2) * L_open) / sigma_f
+    
+    # Calculate Ohnesorge number for the liquid sheet
+    # Oh = mu / sqrt(rho * sigma * L)
+    denom = np.sqrt(rho_f * sigma_f * L_open)
+    Oh_f = mu_f / denom if denom > 0 else 0.0
+    
+    # Apply correlation
+    # SMD = C * L_open * We^(-n) * (1 + B * Oh)^p
+    factor_we = (We_rel ** (-n)) if We_rel > 0 else 1.0
+    factor_oh = (1.0 + B * Oh_f) ** p
+    
+    D32 = C * L_open * factor_we * factor_oh
+        
+    return float(D32)
 

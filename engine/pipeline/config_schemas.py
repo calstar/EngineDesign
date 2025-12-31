@@ -280,12 +280,22 @@ class EvaporationConfig(BaseModel):
     use_constraint: bool = Field(default=True, description="Enable x* constraint")
 
 
+
+class PintleSprayConfig(BaseModel):
+    """Pintle-specific spray correlation parameters"""
+    C: float = Field(default=15.0, gt=0, description="Correlation coefficient C")
+    B: float = Field(default=2.0, ge=0, description="Ohnesorge multiplier B")
+    n: float = Field(default=0.5, gt=0, description="Weber exponent n")
+    p: float = Field(default=0.2, ge=0, description="Ohnesorge exponent p")
+
+
 class SprayConfig(BaseModel):
     """Spray/mixing model configuration"""
     momentum_flux_ratio: bool = Field(default=True, description="Enable J calculation")
     spray_angle: SprayAngleConfig = Field(default_factory=SprayAngleConfig)
     weber: dict = Field(default_factory=lambda: {"We_min": 15.0})
     smd: SMDConfig = Field(default_factory=SMDConfig)
+    pintle: PintleSprayConfig = Field(default_factory=PintleSprayConfig)
     evaporation: EvaporationConfig = Field(default_factory=EvaporationConfig)
     use_turbulence_corrections: bool = Field(default=False, description="Enable turbulence-dependent spray corrections")
     turbulence_breakup_gain: float = Field(default=1.0, ge=0, description="Gain applied to droplet breakup due to turbulence")
@@ -333,20 +343,50 @@ class CombustionEfficiencyConfig(BaseModel):
     K: float = Field(default=0.15, ge=0, description="Recovery rate parameter (for exponential model)")
     use_spray_correction: bool = Field(default=False, description="Apply spray quality penalty")
     spray_penalty_factor: float = Field(default=0.8, ge=0, le=1, description="Efficiency penalty if spray constraints violated")
-    use_mixture_coupling: bool = Field(default=True, description="Apply mixture quality corrections")
+    use_mixture_coupling: bool = Field(
+        default=False,
+        description="[DIAGNOSTICS ONLY] Enable mixture diagnostics logging (does NOT affect efficiency calculation)"
+    )
     use_cooling_coupling: bool = Field(default=True, description="Apply cooling efficiency corrections")
-    use_turbulence_coupling: bool = Field(default=False, description="Apply turbulence corrections")
-    mixture_efficiency_floor: float = Field(default=0.25, ge=0, le=1, description="Minimum mixture efficiency")
+    use_turbulence_coupling: bool = Field(
+        default=False,
+        description="[DEPRECATED] Turbulence is always included in eta_mixing physics, not as separate penalty"
+    )
+    mixture_efficiency_floor: float = Field(default=0.25, ge=0, le=1, description="[DEPRECATED] No longer used")
     cooling_efficiency_floor: float = Field(default=0.25, ge=0, le=1, description="Minimum cooling efficiency")
-    turbulence_efficiency_floor: float = Field(default=0.3, ge=0, le=1, description="Minimum turbulence efficiency")
-    target_turbulence_intensity: float = Field(default=0.08, ge=0, description="Target turbulence intensity")
-    turbulence_penalty_exponent: float = Field(default=1.0, gt=0, description="Turbulence penalty exponent")
-    target_smd_microns: float = Field(default=50.0, gt=0, description="Target SMD for good atomization [microns]")
-    xstar_limit_mm: float = Field(default=50.0, gt=0, description="Maximum evaporation length [mm]")
-    xstar_penalty_exponent: float = Field(default=2.0, gt=0, description="Evaporation length penalty exponent")
-    we_reference: float = Field(default=100.0, gt=0, description="Reference Weber number")
-    we_penalty_exponent: float = Field(default=0.5, gt=0, description="Weber number penalty exponent")
-    smd_penalty_exponent: float = Field(default=1.0, gt=0, description="SMD penalty exponent")
+    turbulence_efficiency_floor: float = Field(default=0.3, ge=0, le=1, description="[DEPRECATED] No longer used")
+    target_turbulence_intensity: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] Design target only, not used in efficiency calculation"
+    )
+    turbulence_penalty_exponent: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] No longer used"
+    )
+    target_smd_microns: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] Design target only, not used in efficiency calculation"
+    )
+    xstar_limit_mm: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] No longer used"
+    )
+    xstar_penalty_exponent: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] No longer used"
+    )
+    we_reference: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] Design target only, not used in efficiency calculation"
+    )
+    we_penalty_exponent: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] No longer used"
+    )
+    smd_penalty_exponent: Optional[float] = Field(
+        default=None,
+        description="[DEPRECATED] No longer used"
+    )
     use_advanced_model: bool = Field(
         default=False,
         description="Use advanced physics-based efficiency model (kinetics, mixing, turbulence)"
@@ -385,6 +425,12 @@ class CombustionEfficiencyConfig(BaseModel):
         default=0.8,
         ge=0,
         description="Pressure exponent for kinetics scaling: tau_chem ~ (P_ref/Pc)^n. Default 0.8."
+    )
+    # Gasification model transition temperature
+    T_star_fuel_cap_K: float = Field(
+        default=1000.0,
+        gt=0,
+        description="Effective fuel interface temperature cap for gasification model [K]. Represents wet-bulb/pyrolysis onset scale, NOT gas temperature tracking. Default 1000K for RP-1."
     )
 
 

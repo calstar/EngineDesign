@@ -1,6 +1,8 @@
 """Main pipeline orchestrator - runs full tank pressure to thrust pipeline"""
 
 import numpy as np
+import logging
+import os
 from typing import Dict, Any, Optional, Union
 import copy
 
@@ -115,7 +117,8 @@ class PintleEngineRunner:
         P_tank_O: float,
         P_tank_F: float,
         Pc_guess: Optional[float] = None,
-        P_ambient: Optional[float] = None
+        P_ambient: Optional[float] = None,
+        debug: bool = False
     ) -> Dict[str, Any]:
         """
         Evaluate engine performance at given tank pressures.
@@ -131,6 +134,9 @@ class PintleEngineRunner:
         P_ambient : float, optional
             Ambient pressure [Pa]. If None, computed from config environment
             elevation using standard atmosphere model.
+        debug : bool, optional
+            If True, enables debug logging to output/logs/evaluate.log and prints
+            detailed execution traces. Defaults to False.
         
         Returns:
         --------
@@ -146,7 +152,93 @@ class PintleEngineRunner:
             - P_ambient: Ambient pressure used [Pa]
             - elevation: Elevation from config [m]
             - diagnostics: Detailed diagnostics dict
+        
+        Raises:
+        -------
+        ValueError
+            If any physics validation fails (invalid values, out of range, etc.)
+        KeyError
+            If required data is missing from results
+        RuntimeError
+            If solver fails to converge or calculation fails
         """
+        # Wrap entire evaluation in try-except to log errors before re-raising
+        try:
+            return self._evaluate_internal(P_tank_O, P_tank_F, Pc_guess, P_ambient, debug)
+        except Exception as e:
+            # Log error with full traceback if debug is enabled
+            if debug:
+                logger = logging.getLogger("evaluate")
+                logger.error("="*80)
+                logger.error("[EVALUATION FAILED]")
+                logger.error(f"Error type: {type(e).__name__}")
+                logger.error(f"Error message: {str(e)}")
+                logger.error(f"Inputs: P_tank_O={P_tank_O/6894.76:.2f} psi, P_tank_F={P_tank_F/6894.76:.2f} psi")
+                logger.error("Full traceback:", exc_info=True)
+                logger.error("="*80)
+            # Re-raise the exception to crash the program as intended
+            raise
+    
+    def _evaluate_internal(
+        self,
+        P_tank_O: float,
+        P_tank_F: float,
+        Pc_guess: Optional[float] = None,
+        P_ambient: Optional[float] = None,
+        debug: bool = False
+    ) -> Dict[str, Any]:
+        """Internal evaluation implementation (wrapped by evaluate() for error logging)."""
+        # Configure logging if debug is enabled
+        logger = logging.getLogger("evaluate")
+        if debug:
+            log_dir = "output/logs"
+            os.makedirs(log_dir, exist_ok=True)
+            log_file = os.path.join(log_dir, "evaluate.log")
+            
+            # Reset handlers to avoid duplicates
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
+            
+            logger.setLevel(logging.DEBUG)
+            
+            # File handler
+            fh = logging.FileHandler(log_file, mode='w')
+            fh.setLevel(logging.DEBUG)
+            file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+            fh.setFormatter(file_formatter)
+            logger.addHandler(fh)
+            
+            # Console handler (optional, but useful for interactive debugging)
+            ch = logging.StreamHandler()
+            ch.setLevel(logging.INFO) # Keep INFO and above on console
+            console_formatter = logging.Formatter('%(message)s')
+            ch.setFormatter(console_formatter)
+            logger.addHandler(ch)
+            
+            logger.info("Debug logging enabled. Writing to %s", log_file)
+        else:
+            # If not debugging, maybe we still want INFO logs to print?
+            # Or silence them? The user said "refactor prints to be turned into logging WHEN logging is true".
+            # This implies if debug is False, we shouldn't log.
+            # But the 'report' prints (Performance Summary) are likely desired ALWAYS.
+            # I will assume standard prints should remain PRINTS if debug=False, 
+            # OR I configure a basic stdout logger.
+            # Let's simple use print() for the summary if debug=False, or logger.info if debug=True?
+            # Better: Make 'logger' a dummy wrapper or real logger.
+            # If debug=False, I'll set logger to a NullLogger BUT the existing code uses prints.
+            # The prompt says "refactor all those prints".
+            # I will use the logger. If debug=False, I will add a StreamHandler to print INFO+ to stdout to mimic print().
+            params_debug = False # Don't re-configure if already configured globally?
+            # Construct a local logger reference that works either way
+            pass
+
+        # Helper to log or print
+        def log_info(msg):
+            if debug:
+                logger.info(msg)
+            else:
+                print(msg)
+
         # Get ambient pressure (from config elevation if not provided)
         Pa = self._get_ambient_pressure(P_ambient)
         elevation = self._get_elevation()
@@ -155,34 +247,51 @@ class PintleEngineRunner:
         cg = ensure_chamber_geometry(self.config)
         
         # Print chamber geometry at start of evaluation (exclude design parameters)
-        print("\n" + "="*80)
-        print("[CHAMBER GEOMETRY] Loaded configuration:")
-        print(f"  Volume:           {cg.volume*1e6:.2f} cm³ ({cg.volume:.6e} m³)")
-        print(f"  A_throat:         {cg.A_throat*1e6:.4f} mm² ({cg.A_throat:.6e} m²)")
-        print(f"  A_exit:           {cg.A_exit*1e6:.4f} mm² ({cg.A_exit:.6e} m²)")
-        print(f"  Expansion Ratio:  {cg.expansion_ratio:.4f}")
-        print(f"  Nozzle Efficiency:{cg.nozzle_efficiency:.4f}")
+        # Print chamber geometry at start of evaluation (exclude design parameters)
+        log_info("\n" + "="*80)
+        log_info("[CHAMBER GEOMETRY] Loaded configuration:")
+        log_info(f"  Volume:           {cg.volume*1e6:.2f} cm³ ({cg.volume:.6e} m³)")
+        log_info(f"  A_throat:         {cg.A_throat*1e6:.4f} mm² ({cg.A_throat:.6e} m²)")
+        log_info(f"  A_exit:           {cg.A_exit*1e6:.4f} mm² ({cg.A_exit:.6e} m²)")
+        log_info(f"  Expansion Ratio:  {cg.expansion_ratio:.4f}")
+        log_info(f"  Nozzle Efficiency:{cg.nozzle_efficiency:.4f}")
         if cg.length:
-            print(f"  Length:           {cg.length*1000:.2f} mm")
+            log_info(f"  Length:           {cg.length*1000:.2f} mm")
         if cg.Lstar:
-            print(f"  L* (config):      {cg.Lstar*1000:.2f} mm")
+            log_info(f"  L* (config):      {cg.Lstar*1000:.2f} mm")
         if cg.chamber_diameter:
-            print(f"  Chamber Diameter: {cg.chamber_diameter*1000:.2f} mm")
+            log_info(f"  Chamber Diameter: {cg.chamber_diameter*1000:.2f} mm")
         # if cg.contraction_ratio:
-        #     print(f"  Contraction Ratio:{cg.contraction_ratio:.4f}")
-        print("="*80 + "\n")
+        #     log_info(f"  Contraction Ratio:{cg.contraction_ratio:.4f}")
+        log_info("="*80 + "\n")
         
         # Solve for chamber pressure
-        Pc, diagnostics = self.solver.solve(P_tank_O, P_tank_F, Pc_guess)
+        Pc, diagnostics = self.solver.solve(P_tank_O, P_tank_F, Pc_guess, debug=debug)
         
 
         At = cg.A_throat
-        cstar = diagnostics.get("cstar_actual", np.nan)
+        
+        # Validate all required diagnostics are present
+        required_keys = ["cstar_actual", "mdot_O", "mdot_F", "MR", "gamma", "R", "Tc"]
+        for key in required_keys:
+            if key not in diagnostics:
+                raise KeyError(f"Missing required diagnostic '{key}' from chamber solver")
+        
+        cstar = diagnostics["cstar_actual"]
         mdot = diagnostics["mdot_O"] + diagnostics["mdot_F"]
 
-        mdot_choked = Pc * At / cstar if (At and cstar and cstar > 0) else np.nan
-        ratio = mdot / mdot_choked if (mdot_choked and mdot_choked > 0) else np.nan
-
+        # Validate cstar and At before using
+        if At <= 0:
+            raise ValueError(f"Invalid throat area: At={At:.6e} m². Must be positive.")
+        
+        if cstar <= 0:
+            raise ValueError(f"Invalid c*: {cstar:.2f} m/s. Must be positive.")
+        
+        if mdot <= 0:
+            raise ValueError(f"Invalid mass flow: mdot={mdot:.4f} kg/s. Must be positive.")
+        
+        mdot_choked = Pc * At / cstar
+        ratio = mdot / mdot_choked
 
         # Get final mass flow rates
         mdot_O = diagnostics["mdot_O"]
@@ -190,41 +299,48 @@ class PintleEngineRunner:
         mdot_total = mdot_O + mdot_F
         MR = diagnostics["MR"]
         
-        # Ensure chamber_geometry exists
-        
-        
         cstar_actual = diagnostics["cstar_actual"]
         gamma = diagnostics["gamma"]
         R = diagnostics["R"]
         Tc = diagnostics["Tc"]
 
-        cstar_implied = Pc * At / max(mdot_total, 1e-9)
-        cstar_cea = cstar_actual  # eta * cea_props["cstar_ideal"]
-
+        # Calculate implied c* from choked flow equation
+        if mdot_total <= 0:
+            raise ValueError(f"Invalid total mass flow: mdot_total={mdot_total} kg/s. Must be positive.")
+        
+        cstar_implied = Pc * At / mdot_total
+        cstar_cea = cstar_actual
+        
+        # Validate cstar_cea for ratio calculation
+        if cstar_cea <= 0:
+            raise ValueError(f"Invalid cstar_cea: {cstar_cea} m/s. Must be positive.")
+        
+        if mdot_choked <= 0:
+            raise ValueError(f"Invalid mdot_choked: {mdot_choked} kg/s. Must be positive.")
     
-        print(
+        log_info(
             f"[COUPLING] Pc={Pc/6894.757:.1f} psi, At={At*1e6:.1f} mm^2, "
             f"c*_CEA={cstar_cea:.1f} m/s, c*_implied={cstar_implied:.1f} m/s, "
-            f"ratio={cstar_implied/max(cstar_cea,1e-9):.3f}, "
+            f"ratio={cstar_implied/cstar_cea:.3f}, "
             f"mdot={mdot_total:.3f} kg/s, mdot_choked={mdot_choked:.3f} kg/s, "
-            f"mdot_ratio={mdot_total/max(mdot_choked,1e-9):.3f}"
+            f"mdot_ratio={mdot_total/mdot_choked:.3f}"
         )
         
         # Calculate thrust using computed ambient pressure
         
         
-        print(
+        log_info(
             f"[RUNNER][GEOM] At={cg.A_throat:.6e} m^2, Ae={cg.A_exit:.6e} m^2, "
             f"eps={cg.expansion_ratio:.4f}, eff={cg.nozzle_efficiency:.3f}"
         )
-        print(f"[RUNNER][STATE] Pc={Pc:.3e} Pa, Pa={Pa:.3e} Pa, MR={MR:.4f}, mdot={mdot_total:.4f} kg/s")
+        log_info(f"[RUNNER][STATE] Pc={Pc:.3e} Pa, Pa={Pa:.3e} Pa, MR={MR:.4f}, mdot={mdot_total:.4f} kg/s")
 
         # Check if shifting equilibrium is enabled
         use_shifting = getattr(self.config.combustion.efficiency, 'use_shifting_equilibrium', True)
         reaction_progress = diagnostics.get("reaction_progress", None)
         
         cea_noz = self.cea_cache.eval(MR, Pc, Pa, cg.expansion_ratio)
-        print(
+        log_info(
             f"[THERMO] chamber: Tc={Tc:.1f} K gamma={gamma:.4f} R={R:.2f} c*_actual={cstar_actual:.1f} | "
             f"CEA(noz): Tc={cea_noz['Tc']:.1f} K gamma={cea_noz['gamma']:.4f} R={cea_noz['R']:.2f} c*_ideal={cea_noz['cstar_ideal']:.1f}"
         )
@@ -239,24 +355,46 @@ class PintleEngineRunner:
             Pa,
             reaction_progress=reaction_progress,  # Pass reaction progress for shifting equilibrium
             use_shifting_equilibrium=use_shifting,
+            debug=debug,
         )
+        
+        # Extract thrust results - all required fields
+        required_thrust_keys = ["F", "Isp", "v_exit", "P_exit", "P_throat", "T_exit", "T_throat", 
+                                 "M_exit", "Cf_actual", "Cf_ideal", "Cf_theoretical"]
+        for key in required_thrust_keys:
+            if key not in thrust_results:
+                raise KeyError(
+                    f"Missing required thrust result '{key}'. "
+                    f"calculate_thrust() must return all required fields."
+                )
         
         F = thrust_results["F"]
         Isp = thrust_results["Isp"]
         v_exit = thrust_results["v_exit"]
         P_exit = thrust_results["P_exit"]
-        P_throat = thrust_results.get("P_throat", Pc * 0.6)  # Throat pressure
-        T_exit = thrust_results.get("T_exit", Tc * 0.5)  # Exit temperature
-        T_throat = thrust_results.get("T_throat", Tc * 0.85)  # Throat temperature
-        M_exit = thrust_results.get("M_exit", 0.0)  # Exit Mach number
-        gamma_exit = thrust_results.get("gamma_exit", gamma)  # Exit gamma (for shifting equilibrium)
-        R_exit = thrust_results.get("R_exit", R)  # Exit gas constant (for shifting equilibrium)
-        Cf_actual = thrust_results.get("Cf_actual", thrust_results.get("Cf", 0.0))
-        Cf_ideal = thrust_results.get("Cf_ideal", 0.0)
-        Cf_theoretical = thrust_results.get("Cf_theoretical", 0.0)
-        temperature_profile = thrust_results.get("temperature_profile", None)
+        P_throat = thrust_results["P_throat"]
+        T_exit = thrust_results["T_exit"]
+        T_throat = thrust_results["T_throat"]
+        M_exit = thrust_results["M_exit"]
+        
+        # Shifting equilibrium results - these have defaults since they're only present when enabled
+        gamma_exit = thrust_results.get("gamma_exit")
+        R_exit = thrust_results.get("R_exit")
+        
+        if gamma_exit is None:
+            gamma_exit = gamma  # Use chamber gamma if shifting equilibrium not enabled
+        if R_exit is None:
+            R_exit = R  # Use chamber R if shifting equilibrium not enabled
+        
+        Cf_actual = thrust_results["Cf_actual"]
+        Cf_ideal = thrust_results["Cf_ideal"]
+        Cf_theoretical = thrust_results["Cf_theoretical"]
+        temperature_profile = thrust_results.get("temperature_profile")  # Optional
 
-        cooling_results = diagnostics.get("cooling", {})
+        # Cooling results - optional
+        cooling_results = diagnostics.get("cooling")
+        if cooling_results is None:
+            cooling_results = {}  # Empty dict if no cooling
         
         # Calculate chamber pressure profile along length
         pressure_profile = None
@@ -384,56 +522,56 @@ class PintleEngineRunner:
         }
         
         # Print comprehensive results summary
-        print("\n" + "="*80)
-        print("[PERFORMANCE SUMMARY]")
-        print(f"  Thrust:           {F/1000:.3f} kN ({F:.2f} N)")
-        print(f"  Specific Impulse: {Isp:.2f} s")
-        print(f"  Chamber Pressure: {Pc/6894.76:.2f} psi ({Pc/1e6:.4f} MPa)")
-        print(f"  Mixture Ratio:    {MR:.4f} (O/F)")
-        print(f"  Total Mass Flow:  {mdot_total:.4f} kg/s (O: {mdot_O:.4f}, F: {mdot_F:.4f})")
-        print(f"  c* (actual):      {cstar_actual:.2f} m/s")
-        print(f"  c* (ideal):       {diagnostics['cstar_ideal']:.2f} m/s")
-        print(f"  η_c*:             {diagnostics['eta_cstar']:.4f}")
-        print(f"  Cf (actual):      {Cf_actual:.4f}")
-        print(f"  Cf (ideal):       {Cf_ideal:.4f}")
-        print(f"  Exit Velocity:    {v_exit:.2f} m/s")
-        print(f"  Exit Mach:        {M_exit:.3f}")
-        print(f"  Exit Pressure:    {P_exit/6894.76:.2f} psi ({P_exit/1e3:.2f} kPa)")
-        print(f"  Temperatures:     Tc={Tc:.1f} K, T_throat={T_throat:.1f} K, T_exit={T_exit:.1f} K")
-        print(f"  γ (chamber/exit): {gamma:.4f} / {gamma_exit:.4f}")
-        print(f"  R (chamber/exit): {R:.2f} / {R_exit:.2f} J/(kg·K)")
-        print("-"*80)
+        log_info("\n" + "="*80)
+        log_info("[PERFORMANCE SUMMARY]")
+        log_info(f"  Thrust:           {F/1000:.3f} kN ({F:.2f} N)")
+        log_info(f"  Specific Impulse: {Isp:.2f} s")
+        log_info(f"  Chamber Pressure: {Pc/6894.76:.2f} psi ({Pc/1e6:.4f} MPa)")
+        log_info(f"  Mixture Ratio:    {MR:.4f} (O/F)")
+        log_info(f"  Total Mass Flow:  {mdot_total:.4f} kg/s (O: {mdot_O:.4f}, F: {mdot_F:.4f})")
+        log_info(f"  c* (actual):      {cstar_actual:.2f} m/s")
+        log_info(f"  c* (ideal):       {diagnostics['cstar_ideal']:.2f} m/s")
+        log_info(f"  η_c*:             {diagnostics['eta_cstar']:.4f}")
+        log_info(f"  Cf (actual):      {Cf_actual:.4f}")
+        log_info(f"  Cf (ideal):       {Cf_ideal:.4f}")
+        log_info(f"  Exit Velocity:    {v_exit:.2f} m/s")
+        log_info(f"  Exit Mach:        {M_exit:.3f}")
+        log_info(f"  Exit Pressure:    {P_exit/6894.76:.2f} psi ({P_exit/1e3:.2f} kPa)")
+        log_info(f"  Temperatures:     Tc={Tc:.1f} K, T_throat={T_throat:.1f} K, T_exit={T_exit:.1f} K")
+        log_info(f"  γ (chamber/exit): {gamma:.4f} / {gamma_exit:.4f}")
+        log_info(f"  R (chamber/exit): {R:.2f} / {R_exit:.2f} J/(kg·K)")
+        log_info("-"*80)
         
-        print("[INJECTOR PRESSURE DROPS]")
+        log_info("[INJECTOR PRESSURE DROPS]")
         if injector_pressure_diagnostics.get("P_injector_O") is not None:
-            print(f"  P_injector (LOX): {injector_pressure_diagnostics['P_injector_O']/6894.76:.2f} psi")
+            log_info(f"  P_injector (LOX): {injector_pressure_diagnostics['P_injector_O']/6894.76:.2f} psi")
         if injector_pressure_diagnostics.get("P_injector_F") is not None:
-            print(f"  P_injector (Fuel):{injector_pressure_diagnostics['P_injector_F']/6894.76:.2f} psi")
+            log_info(f"  P_injector (Fuel):{injector_pressure_diagnostics['P_injector_F']/6894.76:.2f} psi")
         if injector_pressure_diagnostics.get("delta_p_injector_O") is not None:
-            print(f"  ΔP_inj (LOX):     {injector_pressure_diagnostics['delta_p_injector_O']/6894.76:.2f} psi")
+            log_info(f"  ΔP_inj (LOX):     {injector_pressure_diagnostics['delta_p_injector_O']/6894.76:.2f} psi")
         if injector_pressure_diagnostics.get("delta_p_injector_F") is not None:
-            print(f"  ΔP_inj (Fuel):    {injector_pressure_diagnostics['delta_p_injector_F']/6894.76:.2f} psi")
+            log_info(f"  ΔP_inj (Fuel):    {injector_pressure_diagnostics['delta_p_injector_F']/6894.76:.2f} psi")
         if injector_pressure_diagnostics.get("delta_p_feed_O") is not None:
-            print(f"  ΔP_feed (LOX):    {injector_pressure_diagnostics['delta_p_feed_O']/6894.76:.2f} psi")
+            log_info(f"  ΔP_feed (LOX):    {injector_pressure_diagnostics['delta_p_feed_O']/6894.76:.2f} psi")
         if injector_pressure_diagnostics.get("delta_p_feed_F") is not None:
-            print(f"  ΔP_feed (Fuel):   {injector_pressure_diagnostics['delta_p_feed_F']/6894.76:.2f} psi")
-        print("-"*80)
+            log_info(f"  ΔP_feed (Fuel):   {injector_pressure_diagnostics['delta_p_feed_F']/6894.76:.2f} psi")
+        log_info("-"*80)
         
-        print("[CHAMBER INTRINSICS]")
+        log_info("[CHAMBER INTRINSICS]")
         if chamber_intrinsics:
-            print(f"  L*:               {chamber_intrinsics.get('Lstar', 0)*1000:.2f} mm")
-            print(f"  Residence Time:   {chamber_intrinsics.get('residence_time', 0)*1000:.3f} ms")
-            print(f"  Velocity (mean):  {chamber_intrinsics.get('velocity_mean', 0):.2f} m/s")
-            print(f"  Velocity (throat):{chamber_intrinsics.get('velocity_throat', 0):.2f} m/s")
-            print(f"  Gas Density:      {chamber_intrinsics.get('density', 0):.3f} kg/m³")
-            print(f"  Sound Speed:      {chamber_intrinsics.get('sound_speed', 0):.2f} m/s")
-            print(f"  Mach (chamber):   {chamber_intrinsics.get('mach_number', 0):.4f}")
-            print(f"  Reynolds Number:  {chamber_intrinsics.get('reynolds_number', 0):.2e}")
+            log_info(f"  L*:               {chamber_intrinsics.get('Lstar', 0)*1000:.2f} mm")
+            log_info(f"  Residence Time:   {chamber_intrinsics.get('residence_time', 0)*1000:.3f} ms")
+            log_info(f"  Velocity (mean):  {chamber_intrinsics.get('velocity_mean', 0):.2f} m/s")
+            log_info(f"  Velocity (throat):{chamber_intrinsics.get('velocity_throat', 0):.2f} m/s")
+            log_info(f"  Gas Density:      {chamber_intrinsics.get('density', 0):.3f} kg/m³")
+            log_info(f"  Sound Speed:      {chamber_intrinsics.get('sound_speed', 0):.2f} m/s")
+            log_info(f"  Mach (chamber):   {chamber_intrinsics.get('mach_number', 0):.4f}")
+            log_info(f"  Reynolds Number:  {chamber_intrinsics.get('reynolds_number', 0):.2e}")
         else:
-            print("  (Chamber intrinsics calculation failed)")
-        print("="*80 + "\n")
+            log_info("  (Chamber intrinsics calculation failed)")
+        log_info("="*80 + "\n")
         
-        return results
+        return results  # End of _evaluate_internal()
     
     def evaluate_arrays(
         self,

@@ -718,9 +718,16 @@ def solve_spalding_coupled(
         T_s_new = (1.0 - alpha) * T_s + alpha * T_s_unrelaxed
         
         # Step 8: Apply bounds (domain enforcement: T_s must stay below T_crit)
+        # NOTE: This is VALID clipping for iterative solvers - enforcing physical domain
+        # T_s cannot exceed critical temperature (boiling becomes impossible)
+        # However, if clipping happens too frequently, it indicates solver instability
         T_s_pre_clip = T_s_new
         T_s_new = np.clip(T_s_new, T_min, T_max)
         T_s_clipped = (T_s_new != T_s_pre_clip)
+        
+        # Count clipping events - too many indicates problem
+        if T_s_clipped or X_F_s_clipped:
+            clipping_count += 1
         
         # =============================================================================
         # DIAGNOSTIC: Periodic iteration logging
@@ -750,6 +757,16 @@ def solve_spalding_coupled(
             break
         
         T_s = T_s_new
+    
+    # Check if solver is clipping too frequently (>50% of iterations)
+    # This indicates the solver is unable to stay in the valid domain naturally
+    if clipping_count > max_iter * 0.5:
+        raise RuntimeError(
+            f"Spalding solver clipping excessively: {clipping_count}/{max_iter} iterations. "
+            f"This indicates the solver is unable to stay in valid domain (T_s in [{T_min:.1f}, {T_max:.1f}] K, X_F_s in [0, 1]). "
+            f"Final T_s={T_s:.1f} K, T_inf={T_inf:.1f} K, P={P:.1e} Pa. "
+            f"Check input conditions or reduce under-relaxation factor alpha."
+        )
     
     # Final pass: recompute all values with converged T_s for consistency
     p_s = calculate_vapor_pressure(T_s, fuel=fuel)

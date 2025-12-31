@@ -292,7 +292,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
         } else if (event.type === 'objective') {
           // Handle real-time objective updates
           if (event.objective_history && Array.isArray(event.objective_history)) {
-            setObjectiveHistory(prev => [...prev, ...event.objective_history]);
+            setObjectiveHistory(prev => [...prev, ...(event.objective_history || [])]);
           }
         } else if (event.type === 'complete') {
           setIsRunning(false);
@@ -702,24 +702,28 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           {/* Validation Status */}
           <div className="mb-6">
             <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-3">✓ Validation</h4>
-            <div className="grid grid-cols-4 gap-4">
-              <ValidationCard 
-                label="Thrust Check" 
-                passed={results.performance.thrust_check_passed}
-              />
-              <ValidationCard 
-                label="O/F Check" 
-                passed={results.performance.of_check_passed}
-              />
-              <ValidationCard 
-                label="Stability Check" 
-                passed={results.performance.stability_check_passed}
-              />
-              <ValidationCard 
-                label="Pressure Candidate" 
-                passed={results.performance.pressure_candidate_valid}
-              />
-            </div>
+          <div className="grid grid-cols-5 gap-4">
+             <ValidationCard 
+               label="Thrust Check" 
+               passed={results.performance.thrust_check_passed}
+             />
+             <ValidationCard 
+               label="O/F Check" 
+               passed={results.performance.of_check_passed}
+             />
+             <ValidationCard 
+               label="Stability Check" 
+               passed={results.performance.stability_check_passed}
+             />
+             <ValidationCard 
+               label="Geometry Check" 
+               passed={results.performance.geometry_check_passed}
+             />
+             <ValidationCard 
+               label="Pressure Candidate" 
+               passed={results.performance.pressure_candidate_valid}
+             />
+           </div>
             {results.performance.failure_reasons && results.performance.failure_reasons.length > 0 && (
               <div className="mt-3 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
                 <p className="text-sm text-red-400 font-semibold mb-1">Failure Reasons:</p>

@@ -689,6 +689,7 @@ export interface Layer1Results {
     thrust_check_passed?: boolean;
     of_check_passed?: boolean;
     stability_check_passed?: boolean;
+    geometry_check_passed?: boolean;
     pressure_candidate_valid?: boolean;
     failure_reasons?: string[];
     
