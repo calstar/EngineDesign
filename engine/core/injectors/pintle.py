@@ -264,7 +264,7 @@ class PintleInjector(InjectorModel):
             x_star_combined = max(x_star_O, xstar(U_rel, tau_evap(D32_F, spray_cfg.evaporation.K)))
 
             if spray_cfg.use_turbulence_corrections:
-                penetration_multiplier = 1.0 / (1.0 + penetration_gain * turbulence_intensity_mix)
+                penetration_multiplier = 1.0 / (1.0 + spray_cfg.turbulence_penetration_gain * turbulence_intensity_mix)
                 penetration_multiplier = float(np.clip(penetration_multiplier, 0.3, 1.0))
                 x_star_combined *= penetration_multiplier
             else:

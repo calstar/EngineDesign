@@ -213,7 +213,6 @@ def run_full_engine_optimization_with_flight_sim(
         runner=runner,
         requirements=requirements,
         target_burn_time=target_burn_time,
-        max_iterations=max_iterations,
         tolerances=tolerances,
         pressure_config=pressure_config,
         update_progress=update_progress,

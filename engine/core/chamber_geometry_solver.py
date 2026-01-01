@@ -8,6 +8,7 @@ given chamber pressure and thrust, using thermochemistry from the CEA cache.
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 import os
+import logging
 
 # Handle both relative import (when used as module) and absolute import (when run as script)
 try:
@@ -36,6 +37,9 @@ from engine.pipeline.config_schemas import CEAConfig
 
 # Default CEA cache file path (relative to project root)
 DEFAULT_CEA_CACHE_FILE = "output/cache/cea_cache_LOX_RP1.npz"
+
+# Create module-level logger
+logger = logging.getLogger("evaluate")
 
 
 def solve_chamber_geometry_with_cea(
@@ -151,13 +155,13 @@ def solve_chamber_geometry_with_cea(
     use_3d = cea_cache.use_3d
     
     if verbose:
-        print(f"Initializing chamber geometry solver...")
-        print(f"  Pc = {pc_design/1e6:.2f} MPa")
-        print(f"  F = {thrust_design:.1f} N")
-        print(f"  MR = {MR:.3f}")
-        print(f"  Nozzle efficiency = {nozzle_efficiency:.4f}")
-        print(f"  CEA cache: {'3D (eps-dependent)' if use_3d else '2D (fixed eps)'}")
-        print(f"  Initial A_throat guess = {A_throat_guess*1e6:.4f} mm²")
+        logger.info(f"Initializing chamber geometry solver...")
+        logger.info(f"  Pc = {pc_design/1e6:.2f} MPa")
+        logger.info(f"  F = {thrust_design:.1f} N")
+        logger.info(f"  MR = {MR:.3f}")
+        logger.info(f"  Nozzle efficiency = {nozzle_efficiency:.4f}")
+        logger.info(f"  CEA cache: {'3D (eps-dependent)' if use_3d else '2D (fixed eps)'}")
+        logger.info(f"  Initial A_throat guess = {A_throat_guess*1e6:.4f} mm²")
     
     # Iteration variables
     A_throat = A_throat_guess
@@ -232,7 +236,7 @@ def solve_chamber_geometry_with_cea(
                 
         except Exception as e:
             if verbose:
-                print(f"Warning: CEA lookup failed at iteration {iteration}: {e}")
+                logger.warning(f"CEA lookup failed at iteration {iteration}: {e}")
             # Fallback to initial guess (already corrected for efficiency)
             Cf = Cf_initial_guess
             # Use initial guess for Cf_ideal if lookup failed
@@ -274,7 +278,7 @@ def solve_chamber_geometry_with_cea(
         })
         
         if verbose:
-            print(f"  Iter {iteration}: A_throat={A_throat*1e6:.6f} mm², "
+            logger.info(f"  Iter {iteration}: A_throat={A_throat*1e6:.6f} mm², "
                   f"eps={eps:.4f}, Cf_ideal={Cf_ideal:.6f}, Cf_corrected={Cf:.6f}, residual={residual:.2e}")
         
         # Check convergence (both relative and absolute)
@@ -347,12 +351,12 @@ def solve_chamber_geometry_with_cea(
         )
     
     if verbose:
-        print(f"\nConverged after {iteration + 1} iterations:")
-        print(f"  Final A_throat = {A_throat*1e6:.6f} mm²")
-        print(f"  Final eps = {eps_final:.4f}")
-        print(f"  Final Cf_ideal = {Cf_ideal_final:.6f} (from CEA)")
-        print(f"  Final Cf_corrected = {Cf_final:.6f} (with efficiency={nozzle_efficiency:.4f})")
-        print(f"  Thrust check: {thrust_check:.2f} N (requested: {thrust_design:.2f} N, error: {thrust_error*100:.2f}%)")
+        logger.info(f"\nConverged after {iteration + 1} iterations:")
+        logger.info(f"  Final A_throat = {A_throat*1e6:.6f} mm²")
+        logger.info(f"  Final eps = {eps_final:.4f}")
+        logger.info(f"  Final Cf_ideal = {Cf_ideal_final:.6f} (from CEA)")
+        logger.info(f"  Final Cf_corrected = {Cf_final:.6f} (with efficiency={nozzle_efficiency:.4f})")
+        logger.info(f"  Thrust check: {thrust_check:.2f} N (requested: {thrust_design:.2f} N, error: {thrust_error*100:.2f}%)")
     
     # Now use the converged Cf to calculate full geometry
     # Convert Cf to force_coefficient for the existing function

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   LineChart,
   Line,
@@ -9,8 +9,8 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
-import { 
-  runLayer1Optimization, 
+import {
+  runLayer1Optimization,
   getLayer1Status
 } from '../api/client';
 import type {
@@ -25,17 +25,17 @@ interface Layer1OptimizationProps {
 }
 
 // Helper component for result cards
-function ResultCard({ 
-  label, 
-  value, 
-  unit, 
-  decimals = 2, 
+function ResultCard({
+  label,
+  value,
+  unit,
+  decimals = 2,
   color = 'blue',
   isText = false
-}: { 
-  label: string; 
-  value: number | string | undefined; 
-  unit?: string; 
+}: {
+  label: string;
+  value: number | string | undefined;
+  unit?: string;
   decimals?: number;
   color?: string;
   isText?: boolean;
@@ -51,7 +51,7 @@ function ResultCard({
     pink: 'bg-pink-500/10 border-pink-500/30',
     indigo: 'bg-indigo-500/10 border-indigo-500/30',
   };
-  
+
   const textColorClasses: Record<string, string> = {
     blue: 'text-blue-400',
     green: 'text-green-400',
@@ -63,15 +63,15 @@ function ResultCard({
     pink: 'text-pink-400',
     indigo: 'text-indigo-400',
   };
-  
-  const displayValue = isText 
+
+  const displayValue = isText
     ? String(value || '-')
-    : typeof value === 'number' 
-      ? value.toFixed(decimals) 
-      : value !== undefined && value !== null 
-        ? String(value) 
+    : typeof value === 'number'
+      ? value.toFixed(decimals)
+      : value !== undefined && value !== null
+        ? String(value)
         : '-';
-  
+
   return (
     <div className={`rounded-lg p-3 border ${colorClasses[color] || colorClasses.blue}`}>
       <p className="text-xs text-[var(--color-text-secondary)] mb-1">{label}</p>
@@ -153,7 +153,7 @@ function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Arr
   };
 
   const iterations = iterationHistory.map((h, i) => (h.iteration as number | undefined) ?? i);
-  
+
   // Parameter definitions: [key, label, unit, xIndex, default, scale]
   const parameters = [
     ['A_throat', 'Throat Area', 'mm²', 0, 0.001, 1e6],
@@ -198,16 +198,16 @@ function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Arr
           <ResponsiveContainer width="100%" height={200}>
             <LineChart data={plotData} margin={{ top: 5, right: 10, left: 5, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
-              <XAxis 
+              <XAxis
                 dataKey="iteration"
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 9 }}
               />
-              <YAxis 
+              <YAxis
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 9 }}
               />
-              <Tooltip 
+              <Tooltip
                 contentStyle={{
                   backgroundColor: 'var(--color-bg-secondary)',
                   border: '1px solid var(--color-border)',
@@ -215,10 +215,10 @@ function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Arr
                   fontSize: '12px'
                 }}
               />
-              <Line 
-                type="monotone" 
-                dataKey={key} 
-                stroke="#3b82f6" 
+              <Line
+                type="monotone"
+                dataKey={key}
+                stroke="#3b82f6"
                 strokeWidth={1.5}
                 dot={false}
                 isAnimationActive={false}
@@ -233,7 +233,6 @@ function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Arr
 
 export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
   const [settings, setSettings] = useState<Layer1Settings>({
-    max_iterations: 80,
     thrust_tolerance: 0.1, // 10%
   });
 
@@ -249,6 +248,52 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
     best_objective: number;
   }>>([]);
   const [showParameterPlots, setShowParameterPlots] = useState(false);
+
+  // Calculate min/max objective values for dot scaling
+  const { minObj, maxObj } = useMemo(() => {
+    if (objectiveHistory.length === 0) {
+      return { minObj: 1, maxObj: 1 };
+    }
+    const values = objectiveHistory.map(h => h.objective).filter(v => typeof v === 'number' && isFinite(v));
+    if (values.length === 0) {
+      return { minObj: 1, maxObj: 1 };
+    }
+    return {
+      minObj: Math.min(...values),
+      maxObj: Math.max(...values),
+    };
+  }, [objectiveHistory]);
+
+  // Custom dot renderer: lower objective value = larger dot (log-scaled)
+  const renderDot = useMemo(() => {
+    const minSize = 5;  // Largest dot size (for best/lowest values)
+    const maxSize = 0.1;  // Smallest dot size (for worst/highest values)
+    
+    // Pre-calculate log values for efficiency
+    const logMinObj = Math.log(minObj);
+    const logMaxObj = Math.log(maxObj);
+    const logRange = logMaxObj - logMinObj;
+    
+    return (props: any) => {
+      const { cx, cy, payload } = props;
+      if (!payload || typeof payload.objective !== 'number' || !isFinite(payload.objective) || payload.objective <= 0) {
+        // Return invisible dot for invalid data
+        return <circle cx={cx} cy={cy} r={0} fill="none" />;
+      }
+      
+      if (logRange === 0 || minObj === maxObj) {
+        return <circle cx={cx} cy={cy} r={minSize} fill="#3b82f6" />;
+      }
+      
+      // Log-scaled inverse: lower value gets larger size
+      // Normalize using log scale: 0 = worst (max), 1 = best (min)
+      const logValue = Math.log(payload.objective);
+      const normalized = (logMaxObj - logValue) / logRange;
+      const radius = maxSize + (minSize - maxSize) * normalized;
+      
+      return <circle cx={cx} cy={cy} r={radius} fill="#3b82f6" />;
+    };
+  }, [minObj, maxObj]);
 
   // Check status on mount
   useEffect(() => {
@@ -354,24 +399,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
       {/* Settings */}
       <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
         <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">⚙️ Optimization Settings</h3>
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
-              Max Iterations
-            </label>
-            <input
-              type="number"
-              value={settings.max_iterations}
-              onChange={(e) => setSettings(prev => ({ ...prev, max_iterations: parseInt(e.target.value) }))}
-              className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-blue-500"
-              min="20"
-              max="200"
-              step="10"
-              disabled={isRunning}
-            />
-            <p className="text-xs text-[var(--color-text-secondary)] mt-1">Maximum optimization iterations for Layer 1</p>
-          </div>
-
+        <div className="grid grid-cols-1 gap-4">
           <div>
             <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
               Thrust Tolerance [%]
@@ -388,6 +416,13 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
             />
             <p className="text-xs text-[var(--color-text-secondary)] mt-1">Acceptable deviation from target thrust</p>
           </div>
+
+          {/* Info message about  hardcoded max_iterations */}
+          <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+            <p className="text-xs text-blue-400">
+              ℹ️ Max iterations is automatically tuned (150 iterations with 2-3 restarts) for consistent robust convergence.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -396,11 +431,10 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
         <button
           onClick={handleRun}
           disabled={isRunning || !requirements}
-          className={`px-8 py-4 font-bold rounded-lg text-white text-lg transition-all ${
-            isRunning || !requirements
-              ? 'bg-gray-500 cursor-not-allowed'
-              : 'bg-blue-600 hover:bg-blue-700 hover:scale-105'
-          }`}
+          className={`px-8 py-4 font-bold rounded-lg text-white text-lg transition-all ${isRunning || !requirements
+            ? 'bg-gray-500 cursor-not-allowed'
+            : 'bg-blue-600 hover:bg-blue-700 hover:scale-105'
+            }`}
         >
           {isRunning ? '🔄 Running Optimization...' : '🚀 Run Layer 1 Optimization'}
         </button>
@@ -410,7 +444,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
       {(isRunning || progress > 0) && (
         <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
           <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">📊 Progress</h3>
-          
+
           {/* Progress Bar */}
           <div className="mb-4">
             <div className="flex justify-between text-sm text-[var(--color-text-secondary)] mb-2">
@@ -440,20 +474,20 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               <ResponsiveContainer width="100%" height={300}>
                 <LineChart data={objectiveHistory} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.5} />
-                  <XAxis 
+                  <XAxis
                     dataKey="iteration"
                     stroke="var(--color-text-secondary)"
                     tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
                     label={{ value: 'Iteration', position: 'insideBottom', offset: -5, fill: 'var(--color-text-secondary)' }}
                   />
-                  <YAxis 
+                  <YAxis
                     scale="log"
                     domain={['auto', 'auto']}
                     stroke="var(--color-text-secondary)"
                     tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
                     label={{ value: 'Objective Value (log)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }}
                   />
-                  <Tooltip 
+                  <Tooltip
                     contentStyle={{
                       backgroundColor: 'var(--color-bg-secondary)',
                       border: '1px solid var(--color-border)',
@@ -462,20 +496,20 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                     }}
                   />
                   <Legend />
-                  <Line 
-                    type="monotone" 
-                    dataKey="objective" 
-                    name="Objective" 
-                    stroke="#3b82f6" 
-                    strokeWidth={2}
-                    dot={{ r: 3 }}
+                  <Line
+                    type="monotone"
+                    dataKey="objective"
+                    name="Objective"
+                    stroke="#3b82f6"
+                    strokeWidth={0}
+                    dot={renderDot}
                     isAnimationActive={false}
                   />
-                  <Line 
-                    type="monotone" 
-                    dataKey="best_objective" 
-                    name="Best Objective" 
-                    stroke="#f97316" 
+                  <Line
+                    type="monotone"
+                    dataKey="best_objective"
+                    name="Best Objective"
+                    stroke="#f97316"
                     strokeWidth={2}
                     strokeDasharray="5 5"
                     dot={false}
@@ -490,7 +524,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                 </p>
               </div>
             )}
-            
+
             {/* Button to show parameter plots */}
             {results?.iteration_history && results.iteration_history.length > 0 && (
               <div className="mt-4 flex justify-center">
@@ -503,7 +537,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               </div>
             )}
           </div>
-          
+
           {/* Parameter Convergence Plots */}
           {showParameterPlots && results?.iteration_history && results.iteration_history.length > 0 && (
             <div className="mt-6 border-t border-[var(--color-border)] pt-6">
@@ -547,62 +581,62 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               </button>
             )}
           </div>
-          
+
           {/* Key Performance Metrics */}
           <div className="mb-6">
             <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-3">🎯 Performance</h4>
             <div className="grid grid-cols-4 gap-4">
-              <ResultCard 
-                label="Thrust" 
-                value={results.performance.F} 
-                unit="N" 
+              <ResultCard
+                label="Thrust"
+                value={results.performance.F}
+                unit="N"
                 decimals={1}
                 color="blue"
               />
-              <ResultCard 
-                label="O/F Ratio" 
-                value={results.performance.MR} 
+              <ResultCard
+                label="O/F Ratio"
+                value={results.performance.MR}
                 decimals={2}
                 color="yellow"
               />
-              <ResultCard 
-                label="Specific Impulse" 
-                value={results.performance.Isp} 
-                unit="s" 
+              <ResultCard
+                label="Specific Impulse"
+                value={results.performance.Isp}
+                unit="s"
                 decimals={1}
                 color="purple"
               />
-              <ResultCard 
-                label="Chamber Pressure" 
-                value={results.performance.Pc ? (results.performance.Pc as number) / 6894.76 : undefined} 
-                unit="psi" 
+              <ResultCard
+                label="Chamber Pressure"
+                value={results.performance.Pc ? (results.performance.Pc as number) / 6894.76 : undefined}
+                unit="psi"
                 decimals={1}
                 color="green"
               />
-              <ResultCard 
-                label="Exit Pressure" 
-                value={results.performance.P_exit ? (results.performance.P_exit as number) / 6894.76 : undefined} 
-                unit="psi" 
+              <ResultCard
+                label="Exit Pressure"
+                value={results.performance.P_exit ? (results.performance.P_exit as number) / 6894.76 : undefined}
+                unit="psi"
                 decimals={1}
                 color="cyan"
               />
-              <ResultCard 
-                label="Thrust Coefficient" 
-                value={results.performance.Cf || results.performance.Cf_actual} 
+              <ResultCard
+                label="Thrust Coefficient"
+                value={results.performance.Cf || results.performance.Cf_actual}
                 decimals={2}
                 color="orange"
               />
-              <ResultCard 
-                label="c* Efficiency" 
-                value={results.performance.eta_cstar ? (results.performance.eta_cstar as number) * 100 : undefined} 
-                unit="%" 
+              <ResultCard
+                label="c* Efficiency"
+                value={results.performance.eta_cstar ? (results.performance.eta_cstar as number) * 100 : undefined}
+                unit="%"
                 decimals={1}
                 color="pink"
               />
-              <ResultCard 
-                label="Total Mass Flow" 
-                value={results.performance.mdot_total} 
-                unit="kg/s" 
+              <ResultCard
+                label="Total Mass Flow"
+                value={results.performance.mdot_total}
+                unit="kg/s"
                 decimals={3}
                 color="indigo"
               />
@@ -613,17 +647,17 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           <div className="mb-6">
             <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-3">🔋 Optimized Tank Pressures</h4>
             <div className="grid grid-cols-2 gap-4">
-              <ResultCard 
-                label="LOX Tank Pressure" 
-                value={results.performance.P_O_start_psi} 
-                unit="psi" 
+              <ResultCard
+                label="LOX Tank Pressure"
+                value={results.performance.P_O_start_psi}
+                unit="psi"
                 decimals={1}
                 color="cyan"
               />
-              <ResultCard 
-                label="Fuel Tank Pressure" 
-                value={results.performance.P_F_start_psi} 
-                unit="psi" 
+              <ResultCard
+                label="Fuel Tank Pressure"
+                value={results.performance.P_F_start_psi}
+                unit="psi"
                 decimals={1}
                 color="orange"
               />
@@ -637,52 +671,52 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               // Extract stability data from various possible locations
               const perf = results.performance;
               const stabResults = perf.stability_results as Record<string, unknown> | undefined;
-              
+
               // Get stability score and state (might be at root or nested)
-              const stabilityScore = (perf.initial_stability_score as number) ?? 
-                                     (stabResults?.stability_score as number) ?? undefined;
-              const stabilityState = (perf.initial_stability_state as string) ?? 
-                                     (stabResults?.stability_state as string) ?? 'unknown';
-              
+              const stabilityScore = (perf.initial_stability_score as number) ??
+                (stabResults?.stability_score as number) ?? undefined;
+              const stabilityState = (perf.initial_stability_state as string) ??
+                (stabResults?.stability_state as string) ?? 'unknown';
+
               // Get margins - could be at root level OR nested in stability_results
               const chuggingMargin = (perf.chugging_margin as number) ??
-                                     ((stabResults?.chugging as Record<string, unknown>)?.stability_margin as number) ?? undefined;
+                ((stabResults?.chugging as Record<string, unknown>)?.stability_margin as number) ?? undefined;
               const acousticMargin = (perf.acoustic_margin as number) ??
-                                     ((stabResults?.acoustic as Record<string, unknown>)?.stability_margin as number) ?? undefined;
+                ((stabResults?.acoustic as Record<string, unknown>)?.stability_margin as number) ?? undefined;
               const feedMargin = (perf.feed_margin as number) ??
-                                 ((stabResults?.feed_system as Record<string, unknown>)?.stability_margin as number) ?? undefined;
-              
+                ((stabResults?.feed_system as Record<string, unknown>)?.stability_margin as number) ?? undefined;
+
               return (
                 <div className="grid grid-cols-5 gap-4">
-                  <ResultCard 
-                    label="Stability Score" 
-                    value={stabilityScore} 
+                  <ResultCard
+                    label="Stability Score"
+                    value={stabilityScore}
                     decimals={2}
-                    color={stabilityScore !== undefined && stabilityScore >= 0.75 ? 'green' : 
-                           stabilityScore !== undefined && stabilityScore >= 0.4 ? 'yellow' : 'red'}
+                    color={stabilityScore !== undefined && stabilityScore >= 0.75 ? 'green' :
+                      stabilityScore !== undefined && stabilityScore >= 0.4 ? 'yellow' : 'red'}
                   />
-                  <ResultCard 
-                    label="Stability State" 
-                    value={stabilityState} 
+                  <ResultCard
+                    label="Stability State"
+                    value={stabilityState}
                     isText
-                    color={stabilityState === 'stable' ? 'green' : 
-                           stabilityState === 'marginal' ? 'yellow' : 'red'}
+                    color={stabilityState === 'stable' ? 'green' :
+                      stabilityState === 'marginal' ? 'yellow' : 'red'}
                   />
-                  <ResultCard 
-                    label="Chugging Margin" 
-                    value={chuggingMargin} 
+                  <ResultCard
+                    label="Chugging Margin"
+                    value={chuggingMargin}
                     decimals={3}
                     color="purple"
                   />
-                  <ResultCard 
-                    label="Acoustic Margin" 
-                    value={acousticMargin} 
+                  <ResultCard
+                    label="Acoustic Margin"
+                    value={acousticMargin}
                     decimals={3}
                     color="blue"
                   />
-                  <ResultCard 
-                    label="Feed System Margin" 
-                    value={feedMargin} 
+                  <ResultCard
+                    label="Feed System Margin"
+                    value={feedMargin}
                     decimals={3}
                     color="cyan"
                   />
@@ -702,28 +736,28 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           {/* Validation Status */}
           <div className="mb-6">
             <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-3">✓ Validation</h4>
-          <div className="grid grid-cols-5 gap-4">
-             <ValidationCard 
-               label="Thrust Check" 
-               passed={results.performance.thrust_check_passed}
-             />
-             <ValidationCard 
-               label="O/F Check" 
-               passed={results.performance.of_check_passed}
-             />
-             <ValidationCard 
-               label="Stability Check" 
-               passed={results.performance.stability_check_passed}
-             />
-             <ValidationCard 
-               label="Geometry Check" 
-               passed={results.performance.geometry_check_passed}
-             />
-             <ValidationCard 
-               label="Pressure Candidate" 
-               passed={results.performance.pressure_candidate_valid}
-             />
-           </div>
+            <div className="grid grid-cols-5 gap-4">
+              <ValidationCard
+                label="Thrust Check"
+                passed={results.performance.thrust_check_passed}
+              />
+              <ValidationCard
+                label="O/F Check"
+                passed={results.performance.of_check_passed}
+              />
+              <ValidationCard
+                label="Stability Check"
+                passed={results.performance.stability_check_passed}
+              />
+              <ValidationCard
+                label="Geometry Check"
+                passed={results.performance.geometry_check_passed}
+              />
+              <ValidationCard
+                label="Pressure Candidate"
+                passed={results.performance.pressure_candidate_valid}
+              />
+            </div>
             {results.performance.failure_reasons && results.performance.failure_reasons.length > 0 && (
               <div className="mt-3 p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
                 <p className="text-sm text-red-400 font-semibold mb-1">Failure Reasons:</p>

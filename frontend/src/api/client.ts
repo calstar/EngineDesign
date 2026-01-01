@@ -74,44 +74,44 @@ export interface RunnerResults {
   mdot_F: number;          // Fuel mass flow [kg/s]
   mdot_total: number;      // Total mass flow [kg/s]
   MR: number;              // Mixture ratio (O/F)
-  
+
   // Nozzle performance
   v_exit: number;          // Exit velocity [m/s]
   M_exit: number;          // Exit Mach number
   P_exit: number;          // Exit pressure [Pa]
   P_throat: number;        // Throat pressure [Pa]
-  
+
   // Temperatures
   Tc: number;              // Chamber temperature [K]
   T_throat: number;        // Throat temperature [K]
   T_exit: number;          // Exit temperature [K]
-  
+
   // Thrust coefficients
   Cf: number;              // Thrust coefficient (actual)
   Cf_actual: number;       // Thrust coefficient (actual)
   Cf_ideal: number;        // Thrust coefficient (ideal)
   Cf_theoretical: number;  // Thrust coefficient (theoretical)
-  
+
   // Characteristic velocity
   cstar_actual: number;    // Actual c* [m/s]
   cstar_ideal: number;     // Ideal c* [m/s]
   eta_cstar: number;       // c* efficiency
-  
+
   // Thermodynamic properties
   gamma: number;           // Ratio of specific heats (chamber)
   gamma_exit: number;      // Ratio of specific heats (exit)
   R: number;               // Gas constant (chamber) [J/(kg·K)]
   R_exit: number;          // Gas constant (exit) [J/(kg·K)]
-  
+
   // Geometry
   eps: number;             // Expansion ratio
   A_throat: number;        // Throat area [m²]
   A_exit: number;          // Exit area [m²]
-  
+
   // Discharge coefficients
   Cd_O: number;            // Oxidizer discharge coefficient
   Cd_F: number;            // Fuel discharge coefficient
-  
+
   // Chamber intrinsics
   chamber_intrinsics: {
     Lstar?: number;           // Characteristic length [m]
@@ -123,7 +123,7 @@ export interface RunnerResults {
     density?: number;         // Gas density [kg/m³]
     sound_speed?: number;     // Sound speed [m/s]
   } | null;
-  
+
   // Injector pressure diagnostics
   injector_pressure: {
     P_injector_O?: number;      // Injector pressure, oxidizer [Pa]
@@ -133,7 +133,7 @@ export interface RunnerResults {
     delta_p_feed_O?: number;     // Feed pressure drop, oxidizer [Pa]
     delta_p_feed_F?: number;     // Feed pressure drop, fuel [Pa]
   } | null;
-  
+
   // Cooling results
   cooling: {
     regen?: {
@@ -163,7 +163,7 @@ export interface RunnerResults {
       below_pyrolysis?: boolean;
     };
   } | null;
-  
+
   // Stability analysis
   stability: {
     is_stable: boolean;
@@ -194,15 +194,15 @@ export interface RunnerResults {
     issues: string[];
     recommendations: string[];
   } | null;
-  
+
   // Profiles (optional, for plotting)
   pressure_profile?: unknown;
   temperature_profile?: unknown;
-  
+
   // Ambient conditions (computed from config elevation)
   P_ambient?: number;       // Ambient pressure used [Pa]
   elevation?: number;       // Elevation from config [m]
-  
+
   // Full diagnostics
   diagnostics: Record<string, unknown>;
 }
@@ -465,18 +465,18 @@ export interface FlightSimRequest {
   thrust_array: number[];
   mdot_O_array: number[];
   mdot_F_array: number[];
-  
+
   // Propellant configuration
   lox_mass_kg: number;
   fuel_mass_kg: number;
-  
+
   // Tank geometry (optional)
   lox_tank?: FlightTankConfig;
   fuel_tank?: FlightTankConfig;
-  
+
   // Environment configuration
   environment?: FlightEnvironmentConfig;
-  
+
   // Rocket configuration
   rocket?: FlightRocketConfig;
 }
@@ -579,37 +579,37 @@ export interface DesignRequirements {
   target_apogee?: number;
   optimal_of_ratio: number;
   target_burn_time: number;
-  
+
   // Tank pressures
   max_lox_tank_pressure_psi: number;
   max_fuel_tank_pressure_psi: number;
   max_P_tank_O?: number;
   max_P_tank_F?: number;
-  
+
   // Geometry constraints
   max_engine_length: number;
   max_chamber_outer_diameter: number;
   max_nozzle_exit_diameter: number;
-  
+
   // L* constraints
   min_Lstar: number;
   max_Lstar: number;
-  
+
   // Stability requirements (new comprehensive analysis)
   min_stability_score: number;
   require_stable_state: boolean;
   stability_margin_handicap: number;
-  
+
   // Stability requirements (legacy margins)
   min_stability_margin: number;
   chugging_margin_min: number;
   acoustic_margin_min: number;
   feed_stability_min: number;
-  
+
   // Tank capacities
   lox_tank_capacity_kg?: number;
   fuel_tank_capacity_kg?: number;
-  
+
   // COPV
   copv_free_volume_L?: number;
   copv_free_volume_m3?: number;
@@ -626,7 +626,6 @@ export interface SaveDesignRequirementsResponse {
 }
 
 export interface Layer1Settings {
-  max_iterations: number;
   thrust_tolerance: number;
   target_burn_time?: number;
 }
@@ -670,11 +669,11 @@ export interface Layer1Results {
     mdot_total?: number;  // Total mass flow [kg/s]
     mdot_O?: number;      // Oxidizer mass flow [kg/s]
     mdot_F?: number;      // Fuel mass flow [kg/s]
-    
+
     // Tank pressures
     P_O_start_psi?: number;  // LOX tank pressure [psi]
     P_F_start_psi?: number;  // Fuel tank pressure [psi]
-    
+
     // Stability
     stability_results?: {
       stability_score?: number;
@@ -684,7 +683,7 @@ export interface Layer1Results {
       feed_margin?: number;
       is_stable?: boolean;
     };
-    
+
     // Validation
     thrust_check_passed?: boolean;
     of_check_passed?: boolean;
@@ -692,7 +691,7 @@ export interface Layer1Results {
     geometry_check_passed?: boolean;
     pressure_candidate_valid?: boolean;
     failure_reasons?: string[];
-    
+
     // Additional fields
     [key: string]: unknown;
   };
@@ -745,23 +744,22 @@ export function runLayer1Optimization(
   onError: (error: string) => void
 ): EventSource {
   const params = new URLSearchParams({
-    max_iterations: settings.max_iterations.toString(),
     thrust_tolerance: settings.thrust_tolerance.toString(),
   });
-  
+
   if (settings.target_burn_time) {
     params.append('target_burn_time', settings.target_burn_time.toString());
   }
-  
+
   const url = `${API_BASE}/optimizer/layer1?${params.toString()}`;
-  
+
   const eventSource = new EventSource(url);
-  
+
   eventSource.onmessage = (event) => {
     try {
       const data: Layer1ProgressEvent = JSON.parse(event.data);
       onProgress(data);
-      
+
       // Close connection on completion or error
       if (data.type === 'complete' || data.type === 'error') {
         eventSource.close();
@@ -772,12 +770,12 @@ export function runLayer1Optimization(
       eventSource.close();
     }
   };
-  
+
   eventSource.onerror = (err) => {
     console.error('SSE connection error:', err);
     onError('Connection to server lost');
     eventSource.close();
   };
-  
+
   return eventSource;
 }

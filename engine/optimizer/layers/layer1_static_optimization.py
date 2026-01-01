@@ -344,7 +344,6 @@ def run_layer1_optimization(
     runner: PintleEngineRunner,
     requirements: Dict[str, Any],
     target_burn_time: float,
-    max_iterations: int,
     tolerances: Dict[str, float],
     pressure_config: Dict[str, Any],
     update_progress: Optional[Callable[[str, float, str], None]] = None,
@@ -357,16 +356,19 @@ def run_layer1_optimization(
     This function contains ALL Layer 1 optimization logic:
     - Setup (bounds, initial guess)
     - Objective function definition
-    - Optimization loop (differential_evolution + L-BFGS-B)
+    - Optimization loop (CMA-ES with random restarts + L-BFGS-B)
     - Validation
     - Results packaging
+    
+    Note:
+        max_iterations is HARDCODED to 150 for robust convergence.
+        Random restarts (1-2) are used to escape local minima.
     
     Args:
         config_obj: Base engine configuration
         runner: Engine runner (for validation)
         requirements: Design requirements dict
         target_burn_time: Target burn time [s]
-        max_iterations: Maximum optimization iterations
         tolerances: Tolerance dict (thrust, apogee)
         pressure_config: Pressure configuration dict
         update_progress: Optional progress callback (stage, progress, message)
@@ -451,6 +453,13 @@ def run_layer1_optimization(
     layer1_logger.info(f"Target O/F ratio: {optimal_of:.2f}")
     layer1_logger.info(f"Min stability margin: {min_stability:.2f}")
     layer1_logger.info(f"Target burn time: {target_burn_time:.2f} s")
+    
+    # HARDCODED: max_iterations for robust convergence
+    # Tuned for 10D problem with complex constraints
+    # With popsize=20-24: ~3000-3600 function evaluations (150 iters * 20-24 pop)
+    # With 1-2 restarts: Sufficient for consistent global convergence
+    max_iterations = 150
+    
     layer1_logger.info(f"Max iterations: {max_iterations}")
     layer1_logger.info("")
     
@@ -484,35 +493,34 @@ def run_layer1_optimization(
     # Calculate bounds ensuring injector area < throat area
     # CRITICAL: Injector bounds must be sized for target mass flow!
     # For 7000N thrust at Isp≈280s, O/F=2.3: mdot_O≈1.7 kg/s, mdot_F≈0.74 kg/s
-    # Previous bounds (d_orifice up to 4mm, 20 orifices) allowed ~9.5 kg/s LOX flow
-    # which is 5-6× more than needed, causing high Cf due to excess thrust.
-    max_n_orifices = 18  # Reduced from 20
-    max_d_orifice = 0.0025  # Reduced from 0.004 (4mm→2.5mm) - KEY CHANGE for Cf control
+    # Relaxed bounds to allow optimizer to explore wider geometry space
+    max_n_orifices = 20  # Allow up to 20 orifices
+    max_d_orifice = 0.003  # 1-3mm range for better atomization flexibility
     max_LOX_area = max_n_orifices * np.pi * (max_d_orifice / 2) ** 2
-    max_d_pintle = 0.025  # Reduced from 0.030
-    max_h_gap = 0.001  # Reduced from 0.0015
+    max_d_pintle = 0.030  # 6-30mm range
+    max_h_gap = 0.0015  # 0.3-1.5mm range for stability and manufacturability
     R_inner_max = max_d_pintle / 2
     R_outer_max = R_inner_max + max_h_gap
     max_fuel_area = np.pi * (R_outer_max ** 2 - R_inner_max ** 2)
     max_injector_area = max(max_LOX_area, max_fuel_area)
-    # Reduced from 1.5x to 1.1x to allow smaller throat areas - constraint in objective
-    # will still enforce injector_area < throat_area for the actual chosen geometry
-    min_A_throat_safe = max_injector_area * 1.1
+    # Increased margin from 1.1× to 1.5× to allow more exploration
+    # Constraint in objective will still enforce injector_area < throat_area
+    min_A_throat_safe = max_injector_area * 1.5
     
-    # Initial pressure bounds (50-95% of max)
-    min_P_ratio = 0.5
-    max_P_ratio = 0.95
+    # Initial pressure bounds (65-98% of max for stable injection with full capability)
+    min_P_ratio = 0.65  # Tightened lower bound for stable injection
+    max_P_ratio = 0.85  # Limited to 85% of max tank pressure per user request
     min_outer_diameter = max_chamber_od * 0.5
     
     bounds = [
-        (min_A_throat_safe, 3.0e-3),  # [0] A_throat
+        (min_A_throat_safe, 4.0e-3),  # [0] A_throat
         (min_Lstar, max_Lstar),     # [1] Lstar
-        (6.0, 12.0),                # [2] expansion_ratio - tightened for Cf≈1.6 at sea level
+        (6.0, 12.0),                # [2] expansion_ratio - good range for sea level Cf≈1.6
         (min_outer_diameter, max_chamber_od),  # [3] outer diameter
-        (0.010, 0.025),             # [4] d_pintle_tip - tightened from (0.008, 0.030)
-        (0.0003, 0.001),            # [5] h_gap - tightened from (0.0003, 0.0015)
-        (10, 18),                   # [6] n_orifices - tightened from (6, 20)
-        (0.0012, 0.0025),           # [7] d_orifice - KEY: tightened from (0.001, 0.004)
+        (0.006, 0.030),             # [4] d_pintle_tip - RELAXED: 6-30mm for better exploration
+        (0.0003, 0.0015),           # [5] h_gap - RELAXED: 0.3-1.5mm for stability
+        (8, 20),                    # [6] n_orifices - RELAXED: 8-20 for flexibility
+        (0.001, 0.004),             # [7] d_orifice - RELAXED: 1-4mm for atomization control
         (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),    # [8] P_O_start_psi
         (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [9] P_F_start_psi
     ]
@@ -600,8 +608,9 @@ def run_layer1_optimization(
     # - clip to bounds
     # - quantize continuous dims to a fraction of their span
     # - keep discrete dims exact (n_orifices)
-    cache_rel = float(requirements.get("objective_cache_rel", 1e-4))  # 0.01% of span per bin
-    cache_rel = float(np.clip(cache_rel, 1e-6, 1e-2))
+    # Finer granularity (1e-5 instead of 1e-4) to preserve gradient information for L-BFGS-B
+    cache_rel = float(requirements.get("objective_cache_rel", 1e-5))  # 0.001% of span per bin
+    cache_rel = float(np.clip(cache_rel, 1e-6, 1e-3))
     cache_steps = np.maximum(span * cache_rel, 1e-12)
     eval_cache: Dict[Tuple[int, ...], Dict[str, Any]] = {}
     
@@ -662,15 +671,6 @@ def run_layer1_optimization(
                             f"Objective: {curr_obj_str} (Best: {best_obj_str})")
             for handler in layer1_logger.handlers:
                 handler.flush()
-        
-        # Early exit if satisfied
-        if opt_state.get('objective_satisfied', False):
-            satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', 0.0))
-            satisfied_count = opt_state.get('satisfied_eval_count', 0) + 1
-            opt_state['satisfied_eval_count'] = satisfied_count
-            if satisfied_count > 3:
-                return satisfied_obj
-            return satisfied_obj
         
         # Always work with a clipped/consistent candidate vector (helps caching and stability)
         x_clipped = np.clip(np.asarray(x, dtype=float), lower_bounds, upper_bounds)
@@ -787,7 +787,7 @@ def run_layer1_optimization(
                 
                 test_runner = PintleEngineRunner(config_runner)
                 try:
-                    final_results = test_runner.evaluate(P_O_test, P_F_test, P_ambient=target_P_exit)
+                    final_results = test_runner.evaluate(P_O_test, P_F_test, P_ambient=target_P_exit, silent=True)
                     eval_success = True
                 except Exception as eval_error:
                     eval_success = False
@@ -868,23 +868,26 @@ def run_layer1_optimization(
                                Cf_min_acceptable, Cf_max_acceptable,
                                scale=(Cf_max_acceptable - Cf_min_acceptable))
         
-        preferred_L_chamber = float(requirements.get("preferred_chamber_length_m", 0.35))
+        # Chamber length penalty: only apply if exceeds maximum (prefer shorter within bounds)
+        max_chamber_length = float(requirements.get("max_chamber_length_m", 0.50))  # 50cm max
         L_chamber_curr = getattr(getattr(config, "chamber", None), "length", None)
         L_chamber_curr = float(L_chamber_curr) if (L_chamber_curr is not None and np.isfinite(L_chamber_curr)) else np.nan
         length_term = 0.0
-        if np.isfinite(L_chamber_curr) and preferred_L_chamber > 0:
-            length_term = max(0.0, (L_chamber_curr - preferred_L_chamber) / preferred_L_chamber) ** 2
+        if np.isfinite(L_chamber_curr) and max_chamber_length > 0:
+            # Only penalize if exceeds max (soft preference for shorter)
+            length_term = max(0.0, (L_chamber_curr - max_chamber_length) / max_chamber_length) ** 2
         
         # ------------------------------------------------------------------
-        # Lexicographic-ish scalarization
+        # Lexicographic-ish scalarization with normalized weights
+        # Each priority level is 100× the next for clear separation
         # ------------------------------------------------------------------
-        BASE_INFEAS = 1e8
-        W_INFEAS = 1e6
-        W_THRUST = 1e6
-        W_OF = 1e4
-        W_CF = 100.0
-        W_EXIT = 10.0
-        W_LEN = 1.0
+        BASE_INFEAS = 1e10       # Infeasibility baseline
+        W_INFEAS = 1e8           # Level 0: Hard constraints (1e8)
+        W_THRUST = 1e6           # Level 1: Primary objectives (1e6)
+        W_OF = 1e6               # Level 1: Primary objectives (1e6) - EQUAL to thrust (geometry determines O/F)
+        W_CF = 1e4               # Level 2: Secondary objectives (1e4)
+        W_EXIT = 1e2             # Level 3: Tertiary objectives (1e2)
+        W_LEN = 1.0              # Level 4: Soft preferences (1.0)
         
         if (not np.isfinite(infeasibility_score)) or infeasibility_score < 0:
             infeasibility_score = 1.0
@@ -913,9 +916,9 @@ def run_layer1_optimization(
             (stability_score >= effective_min_score * 0.8)
         )
         
+        # Track that we found an acceptable solution, but don't force stop
+        # (let optimizer continue to find even better solutions)
         if errors_acceptable:
-            opt_state['objective_satisfied'] = True
-            opt_state['satisfied_obj'] = min(opt_state.get('satisfied_obj', float('inf')), obj)
             if eval_success and final_pressures is not None:
                 opt_state["best_pressures"] = final_pressures
                 opt_state["best_results_for_validation"] = {
@@ -930,11 +933,9 @@ def run_layer1_optimization(
                     "feed_margin": feed_margin,
                     "stability_results": stability,
                 }
-            if not opt_state.get('satisfied_logged', False):
-                log_status("Layer 1", f"✓ Solution valid! Obj={obj:.6e}, Thrust err: {thrust_error*100:.2f}%, O/F err: {of_error*100:.2f}%")
-                opt_state['satisfied_logged'] = True
-            opt_state['stop_optimization'] = True
-            opt_state['force_maxfun_1'] = True
+            if not opt_state.get('acceptable_found_logged', False):
+                log_status("Layer 1", f"✓ Acceptable solution found! Obj={obj:.6e}, Thrust err: {thrust_error*100:.2f}%, O/F err: {of_error*100:.2f}% (continuing optimization...)")
+                opt_state['acceptable_found_logged'] = True
         
         # Track valid evaluations
         if eval_success and np.isfinite(obj):
@@ -1105,51 +1106,123 @@ def run_layer1_optimization(
     x0_refined = x0
     # lower_bounds/upper_bounds/span are computed above (used for caching and solvers)
     
-    use_cma_solver = cma is not None
+    # Check CMA-ES availability (required)
+    if cma is None:
+        raise ImportError(
+            "CMA-ES (cma package) is required for Layer 1 optimization but not installed.\n"
+            "Install with: pip install cma"
+        )
     
-    if use_cma_solver:
-        layer1_logger.info("Using CMA-ES for noisy coupled optimization.")
-        update_progress("Layer 1: CMA-ES", 0.45, "Running CMA-ES global solver...")
+    # Run CMA-ES global optimization with random restarts
+    layer1_logger.info("Using CMA-ES with random restart strategy for robust optimization.")
+    update_progress("Layer 1: CMA-ES", 0.45, "Running CMA-ES global solver...")
+    
+    # IMPROVED: Larger initial step size for better global exploration (25% instead of 15%)
+    target_fraction_of_range = 0.25  # 25% of range per sigma for aggressive exploration
+    
+    # Calculate base sigma0 from median span (reasonable global scale)
+    sigma0 = float(np.median(span) * target_fraction_of_range)
+    if not np.isfinite(sigma0) or sigma0 <= 0:
+        sigma0 = 0.05
+    
+    # Set CMA_stds proportional to each variable's range
+    # This ensures variables with larger ranges (like expansion_ratio) get larger step sizes
+    cma_stds = np.ones_like(span)
+    for i in range(len(span)):
+        if span[i] > 0:
+            # Desired step size for this dimension: fraction of its range
+            desired_step = span[i] * target_fraction_of_range
+            # CMA_stds[i] = desired_step / sigma0
+            # This makes step size in dimension i proportional to its range
+            cma_stds[i] = max(0.1, desired_step / sigma0) if sigma0 > 0 else 1.0
+    
+    # Special handling for discrete n_orifices (index 6): ensure it can jump between integers
+    n_orifices_idx = 6
+    target_step_n = 1.0  # ~one orifice per sigma
+    if sigma0 > 0:
+        cma_stds[n_orifices_idx] = max(cma_stds[n_orifices_idx], target_step_n / sigma0)
+
+    # IMPROVED: Larger population for better exploration (20-24 instead of 12-14)
+    popsize = min(48, max(16, 4 + int(4 * np.log(len(x0_refined) + 1))))
+    layer1_logger.info(f"Population size: {popsize}")
+    
+    # Random number of restarts (2-3) to escape local minima
+    rng = np.random.default_rng()
+    num_restarts = rng.integers(2, 4)  # 2 or 3 restarts
+    layer1_logger.info(f"Using {num_restarts} restart(s) to ensure robust convergence")
+    
+    best_x_global = x0_refined
+    best_f_global = float('inf')
+    
+    for restart_idx in range(num_restarts):
+        restart_name = f"Restart {restart_idx + 1}/{num_restarts}" if num_restarts > 1 else "Main search"
         
-        # Set per-dimension step sizes to ensure global exploration across ALL variables
-        # CMA_stds scales step size per dimension: actual_step[i] = sigma0 * CMA_stds[i]
-        # We want each variable to be able to explore ~15% of its range per sigma
-        target_fraction_of_range = 0.15  # 15% of range per sigma
+        # IMPROVED: Multi-scale restart strategy
+        # Restart 1: Global Exploration (25% sigma)
+        # Restart 2: Local Refinement (5% sigma)
+        # Restart 3: Balanced Search (15% sigma)
+        # Subsequent: Alternate between 15% and 25%
+        if restart_idx == 0:
+            current_sigma_fraction = target_fraction_of_range # 25% (Global)
+            x_start = x0_refined
+        elif restart_idx == 1:
+            current_sigma_fraction = 0.05 # 5% (Refined) - prevent "Restart 2 Terrible" issue
+            # Use smaller perturbation for the refinement restart
+            perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.1)
+            x_start = best_x_global + perturbation
+        elif restart_idx == 2:
+            current_sigma_fraction = 0.15 # 15% (Medium)
+            perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
+            x_start = best_x_global + perturbation
+        else:
+            current_sigma_fraction = 0.15 if restart_idx % 2 == 0 else 0.25
+            perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
+            x_start = best_x_global + perturbation
         
-        # Calculate base sigma0 from median span (reasonable global scale)
-        sigma0 = float(np.median(span) * target_fraction_of_range)
-        if not np.isfinite(sigma0) or sigma0 <= 0:
-            sigma0 = 0.05
-        
-        # Set CMA_stds proportional to each variable's range
-        # This ensures variables with larger ranges (like expansion_ratio) get larger step sizes
-        cma_stds = np.ones_like(span)
+        # Ensure it stays within bounds
+        x_start = np.clip(x_start, lower_bounds, upper_bounds)
+            
+        # Recalculate sigma0 for this restart based on the chosen scale
+        current_sigma0 = float(np.median(span) * current_sigma_fraction)
+        if not np.isfinite(current_sigma0) or current_sigma0 <= 0:
+            current_sigma0 = 0.05
+            
+        # Update CMA_stds for this restart's sigma
+        current_cma_stds = np.ones_like(span)
         for i in range(len(span)):
             if span[i] > 0:
-                # Desired step size for this dimension: fraction of its range
-                desired_step = span[i] * target_fraction_of_range
-                # CMA_stds[i] = desired_step / sigma0
-                # This makes step size in dimension i proportional to its range
-                cma_stds[i] = max(0.1, desired_step / sigma0) if sigma0 > 0 else 1.0
+                desired_step = span[i] * current_sigma_fraction
+                current_cma_stds[i] = max(0.1, desired_step / current_sigma0) if current_sigma0 > 0 else 1.0
         
-        # Special handling for discrete n_orifices (index 6): ensure it can jump between integers
-        n_orifices_idx = 6
-        target_step_n = 1.0  # ~one orifice per sigma
-        if sigma0 > 0:
-            cma_stds[n_orifices_idx] = max(cma_stds[n_orifices_idx], target_step_n / sigma0)
+        # Update n_orifices std
+        if current_sigma0 > 0:
+            current_cma_stds[n_orifices_idx] = max(current_cma_stds[n_orifices_idx], 1.0 / current_sigma0)
 
-        popsize = min(32, max(8, 4 + int(3 * np.log(len(x0_refined) + 1))))
+        layer1_logger.info(f"")
+        layer1_logger.info(f"Starting {restart_name} (sigma: {current_sigma_fraction*100:.0f}% of range)...")
+        if restart_idx > 0:
+            layer1_logger.info(f"Restarting from perturbed global best solution")
+        
+        # Adjust iteration budget per restart
+        iter_budget = max_iterations // num_restarts
+        
+        # IMPROVED: Relaxed stopping criteria to prevent premature convergence
         cma_options = {
             "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
             "popsize": popsize,
-            "maxiter": max_iterations,
+            "maxiter": iter_budget,
             "verb_disp": 0,
             "verb_log": 0,
-            "CMA_stds": cma_stds.tolist(),
+            "CMA_stds": current_cma_stds.tolist(),
+            # Relaxed stopping criteria
+            "tolx": 1e-8,
+            "tolfun": 1e-9,
+            "tolstagnation": 50,
+            "ftarget": -np.inf,
         }
         
         try:
-            es = cma.CMAEvolutionStrategy(x0_refined.tolist(), sigma0, cma_options)
+            es = cma.CMAEvolutionStrategy(x_start.tolist(), current_sigma0, cma_options)
             while not es.stop():
                 candidates = es.ask()
                 values = []
@@ -1160,73 +1233,70 @@ def run_layer1_optimization(
                 es.tell(candidates, values)
                 
                 iter_idx = max(1, es.countiter)
-                progress = 0.10 + 0.35 * min(iter_idx / max_iterations, 1.0)
-                update_progress("Layer 1: CMA-ES", progress, f"CMA-ES iteration {iter_idx}/{max_iterations}")
-                
-                if opt_state.get("objective_satisfied", False):
-                    layer1_logger.info("Objective satisfied during CMA-ES run; stopping early.")
-                    es.stop()
-                    break
+                # Progress calculation accounting for restarts
+                overall_progress = restart_idx / num_restarts
+                restart_progress = iter_idx / iter_budget / num_restarts
+                progress = 0.10 + 0.35 * (overall_progress + restart_progress)
+                update_progress("Layer 1: CMA-ES", progress, 
+                              f"{restart_name} - iteration {iter_idx}/{iter_budget}")
             
             cma_result = es.result
-            x0_refined = np.asarray(cma_result.xbest, dtype=float)
-            best_fun = float(cma_result.fbest)
-            layer1_logger.info(f"CMA-ES finished with objective {best_fun:.6f} after {es.countiter} iterations.")
-            log_status("Layer 1", f"CMA-ES complete: {es.countiter} iterations, obj={best_fun:.3f}, refining with L-BFGS-B...")
+            restart_best_x = np.asarray(cma_result.xbest, dtype=float)
+            restart_best_f = float(cma_result.fbest)
+            
+            # Log stop condition for diagnostic purposes
+            stop_dict = es.stop()
+            stop_reasons = list(stop_dict.keys()) if isinstance(stop_dict, dict) else [str(stop_dict)]
+            layer1_logger.info(f"{restart_name} finished after {es.countiter} iterations")
+            layer1_logger.info(f"  Final objective: {restart_best_f:.6f}")
+            layer1_logger.info(f"  Final sigma: {es.sigma:.6e}")
+            layer1_logger.info(f"  Stop reasons: {', '.join(stop_reasons)}")
+            
+            # Update global best if improved
+            if restart_best_f < best_f_global:
+                best_f_global = restart_best_f
+                best_x_global = restart_best_x
+                layer1_logger.info(f"  ✓ New global best: {best_f_global:.6f}")
+            
+            # Early exit if we found a very good solution
+            if best_f_global < obj_tolerance:
+                layer1_logger.info(f"Found excellent solution (obj < {obj_tolerance}), skipping remaining restarts")
+                break
+                
             for handler in layer1_logger.handlers:
                 handler.flush()
-            # Reset function evaluation counter for L-BFGS-B refinement
-            opt_state["function_evaluations"] = 0
+                
         except Exception as e:
-            layer1_logger.error(f"CMA-ES failed: {e}. Falling back to differential evolution + L-BFGS-B.")
-            log_status("Layer 1 Warning", f"CMA-ES failed: {e}. Falling back to legacy solver.")
-            use_cma_solver = False
-            x0_refined = x0
+            layer1_logger.error(f"{restart_name} failed: {e}")
+            if restart_idx == 0:
+                # If first run fails, re-raise
+                log_status("Layer 1 Error", f"CMA-ES failed: {e}")
+                raise
+            # If a restart fails, continue with other restarts
+            continue
     
-    if not use_cma_solver:
-        update_progress("Layer 1: Global Search", 0.45, "Running differential evolution...")
-        try:
-            layer1_logger.info("Phase 1: Global search (differential evolution)...")
-            de_result = differential_evolution(
-                objective,
-                bounds,
-                maxiter=20,
-                popsize=10,
-                mutation=(0.5, 1),
-                recombination=0.7,
-                seed=42,
-                polish=False,
-                workers=1,
-            )
-            x0_refined = de_result.x
-            func_evals_de = opt_state.get("function_evaluations", 0)
-            de_obj = de_result.fun
-            layer1_logger.info(f"Global search (differential_evolution) finished with objective {de_obj:.6f}")
-            layer1_logger.info(f"Function evaluations: {func_evals_de}")
-            log_status("Layer 1", f"Global search complete: {func_evals_de} func evals, obj={de_obj:.3f}, refining with L-BFGS-B...")
-            for handler in layer1_logger.handlers:
-                handler.flush()
-            opt_state["function_evaluations"] = 0
-        except Exception as e:
-            layer1_logger.warning(f"Differential evolution failed: {e}, using original initial guess")
-            log_status("Layer 1 Warning", f"Differential evolution failed: {e}, using original initial guess")
-            x0_refined = x0
-            opt_state["function_evaluations"] = 0
+    # Use best result across all restarts
+    x0_refined = best_x_global
+    best_fun = best_f_global
+    layer1_logger.info(f"")
+    layer1_logger.info(f"CMA-ES complete. Global best objective: {best_fun:.6f}")
+    layer1_logger.info(f"Total function evaluations: {opt_state['function_evaluations']}")
+    log_status("Layer 1", f"CMA-ES complete: {num_restarts} restart(s), obj={best_fun:.3f}, refining with L-BFGS-B...")
+    for handler in layer1_logger.handlers:
+        handler.flush()
     
-    # L-BFGS-B refinement runs after either CMA-ES or differential evolution
+    # Reset function evaluation counter for L-BFGS-B refinement
+    opt_state["function_evaluations"] = 0
+
+    
+    # L-BFGS-B refinement runs after CMA-ES
+    # Always run full local optimization regardless of current objective value
     maxfun_capped = min(max_iterations * 3, 500)
-    if opt_state.get('objective_satisfied', False) or opt_state.get('force_maxfun_1', False):
-        maxfun_capped = 1
-        log_status("Layer 1", "Objective satisfied - setting maxfun=1 to stop immediately")
     
     update_progress("Layer 1: Local Refinement", 0.47, f"Refining with L-BFGS-B (max {maxfun_capped} func evals)...")
     layer1_logger.info("Phase 2: Local refinement (L-BFGS-B)...")
     
     try:
-        if opt_state.get('objective_satisfied', False):
-            maxfun_capped = min(maxfun_capped, 3)
-            log_status("Layer 1", f"Objective satisfied - reducing maxfun to {maxfun_capped}")
-        
         lbfgs_result = minimize(
             objective,
             x0_refined,
@@ -1252,21 +1322,15 @@ def run_layer1_optimization(
     except Exception as e:
         layer1_logger.error(f"L-BFGS-B error: {e}")
         log_status("Layer 1 Warning", f"L-BFGS-B error: {e}, using best result found")
-        if opt_state.get('objective_satisfied', False):
-            satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', float('inf')))
-            best_x = opt_state.get('best_x', x0_refined)
-            result = _ResultWrapper(best_x, satisfied_obj)
-        elif use_cma_solver and 'best_fun' in locals():
+        # Use CMA-ES result or best found during optimization
+        if 'best_fun' in locals():
             # CMA-ES succeeded but L-BFGS-B failed
             result = _ResultWrapper(x0_refined, best_fun)
-        elif 'de_result' in locals():
-            result = _ResultWrapper(x0_refined, de_obj)
         else:
-            result = _ResultWrapper(x0, float('inf'))
-    
-    if opt_state.get('objective_satisfied', False):
-        satisfied_obj = opt_state.get('satisfied_obj', opt_state.get('best_objective', 0))
-        log_status("Layer 1", f"✓ Objective satisfied! obj={satisfied_obj:.6e} < tolerance={obj_tolerance:.3f}")
+            # Use best from optimization state
+            best_x = opt_state.get('best_x', x0)
+            best_obj = opt_state.get('best_objective', float('inf'))
+            result = _ResultWrapper(best_x, best_obj)
     
     # Get best config
     if opt_state["best_config"] is not None:

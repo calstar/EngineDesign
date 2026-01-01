@@ -5,6 +5,7 @@ import os
 import re
 import json
 import sys
+import logging
 from rocketcea.cea_obj import CEA_Obj
 from typing import Tuple, Optional, List, Dict, Any
 from multiprocessing import Pool, cpu_count, Manager
@@ -12,12 +13,17 @@ from functools import partial
 import time
 from .config_schemas import CEAConfig
 
+# Create module-level logger
+logger = logging.getLogger("evaluate")
+
 # Fix console encoding issues (Windows, WSL, etc.)
 _original_print = print
 def safe_print(*args, **kwargs):
-    """Print function that handles Unicode encoding errors gracefully"""
+    """Log function that handles Unicode encoding errors gracefully"""
     try:
-        _original_print(*args, **kwargs)
+        # Build message string
+        message = ' '.join(str(arg) for arg in args)
+        logger.info(message)
     except UnicodeEncodeError:
         # Replace problematic characters with ASCII equivalents
         safe_args = []
@@ -29,13 +35,15 @@ def safe_print(*args, **kwargs):
             else:
                 safe_args.append(arg)
         try:
-            _original_print(*safe_args, **kwargs)
+            message = ' '.join(str(arg) for arg in safe_args)
+            logger.info(message)
         except Exception:
             # Last resort: convert everything to string and sanitize
             safe_str_args = []
             for arg in safe_args:
                 safe_str_args.append(str(arg).encode('ascii', errors='replace').decode('ascii'))
-            _original_print(*safe_str_args, **kwargs)
+            message = ' '.join(safe_str_args)
+            logger.info(message)
 
 # Replace built-in print with safe version
 print = safe_print
@@ -268,7 +276,7 @@ class CEACache:
                 loaded_dims = meta_loaded_dict.get("dimensions", 2)
                 expected_dims = meta_expected_dict["dimensions"]
                 if loaded_dims != expected_dims:
-                    print(f"[WARNING] Cache dimension mismatch: {loaded_dims}D vs {expected_dims}D")
+                    logger.warning(f"Cache dimension mismatch: {loaded_dims}D vs {expected_dims}D")
                     return False
                 # Non-critical: ranges and n_points can differ - we can still interpolate
                 # Just warn if they're very different
@@ -277,15 +285,15 @@ class CEACache:
                 if loaded_pc_range and expected_pc_range:
                     # Check if requested range is within cached range (with some margin)
                     if expected_pc_range[0] < loaded_pc_range[0] * 0.9 or expected_pc_range[1] > loaded_pc_range[1] * 1.1:
-                        print(f"[INFO] Requested Pc range {expected_pc_range} extends beyond cached range {loaded_pc_range}")
-                        print(f"[INFO] Will use trilinear interpolation - some extrapolation may occur")
+                        logger.info(f"Requested Pc range {expected_pc_range} extends beyond cached range {loaded_pc_range}")
+                        logger.info(f"Will use trilinear interpolation - some extrapolation may occur")
                 
                 loaded_mr_range = meta_loaded_dict.get("MR_range", [])
                 expected_mr_range = meta_expected_dict.get("MR_range", [])
                 if loaded_mr_range and expected_mr_range:
                     if expected_mr_range[0] < loaded_mr_range[0] * 0.9 or expected_mr_range[1] > loaded_mr_range[1] * 1.1:
-                        print(f"[INFO] Requested MR range {expected_mr_range} extends beyond cached range {loaded_mr_range}")
-                        print(f"[INFO] Will use trilinear interpolation - some extrapolation may occur")
+                        logger.info(f"Requested MR range {expected_mr_range} extends beyond cached range {loaded_mr_range}")
+                        logger.info(f"Will use trilinear interpolation - some extrapolation may occur")
                 
                 # For 3D caches, check eps_range similarly
                 if expected_dims == 3:
@@ -293,10 +301,10 @@ class CEACache:
                     expected_eps_range = meta_expected_dict.get("eps_range", [])
                     if loaded_eps_range and expected_eps_range:
                         if expected_eps_range[0] < loaded_eps_range[0] * 0.9 or expected_eps_range[1] > loaded_eps_range[1] * 1.1:
-                            print(f"[INFO] Requested eps range {expected_eps_range} extends beyond cached range {loaded_eps_range}")
-                            print(f"[INFO] Will use trilinear interpolation - some extrapolation may occur")
+                            logger.info(f"Requested eps range {expected_eps_range} extends beyond cached range {loaded_eps_range}")
+                            logger.info(f"Will use trilinear interpolation - some extrapolation may occur")
             except Exception as e:
-                print(f"[WARNING] Error checking cache metadata: {e}")
+                logger.warning(f"Error checking cache metadata: {e}")
                 return False
             return True
 

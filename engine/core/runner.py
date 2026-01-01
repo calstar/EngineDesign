@@ -118,7 +118,8 @@ class PintleEngineRunner:
         P_tank_F: float,
         Pc_guess: Optional[float] = None,
         P_ambient: Optional[float] = None,
-        debug: bool = False
+        debug: bool = False,
+        silent: bool = False
     ) -> Dict[str, Any]:
         """
         Evaluate engine performance at given tank pressures.
@@ -164,7 +165,7 @@ class PintleEngineRunner:
         """
         # Wrap entire evaluation in try-except to log errors before re-raising
         try:
-            return self._evaluate_internal(P_tank_O, P_tank_F, Pc_guess, P_ambient, debug)
+            return self._evaluate_internal(P_tank_O, P_tank_F, Pc_guess, P_ambient, debug, silent)
         except Exception as e:
             # Log error with full traceback if debug is enabled
             if debug:
@@ -185,17 +186,20 @@ class PintleEngineRunner:
         P_tank_F: float,
         Pc_guess: Optional[float] = None,
         P_ambient: Optional[float] = None,
-        debug: bool = False
+        debug: bool = False,
+        silent: bool = False
     ) -> Dict[str, Any]:
         """Internal evaluation implementation (wrapped by evaluate() for error logging)."""
-        # Configure logging if debug is enabled
+        # Configure logging
         logger = logging.getLogger("evaluate")
+        logger.propagate = False  # Prevent double logging to root logger
+        
         if debug:
             log_dir = "output/logs"
             os.makedirs(log_dir, exist_ok=True)
             log_file = os.path.join(log_dir, "evaluate.log")
             
-            # Reset handlers to avoid duplicates
+            # Remove existing handlers to avoid duplicates
             for handler in logger.handlers[:]:
                 logger.removeHandler(handler)
             
@@ -208,36 +212,32 @@ class PintleEngineRunner:
             fh.setFormatter(file_formatter)
             logger.addHandler(fh)
             
-            # Console handler (optional, but useful for interactive debugging)
+            # Console handler
             ch = logging.StreamHandler()
-            ch.setLevel(logging.INFO) # Keep INFO and above on console
+            ch.setLevel(logging.INFO)
             console_formatter = logging.Formatter('%(message)s')
             ch.setFormatter(console_formatter)
             logger.addHandler(ch)
             
             logger.info("Debug logging enabled. Writing to %s", log_file)
         else:
-            # If not debugging, maybe we still want INFO logs to print?
-            # Or silence them? The user said "refactor prints to be turned into logging WHEN logging is true".
-            # This implies if debug is False, we shouldn't log.
-            # But the 'report' prints (Performance Summary) are likely desired ALWAYS.
-            # I will assume standard prints should remain PRINTS if debug=False, 
-            # OR I configure a basic stdout logger.
-            # Let's simple use print() for the summary if debug=False, or logger.info if debug=True?
-            # Better: Make 'logger' a dummy wrapper or real logger.
-            # If debug=False, I'll set logger to a NullLogger BUT the existing code uses prints.
-            # The prompt says "refactor all those prints".
-            # I will use the logger. If debug=False, I will add a StreamHandler to print INFO+ to stdout to mimic print().
-            params_debug = False # Don't re-configure if already configured globally?
-            # Construct a local logger reference that works either way
-            pass
+            # Remove existing handlers
+            for handler in logger.handlers[:]:
+                logger.removeHandler(handler)
+            
+            logger.setLevel(logging.INFO)
+            
+            # Only add console handler if not silent
+            if not silent:
+                ch = logging.StreamHandler()
+                ch.setLevel(logging.INFO)
+                console_formatter = logging.Formatter('%(message)s')
+                ch.setFormatter(console_formatter)
+                logger.addHandler(ch)
 
-        # Helper to log or print
+        # Helper to log messages
         def log_info(msg):
-            if debug:
-                logger.info(msg)
-            else:
-                print(msg)
+            logger.info(msg)
 
         # Get ambient pressure (from config elevation if not provided)
         Pa = self._get_ambient_pressure(P_ambient)
@@ -1024,10 +1024,12 @@ class PintleEngineRunner:
                 
             except Exception as e:
                 # If solve fails, leave NaN values
-                print(f"[WARNING] Time step {i} (t={times[i]:.3f}s) failed: {e}")
+                logger = logging.getLogger("evaluate")
+                logger.warning(f"Time step {i} (t={times[i]:.3f}s) failed: {e}")
                 import traceback
                 traceback.print_exc()
                 results["diagnostics"].append({"error": str(e)})
                 continue
         
         return results
+

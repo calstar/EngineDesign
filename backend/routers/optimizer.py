@@ -71,7 +71,6 @@ class DesignRequirementsResponse(BaseModel):
 
 class Layer1Request(BaseModel):
     """Request body for Layer 1 optimization."""
-    max_iterations: int = Field(default=80, ge=20, le=200, description="Maximum optimization iterations")
     thrust_tolerance: float = Field(default=0.1, ge=0.01, le=0.2, description="Thrust tolerance (0.1 = 10%)")
     target_burn_time: Optional[float] = Field(default=None, gt=0, description="Target burn time [s] (from design requirements if None)")
 
@@ -159,11 +158,12 @@ async def get_layer1_results():
 
 @router.get("/layer1")
 async def run_layer1(
-    max_iterations: int = 80,
     thrust_tolerance: float = 0.1,
     target_burn_time: float | None = None
 ):
     """Run Layer 1 optimization with Server-Sent Events for progress updates.
+    
+    Note: max_iterations is hardcoded in the optimizer for consistent robust convergence.
     
     Returns a stream of progress updates in SSE format.
     """
@@ -258,7 +258,6 @@ async def run_layer1(
                     runner=app_state.runner,
                     requirements=requirements,
                     target_burn_time=burn_time,
-                    max_iterations=max_iterations,
                     tolerances=tolerances,
                     pressure_config=pressure_config,
                     update_progress=update_progress,
