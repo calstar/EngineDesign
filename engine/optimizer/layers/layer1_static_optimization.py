@@ -589,6 +589,9 @@ def run_layer1_optimization(
         "history": [],
         "stop_optimization": False,
         "force_maxfun_1": False,
+        "last_best_eval": 0,
+        "valley_escape_tier": 0, # 0=normal, 1=mild, 2=medium, 3=full
+        "cooldown_until": 0,
     }
     
     log_flags = {
@@ -637,6 +640,23 @@ def run_layer1_optimization(
         below = max(0.0, (lo - x_val) / scale)
         above = max(0.0, (x_val - hi) / scale)
         return below * below + above * above
+    
+    def _check_valley_escape_tier() -> int:
+        """Determine if we are in a 'valley' and should boost exploration."""
+        evals = opt_state["function_evaluations"]
+        best_f = opt_state["best_objective"]
+        stagnation = evals - opt_state["last_best_eval"]
+        
+        # Tier 3: Full (evals > 5000, best > 100, stagnation > 1000)
+        if evals > 5000 and best_f > 100.0 and stagnation > 1000:
+            return 3
+        # Tier 2: Medium (evals > 3000, best > 150, stagnation > 500)
+        if evals > 3000 and best_f > 150.0 and stagnation > 500:
+            return 2
+        # Tier 1: Mild (evals > 1500, best > 300, stagnation > 300)
+        if evals > 1500 and best_f > 300.0 and stagnation > 300:
+            return 1
+        return 0
     
     # Define objective function
     def objective(x: np.ndarray) -> float:
@@ -1048,6 +1068,12 @@ def run_layer1_optimization(
         if is_new_best:
             opt_state["best_objective"] = obj
             opt_state["best_x"] = x_clipped.copy()
+            opt_state["last_best_eval"] = opt_state["function_evaluations"]
+            
+            # If we were in a valley escape mode, exit it
+            if opt_state.get("valley_escape_tier", 0) > 0:
+                layer1_logger.info(f"    *** Improvement found: Exiting Valley Escape Tier {opt_state['valley_escape_tier']} ***")
+                opt_state["valley_escape_tier"] = 0
             # Only store a "best config" if we actually evaluated successfully and are feasible.
             if eval_success and infeasibility_score <= 0.0:
                 opt_state["best_config"] = copy.deepcopy(config)
@@ -1236,7 +1262,8 @@ def run_layer1_optimization(
                     total_budget=total_budget_evals // num_tracks, # Split budget or full budget? Assuming full per track might be too slow. Split it.
                     logger=layer1_logger,
                     log_status_fn=log_status,
-                    update_progress_fn=update_progress
+                    update_progress_fn=update_progress,
+                    valley_escape_tracker=opt_state
                 )
                 
                 if t_f < best_f_global:
@@ -1254,7 +1281,8 @@ def run_layer1_optimization(
                 total_budget=total_budget_evals,
                 logger=layer1_logger,
                 log_status_fn=log_status,
-                update_progress_fn=update_progress
+                update_progress_fn=update_progress,
+                valley_escape_tracker=opt_state
             )
 
     else:
@@ -1324,6 +1352,36 @@ def run_layer1_optimization(
             try:
                 es = cma.CMAEvolutionStrategy(x_start.tolist(), current_sigma0, cma_options)
                 while not es.stop():
+                    # Check for Valley Escape boost
+                    target_tier = _check_valley_escape_tier()
+                    if target_tier > opt_state["valley_escape_tier"] and opt_state["function_evaluations"] > opt_state["cooldown_until"]:
+                        # Tier definitions
+                        tier_names = ["None", "Mild", "Medium", "Full"]
+                        boost_factors = [1.0, 1.5, 2.0, 3.0]
+                        current_factor = boost_factors[opt_state["valley_escape_tier"]]
+                        target_factor = boost_factors[target_tier]
+                        relative_boost = target_factor / current_factor
+                        
+                        old_sigma = es.sigma
+                        es.sigma *= relative_boost
+                        
+                        # Clamp sigma to 30% of median span to prevent sampling nonsense
+                        max_sigma = 0.3 * float(np.median(span))
+                        if es.sigma > max_sigma:
+                            es.sigma = max_sigma
+                            
+                        # Update state
+                        opt_state["valley_escape_tier"] = target_tier
+                        opt_state["cooldown_until"] = opt_state["function_evaluations"] + 1000
+                        
+                        layer1_logger.info("!" * 20)
+                        layer1_logger.info(f"VALLEY ESCAPE TRIGGERED (Tier: {tier_names[target_tier]})")
+                        layer1_logger.info(f"Evals: {opt_state['function_evaluations']}, Best: {opt_state['best_objective']:.2f}, Stagnation: {opt_state['function_evaluations'] - opt_state['last_best_eval']}")
+                        layer1_logger.info(f"Sigma: {old_sigma:.6f} -> {es.sigma:.6f} (Boost: {relative_boost:.2f}x)")
+                        layer1_logger.info("!" * 20)
+                        for handler in layer1_logger.handlers:
+                            handler.flush()
+
                     candidates = es.ask()
                     values = []
                     for cand in candidates:
@@ -1768,6 +1826,8 @@ def run_cma_core(
     elite_pool: Optional[ElitePool] = None,
     # Optional logic for penalty/validity
     true_objective_fn: Optional[Callable[[np.ndarray], float]] = None,
+    valley_escape_tracker: Optional[Dict[str, Any]] = None,
+    logger = None,
 ) -> Tuple[np.ndarray, float, int]:
     """
     Core re-usable CMA-ES wrapper.
@@ -1837,6 +1897,46 @@ def run_cma_core(
         if evals >= budget:
             break
             
+        # Check for Valley Escape boost if tracker provided
+        if valley_escape_tracker is not None:
+            evals_now = valley_escape_tracker.get("function_evaluations", 0)
+            best_f = valley_escape_tracker.get("best_objective", float('inf'))
+            last_best = valley_escape_tracker.get("last_best_eval", 0)
+            stagnation = evals_now - last_best
+            current_tier = valley_escape_tracker.get("valley_escape_tier", 0)
+            cooldown = valley_escape_tracker.get("cooldown_until", 0)
+            
+            target_tier = 0
+            if evals_now > 5000 and best_f > 100.0 and stagnation > 1000: target_tier = 3
+            elif evals_now > 3000 and best_f > 150.0 and stagnation > 500: target_tier = 2
+            elif evals_now > 1500 and best_f > 300.0 and stagnation > 300: target_tier = 1
+            
+            if target_tier > current_tier and evals_now > cooldown:
+                # Apply boost
+                boost_factors = [1.0, 1.5, 2.0, 3.0]
+                relative_boost = boost_factors[target_tier] / boost_factors[current_tier]
+                
+                old_sigma = es.sigma
+                es.sigma *= relative_boost
+                
+                # Clamp sigma to 30% of median span
+                span_vals = upper_bounds - lower_bounds
+                max_sigma = 0.3 * float(np.median(span_vals))
+                if es.sigma > max_sigma:
+                    es.sigma = max_sigma
+                
+                # Update tracker
+                valley_escape_tracker["valley_escape_tier"] = target_tier
+                valley_escape_tracker["cooldown_until"] = evals_now + 1000
+                
+                if logger:
+                    tier_names = ["None", "Mild", "Medium", "Full"]
+                    logger.info("!" * 20)
+                    logger.info(f"VALLEY ESCAPE TRIGGERED in run_cma_core (Tier: {tier_names[target_tier]})")
+                    logger.info(f"Evals: {evals_now}, Best: {best_f:.2f}, Stagnation: {stagnation}")
+                    logger.info(f"Sigma: {old_sigma:.6f} -> {es.sigma:.6f} (Boost: {relative_boost:.2f}x)")
+                    logger.info("!" * 20)
+
         candidates = es.ask()
         fitness_values = []
         
@@ -2000,6 +2100,7 @@ def run_hybrid_optimization(
     logger = None,
     log_status_fn = None, 
     update_progress_fn = None,
+    valley_escape_tracker: Optional[Dict[str, Any]] = None,
 ) -> Tuple[np.ndarray, float, int]:
     """
     Run Hybrid CMA-ES + Block Re-optimization.
@@ -2072,7 +2173,8 @@ def run_hybrid_optimization(
     # Run 1
     x_res, f_res, evs = run_cma_core(
         objective, x0, sigma0, bounds, budget_a1, 
-        popsize=16, cma_stds=cma_stds, elite_pool=elite_pool
+        popsize=16, cma_stds=cma_stds, elite_pool=elite_pool,
+        valley_escape_tracker=valley_escape_tracker, logger=logger
     )
     evals_used += evs
     if f_res < best_f_global:
@@ -2087,7 +2189,8 @@ def run_hybrid_optimization(
     if budget_a2 > 100:
         x_res, f_res, evs = run_cma_core(
             objective, x0_2, sigma0 * 0.5, bounds, budget_a2, 
-            popsize=16, cma_stds=cma_stds, elite_pool=elite_pool
+            popsize=16, cma_stds=cma_stds, elite_pool=elite_pool,
+            valley_escape_tracker=valley_escape_tracker, logger=logger
         )
         evals_used += evs
         if f_res < best_f_global:
@@ -2165,14 +2268,20 @@ def run_hybrid_optimization(
             # Scaling: use same heuristic (25% of block range)
             z_span = block_upper - block_lower
             z_sigma = 0.2 * np.median(z_span) # Slightly smaller for local block
-            if z_sigma <= 0: z_sigma = 0.05
+            # Apply additional boost to block sigma if valley escape is active
+            if valley_escape_tracker is not None:
+                tier = valley_escape_tracker.get("valley_escape_tier", 0)
+                if tier > 0:
+                    # Block reopt: smaller boost (1.2 - 1.8x)
+                    block_boost = 1.0 + (tier * 0.2) # Tier 1: 1.2, Tier 2: 1.4, Tier 3: 1.6
+                    z_sigma *= block_boost
             
             z_best, z_f, z_evals = run_cma_core(
                 block_obj_fn, z0, z_sigma, block_bounds, budget_per_block,
                 popsize=max(8, 4 + int(3 * np.log(len(z0)+1))), # Smaller pop for blocks
-                elite_pool=None, # Don't flood elite pool with partials? Or do we?
-                # Actually we can add full stitched vectors to elite pool!
-                true_objective_fn=block_obj_fn
+                elite_pool=None, 
+                true_objective_fn=block_obj_fn,
+                valley_escape_tracker=valley_escape_tracker, logger=logger
             )
             
             evals_used += z_evals
@@ -2201,9 +2310,18 @@ def run_hybrid_optimization(
                 # User req 4: "sigma = refresh_sigma_scale * sigma_initial"
                 sigma_ref = sigma0 * hybrid_config.refresh_sigma_scale
                 
+                # Apply additional boost to refresh sigma if valley escape is active
+                if valley_escape_tracker is not None:
+                    tier = valley_escape_tracker.get("valley_escape_tier", 0)
+                    if tier > 0:
+                        # Global refresh: larger boost (1.5 - 2.5x)
+                        refresh_boost = 1.0 + (tier * 0.5) # Tier 1: 1.5, Tier 2: 2.0, Tier 3: 2.5
+                        sigma_ref *= refresh_boost
+
                 x_ref_res, f_ref_res, evs_ref = run_cma_core(
                     objective, x_ref, sigma_ref, bounds, ref_budget,
-                    popsize=16, cma_stds=cma_stds, elite_pool=elite_pool
+                    popsize=16, cma_stds=cma_stds, elite_pool=elite_pool,
+                    valley_escape_tracker=valley_escape_tracker, logger=logger
                 )
                 evals_used += evs_ref
                 

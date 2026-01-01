@@ -45,6 +45,7 @@ class GeometryResponse(BaseModel):
     Cf: Optional[float] = None
     Cf_ideal: Optional[float] = None
     A_throat_solved: Optional[float] = None
+    chamber_contour_method: Optional[str] = None  # "solved" or "cea_iterative"
 
 
 @router.get("", response_model=GeometryResponse)
@@ -142,82 +143,124 @@ async def get_chamber_geometry():
             n_points=200,
         )
         
-        # Generate chamber contour using solve_chamber_geometry_with_cea
-        # This uses CEA thermochemistry to get correct Cf and throat area
+        # Generate chamber contour using solved_chamber_plot or solve_chamber_geometry_with_cea
+        # Prefer solved_chamber_plot if all geometry parameters are available (fast, no iteration)
+        # Otherwise fallback to CEA solver (iterative, finds throat area)
         chamber_contour_x = []
         chamber_contour_y = []
         Cf_solved = None
         Cf_ideal_solved = None
         A_throat_solved = None
+        chamber_contour_method = None
         
         try:
-            # =====================================================================
-            # Get ALL design parameters from config.chamber_geometry (preferred)
-            # or fallback to legacy config.chamber + config.nozzle
-            # These are the inputs to solve_chamber_geometry_with_cea
-            # =====================================================================
+            # Check if we have all parameters for solved_chamber_plot (from optimizer output)
+            use_solved_plot = False
             if chamber_geom is not None:
-                # New unified chamber_geometry section
-                Pc_design = getattr(chamber_geom, 'design_pressure', 2.0e6)
-                F_design = getattr(chamber_geom, 'design_thrust', 5000.0)
-                MR = getattr(chamber_geom, 'design_MR', 2.55)
-                Lstar = getattr(chamber_geom, 'Lstar', 1.0)
-                D_chamber_design = getattr(chamber_geom, 'chamber_diameter', D_chamber)
-                D_exit_design = getattr(chamber_geom, 'exit_diameter', D_exit)
-                nozzle_eff = getattr(chamber_geom, 'nozzle_efficiency', 0.95)
-            else:
-                # Legacy sections (chamber and nozzle should exist if we get here due to check above)
-                Pc_design = getattr(chamber, 'design_pressure', 2.0e6) if chamber else 2.0e6
-                F_design = getattr(chamber, 'design_thrust', 5000.0) if chamber else 5000.0
-                MR = getattr(chamber, 'design_MR', 2.55) if chamber else 2.55
-                Lstar = getattr(chamber, 'Lstar', 1.0) if chamber else 1.0
-                D_chamber_design = getattr(chamber, 'chamber_inner_diameter', D_chamber) if chamber else D_chamber
-                D_exit_design = getattr(chamber, 'exit_diameter', D_exit) if chamber else (getattr(nozzle, 'exit_diameter', D_exit) if nozzle else D_exit)
-                nozzle_eff = getattr(nozzle, 'efficiency', 0.95) if nozzle else 0.95
+                required_attrs = ['A_throat', 'A_exit', 'volume', 'Lstar', 'chamber_diameter', 'length']
+                has_all = all(
+                    hasattr(chamber_geom, attr) and getattr(chamber_geom, attr) is not None 
+                    for attr in required_attrs
+                )
+                if has_all:
+                    use_solved_plot = True
             
-            # Get ambient pressure from environment.elevation
-            Pa = 101325.0  # Default sea level
-            if hasattr(config, 'environment') and config.environment:
-                elevation = getattr(config.environment, 'elevation', 0.0)
-                # Barometric formula: P = P0 * (1 - 2.25577e-5 * h)^5.25588
-                if elevation > 0:
-                    Pa = 101325.0 * (1.0 - 2.25577e-5 * elevation) ** 5.25588
-            
-            # Get CEA config and create cache
-            cea_config = config.combustion.cea if hasattr(config, 'combustion') and hasattr(config.combustion, 'cea') else None
-            
-            if cea_config is not None:
-                cea_cache = CEACache(cea_config)
+            if use_solved_plot:
+                # Fast path: Use solved_chamber_plot (no CEA iteration needed)
+                from engine.core.chamber_geometry_solver import solved_chamber_plot
                 
-                # Solve chamber geometry with CEA - ALL inputs from config
-                chamber_pts, table_data, total_length, solver_info = solve_chamber_geometry_with_cea(
-                    pc_design=Pc_design,
-                    thrust_design=F_design,
-                    cea_cache=cea_cache,
-                    MR=MR,
-                    diameter_inner=D_chamber_design,
-                    diameter_exit=D_exit_design,
-                    l_star=Lstar,
-                    Pa=Pa,
-                    nozzle_efficiency=nozzle_eff,
+                chamber_pts, table_data, lengths = solved_chamber_plot(
+                    area_throat=chamber_geom.A_throat,
+                    area_exit=chamber_geom.A_exit,
+                    volume_chamber=chamber_geom.volume,
+                    lstar=chamber_geom.Lstar,
+                    chamber_diameter=chamber_geom.chamber_diameter,
+                    length=chamber_geom.length,
                     do_plot=False,
-                    verbose=False,
+                    steps=200,
                 )
                 
                 # Extract contour points (x, y)
                 chamber_contour_x = chamber_pts[:, 0].tolist()
                 chamber_contour_y = chamber_pts[:, 1].tolist()
                 
-                # Extract solver results
-                Cf_solved = solver_info.get('final_Cf')
-                Cf_ideal_solved = solver_info.get('final_Cf_ideal')
-                A_throat_solved = solver_info.get('final_A_throat')
+                # Get Cf from config if available (optimizer sets this)
+                Cf_solved = getattr(chamber_geom, 'Cf', None)
+                Cf_ideal_solved = getattr(chamber_geom, 'Cf_ideal', None)
+                A_throat_solved = chamber_geom.A_throat
+                chamber_contour_method = "solved"
+                
+            else:
+                # Fallback path: Use CEA solver (iterative)
+                # =====================================================================
+                # Get ALL design parameters from config.chamber_geometry (preferred)
+                # or fallback to legacy config.chamber + config.nozzle
+                # These are the inputs to solve_chamber_geometry_with_cea
+                # =====================================================================
+                if chamber_geom is not None:
+                    # New unified chamber_geometry section
+                    Pc_design = getattr(chamber_geom, 'design_pressure', 2.0e6)
+                    F_design = getattr(chamber_geom, 'design_thrust', 5000.0)
+                    MR = getattr(chamber_geom, 'design_MR', 2.55)
+                    Lstar = getattr(chamber_geom, 'Lstar', 1.0)
+                    D_chamber_design = getattr(chamber_geom, 'chamber_diameter', D_chamber)
+                    D_exit_design = getattr(chamber_geom, 'exit_diameter', D_exit)
+                    nozzle_eff = getattr(chamber_geom, 'nozzle_efficiency', 0.95)
+                else:
+                    # Legacy sections (chamber and nozzle should exist if we get here due to check above)
+                    Pc_design = getattr(chamber, 'design_pressure', 2.0e6) if chamber else 2.0e6
+                    F_design = getattr(chamber, 'design_thrust', 5000.0) if chamber else 5000.0
+                    MR = getattr(chamber, 'design_MR', 2.55) if chamber else 2.55
+                    Lstar = getattr(chamber, 'Lstar', 1.0) if chamber else 1.0
+                    D_chamber_design = getattr(chamber, 'chamber_inner_diameter', D_chamber) if chamber else D_chamber
+                    D_exit_design = getattr(chamber, 'exit_diameter', D_exit) if chamber else (getattr(nozzle, 'exit_diameter', D_exit) if nozzle else D_exit)
+                    nozzle_eff = getattr(nozzle, 'efficiency', 0.95) if nozzle else 0.95
+                
+                # Get ambient pressure from environment.elevation
+                Pa = 101325.0  # Default sea level
+                if hasattr(config, 'environment') and config.environment:
+                    elevation = getattr(config.environment, 'elevation', 0.0)
+                    # Barometric formula: P = P0 * (1 - 2.25577e-5 * h)^5.25588
+                    if elevation > 0:
+                        Pa = 101325.0 * (1.0 - 2.25577e-5 * elevation) ** 5.25588
+                
+                # Get CEA config and create cache
+                cea_config = config.combustion.cea if hasattr(config, 'combustion') and hasattr(config.combustion, 'cea') else None
+                
+                if cea_config is not None:
+                    cea_cache = CEACache(cea_config)
+                    
+                    # Solve chamber geometry with CEA - ALL inputs from config
+                    chamber_pts, table_data, total_length, solver_info = solve_chamber_geometry_with_cea(
+                        pc_design=Pc_design,
+                        thrust_design=F_design,
+                        cea_cache=cea_cache,
+                        MR=MR,
+                        diameter_inner=D_chamber_design,
+                        diameter_exit=D_exit_design,
+                        l_star=Lstar,
+                        Pa=Pa,
+                        nozzle_efficiency=nozzle_eff,
+                        do_plot=False,
+                        verbose=False,
+                    )
+                    
+                    # Extract contour points (x, y)
+                    chamber_contour_x = chamber_pts[:, 0].tolist()
+                    chamber_contour_y = chamber_pts[:, 1].tolist()
+                    
+                    # Extract solver results
+                    Cf_solved = solver_info.get('final_Cf')
+                    Cf_ideal_solved = solver_info.get('final_Cf_ideal')
+                    A_throat_solved = solver_info.get('final_A_throat')
+                    chamber_contour_method = "cea_iterative"
                 
         except Exception as e:
-            # If CEA solver fails, chamber_contour remains empty
+            # If both solvers fail, chamber_contour remains empty
             # This is not critical - we still have layer geometry
             import warnings
-            warnings.warn(f"CEA chamber solver failed: {e}")
+            warnings.warn(f"Chamber contour solver failed: {e}")
+            chamber_contour_method = "failed"
         
         # Generate Rao bell nozzle contour
         # The rao() function returns contour starting from upstream of throat
@@ -266,6 +309,7 @@ async def get_chamber_geometry():
             Cf=Cf_solved,
             Cf_ideal=Cf_ideal_solved,
             A_throat_solved=A_throat_solved,
+            chamber_contour_method=chamber_contour_method,
         )
         
     except Exception as e:

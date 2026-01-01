@@ -11,14 +11,17 @@ import {
 } from 'recharts';
 import {
   runLayer1Optimization,
-  getLayer1Status
+  getLayer1Status,
+  getChamberGeometry
 } from '../api/client';
 import type {
   Layer1Settings,
   Layer1ProgressEvent,
   Layer1Results,
-  DesignRequirements
+  DesignRequirements,
+  ChamberGeometryResponse
 } from '../api/client';
+import { ChamberContourPlot } from './ChamberContourPlot';
 
 interface Layer1OptimizationProps {
   requirements: DesignRequirements | null;
@@ -248,6 +251,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
     best_objective: number;
   }>>([]);
   const [showParameterPlots, setShowParameterPlots] = useState(false);
+  const [chamberGeometry, setChamberGeometry] = useState<ChamberGeometryResponse | null>(null);
 
   // Calculate min/max objective values for dot scaling
   const { minObj, maxObj } = useMemo(() => {
@@ -268,40 +272,40 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
   const renderDot = useMemo(() => {
     const minSize = 5;  // Largest dot size (for best/lowest values)
     const maxSize = 0.2;  // Smallest dot size (for worst/highest values)
-    
+
     // Pre-calculate log values for efficiency
     const logMinObj = Math.log(minObj);
     const logMaxObj = Math.log(maxObj);
     const logRange = logMaxObj - logMinObj;
-    
+
     return (props: any) => {
       const { cx, cy, payload } = props;
       if (!payload || typeof payload.objective !== 'number' || !isFinite(payload.objective) || payload.objective <= 0) {
         // Return invisible dot for invalid data
         return <circle cx={cx} cy={cy} r={0} fill="none" />;
       }
-      
+
       if (logRange === 0 || minObj === maxObj) {
         // Check if this point represents a new best
-        const isBest = payload.best_objective !== undefined && 
-                       typeof payload.best_objective === 'number' &&
-                       Math.abs(payload.objective - payload.best_objective) < 1e-10;
+        const isBest = payload.best_objective !== undefined &&
+          typeof payload.best_objective === 'number' &&
+          Math.abs(payload.objective - payload.best_objective) < 1e-10;
         const fillColor = isBest ? "#ef4444" : "#3b82f6";
         return <circle cx={cx} cy={cy} r={minSize} fill={fillColor} />;
       }
-      
+
       // Log-scaled inverse: lower value gets larger size
       // Normalize using log scale: 0 = worst (max), 1 = best (min)
       const logValue = Math.log(payload.objective);
       const normalized = (logMaxObj - logValue) / logRange;
       const radius = maxSize + (minSize - maxSize) * normalized;
-      
+
       // Check if this point represents a new best (objective equals best_objective)
-      const isBest = payload.best_objective !== undefined && 
-                     typeof payload.best_objective === 'number' &&
-                     Math.abs(payload.objective - payload.best_objective) < 1e-10;
+      const isBest = payload.best_objective !== undefined &&
+        typeof payload.best_objective === 'number' &&
+        Math.abs(payload.objective - payload.best_objective) < 1e-10;
       const fillColor = isBest ? "#ef4444" : "#3b82f6"; // Red for best, blue for others
-      
+
       return <circle cx={cx} cy={cy} r={radius} fill={fillColor} />;
     };
   }, [minObj, maxObj]);
@@ -321,6 +325,13 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
       if (response.data.error) {
         setError(response.data.error);
       }
+    }
+  };
+
+  const fetchChamberGeometry = async () => {
+    const response = await getChamberGeometry();
+    if (response.data) {
+      setChamberGeometry(response.data);
     }
   };
 
@@ -361,6 +372,8 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
             if (event.results.objective_history) {
               setObjectiveHistory(event.results.objective_history);
             }
+            // Fetch chamber geometry for contour plot
+            fetchChamberGeometry();
           }
         } else if (event.type === 'error') {
           setIsRunning(false);
@@ -781,6 +794,18 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               </div>
             )}
           </div>
+
+          {/* Chamber Contour Plot */}
+          {chamberGeometry && chamberGeometry.chamber_contour_x && chamberGeometry.chamber_contour_x.length > 0 && (
+            <div className="mt-6">
+              <h4 className="text-md font-semibold text-[var(--color-text-primary)] mb-3">📊 Optimized Chamber Contour</h4>
+              <ChamberContourPlot
+                geometry={chamberGeometry}
+                title="Optimized Chamber Geometry"
+                showCfBadge={true}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

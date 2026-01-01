@@ -559,6 +559,285 @@ def solve_chamber_geometry_from_config(
     )
 
 
+def solved_chamber_plot(
+    area_throat: float,
+    area_exit: float,
+    volume_chamber: float,
+    lstar: float,
+    chamber_diameter: float,
+    length: float,
+    do_plot: bool = False,
+    color_segments: bool = False,
+    steps: int = 200,
+    export_dxf: Optional[str] = None,
+) -> Tuple[np.ndarray, list, Dict[str, float]]:
+    """
+    Generate chamber geometry plot from fully-constrained parameters.
+    
+    This function is used when all geometry parameters are already known (e.g., from
+    optimizer output) and no CEA iteration is needed. It directly generates the chamber
+    contour from the given parameters.
+    
+    Parameters:
+    -----------
+    area_throat : float
+        Throat area [m²]
+    area_exit : float
+        Exit area [m²]
+    volume_chamber : float
+        Chamber volume [m³]
+    lstar : float
+        Characteristic length [m]
+    chamber_diameter : float
+        Chamber inner diameter [m]
+    length : float
+        Total chamber length (cylindrical + contraction) [m]
+        Note: This does NOT include the small arc to the throat
+    do_plot : bool, optional
+        Whether to generate plot (default: False)
+    color_segments : bool, optional
+        Whether to color-code segments in plot (default: False)
+    steps : int, optional
+        Number of points for geometry generation (default: 200)
+    export_dxf : str or None, optional
+        Path to export DXF file (default: None)
+    
+    Returns:
+    --------
+    chamber_pts : numpy array
+        Array of (x, y) points representing the full chamber contour
+    table_data : list of lists
+        Table data with metric and imperial units
+    lengths : dict
+        Dictionary containing:
+        - cylindrical: Cylindrical section length [m]
+        - contraction: Contraction section length [m]
+        - total: Total chamber length [m]
+    """
+    # Calculate derived values
+    area_chamber = np.pi * (chamber_diameter / 2) ** 2
+    contraction_ratio = area_chamber / area_throat
+    expansion_ratio = area_exit / area_throat
+    
+    # Generate nozzle using the rao function
+    from engine.core.chamber_geometry import generate_nozzle
+    nozzle_pts, nozzle_x_first, nozzle_y_first = generate_nozzle(area_throat, area_exit, steps=steps)
+    
+    # Calculate chamber sections
+    # The nozzle entrance radius (nozzle_y_first) is where the contraction cone meets the nozzle
+    theta_contraction = np.pi / 4  # 45 degrees
+    
+    # Calculate contraction length using the helper function
+    from engine.core.chamber_geometry import contraction_length_horizontal_calc
+    contraction_length_horizontal = contraction_length_horizontal_calc(
+        area_chamber=area_chamber,
+        entrance_arc_start_y=nozzle_y_first,
+        theta=theta_contraction,
+    )
+    
+    # Calculate cylindrical length from total length
+    cylindrical_length = length - contraction_length_horizontal
+    
+    # Validate lengths
+    if cylindrical_length <= 0:
+        import warnings
+        warnings.warn(
+            f"Calculated cylindrical length ({cylindrical_length*1000:.2f} mm) is non-positive. "
+            f"Total length ({length*1000:.2f} mm) may be too small for contraction length "
+            f"({contraction_length_horizontal*1000:.2f} mm). Using minimum cylindrical length."
+        )
+        cylindrical_length = 0.01  # 10mm minimum
+    
+    # Calculate total chamber length (should match input length)
+    total_chamber_length = cylindrical_length + contraction_length_horizontal
+    
+    # Calculate chamber radius
+    r_c = np.sqrt(area_chamber / np.pi)
+    
+    # Calculate where cylindrical section starts
+    # The 45° contraction line connects (x_cyl_start, r_c) to (nozzle_x_first, nozzle_y_first)
+    x_cyl_start = nozzle_x_first + nozzle_y_first - r_c
+    
+    # Generate cylindrical section (constant radius)
+    x_cyl_end = x_cyl_start - cylindrical_length
+    x_cyl = np.linspace(x_cyl_end, x_cyl_start, steps)
+    y_cyl = np.full_like(x_cyl, r_c)
+    
+    # Generate contraction section (45° line)
+    x_contraction = np.linspace(x_cyl_start, nozzle_x_first, steps)
+    y_contraction = r_c - x_contraction + x_cyl_start
+    
+    # Combine all sections: cylindrical -> contraction -> nozzle
+    chamber_pts = np.vstack([
+        np.column_stack((x_cyl, y_cyl)),
+        np.column_stack((x_contraction[1:], y_contraction[1:])),  # Skip first point to avoid duplicate
+        nozzle_pts  # Nozzle already starts at the connection point
+    ])
+    
+    # Calculate additional diameters for table data
+    diameter_throat = np.sqrt(4 * area_throat / np.pi)
+    diameter_exit = np.sqrt(4 * area_exit / np.pi)
+    
+    # Conversion factors
+    m_to_in = 39.37
+    m2_to_in2 = 1550.0031
+    m3_to_in3 = 61023.7441
+    
+    # Convert to imperial
+    volume_chamber_in3 = volume_chamber * m3_to_in3
+    area_chamber_in2 = area_chamber * m2_to_in2
+    chamber_diameter_in = chamber_diameter * m_to_in
+    area_throat_in2 = area_throat * m2_to_in2
+    diameter_throat_in = diameter_throat * m_to_in
+    area_exit_in2 = area_exit * m2_to_in2
+    diameter_exit_in = diameter_exit * m_to_in
+    lstar_in = lstar * m_to_in
+    cylindrical_length_in = cylindrical_length * m_to_in
+    contraction_length_horizontal_in = contraction_length_horizontal * m_to_in
+    total_chamber_length_in = total_chamber_length * m_to_in
+    
+    # Create table data with metric and imperial units
+    table_data = [
+        ['Parameter', 'Metric Value', 'Metric Units', 'Imperial Value', 'Imperial Units'],
+        ['Chamber Volume', f'{volume_chamber:.6e}', 'm³', f'{volume_chamber_in3:.4f}', 'in³'],
+        ['Chamber Area', f'{area_chamber:.6e}', 'm²', f'{area_chamber_in2:.4f}', 'in²'],
+        ['Chamber Diameter', f'{chamber_diameter:.6e}', 'm', f'{chamber_diameter_in:.4f}', 'in'],
+        ['Throat Area', f'{area_throat:.6e}', 'm²', f'{area_throat_in2:.6f}', 'in²'],
+        ['Throat Diameter', f'{diameter_throat:.6e}', 'm', f'{diameter_throat_in:.6f}', 'in'],
+        ['Exit Area', f'{area_exit:.6e}', 'm²', f'{area_exit_in2:.4f}', 'in²'],
+        ['Exit Diameter', f'{diameter_exit:.6e}', 'm', f'{diameter_exit_in:.4f}', 'in'],
+        ['Expansion Ratio', f'{expansion_ratio:.4f}', '', f'{expansion_ratio:.4f}', ''],
+        ['Contraction Ratio', f'{contraction_ratio:.4f}', '', f'{contraction_ratio:.4f}', ''],
+        ['L*', f'{lstar:.4f}', 'm', f'{lstar_in:.4f}', 'in'],
+        ['Cylindrical Length', f'{cylindrical_length:.6e}', 'm', f'{cylindrical_length_in:.4f}', 'in'],
+        ['Contraction Length', f'{contraction_length_horizontal:.6e}', 'm', f'{contraction_length_horizontal_in:.4f}', 'in'],
+        ['Total Chamber Length', f'{total_chamber_length:.6e}', 'm', f'{total_chamber_length_in:.4f}', 'in'],
+    ]
+    
+    # Plot if requested
+    if do_plot:
+        import matplotlib.pyplot as plt
+        from pathlib import Path
+        
+        # Create figure with two subplots: contour on top, table below
+        fig = plt.figure(figsize=(16, 14))
+        gs = fig.add_gridspec(2, 1, height_ratios=[2, 1], hspace=0.15)
+        
+        # Top subplot for contour
+        ax = fig.add_subplot(gs[0])
+        
+        if color_segments:
+            ax.plot(x_cyl, y_cyl, label='Cylindrical section', color='blue', linewidth=2)
+            ax.plot(x_contraction, y_contraction, label='Contraction (45°)', color='green', linewidth=2)
+            ax.plot(nozzle_pts[:, 0], nozzle_pts[:, 1], label='Nozzle', color='red', linewidth=2)
+            ax.legend()
+        else:
+            ax.plot(chamber_pts[:, 0], chamber_pts[:, 1], 'k-', linewidth=2)
+        
+        # Stretch the plot vertically to show more detail in radius direction
+        ax.relim()
+        ax.autoscale()
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        x_range = x_max - x_min
+        y_range = y_max - y_min
+        
+        # Set aspect ratio to stretch y-direction
+        aspect_ratio = (x_range / y_range) * 0.2
+        ax.set_aspect(aspect_ratio, 'box')
+        
+        # Add small padding to y-axis
+        ax.set_ylim(y_min - 0.05 * y_range, y_max + 0.05 * y_range)
+        
+        ax.set_xlabel("Axial distance x (m)", fontsize=12)
+        ax.set_ylabel("Radius y (m)", fontsize=12)
+        ax.grid(True, alpha=0.3)
+        ax.set_title("Chamber Contour (Solved Geometry)", fontsize=14, fontweight='bold')
+        
+        # Bottom subplot for table
+        ax_table = fig.add_subplot(gs[1])
+        ax_table.axis('off')
+        
+        # Create table
+        table = ax_table.table(cellText=table_data[1:], colLabels=table_data[0],
+                              cellLoc='left', loc='center',
+                              bbox=[0, 0, 1, 1])
+        table.auto_set_font_size(False)
+        table.set_fontsize(18)
+        table.scale(1.5, 4.5)
+        
+        # Set column widths for better readability
+        col_widths = [0.22, 0.22, 0.12, 0.22, 0.12]
+        for i in range(5):
+            for j in range(len(table_data)):
+                table[(j, i)].set_width(col_widths[i])
+        
+        # Style the header row
+        for i in range(5):
+            table[(0, i)].set_facecolor('#40466e')
+            table[(0, i)].set_text_props(weight='bold', color='white', size=20)
+            table[(0, i)].set_height(0.35)
+        
+        # Alternate row colors and style cells
+        for i in range(1, len(table_data)):
+            for j in range(5):
+                if i % 2 == 0:
+                    table[(i, j)].set_facecolor('#f1f1f2')
+                else:
+                    table[(i, j)].set_facecolor('white')
+                table[(i, j)].set_text_props(size=18)
+                table[(i, j)].set_height(0.30)
+        
+        # Ensure directory exists before saving
+        output_path = Path('chamber/solved_chamber_contour.png')
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(str(output_path), dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    # Export to DXF if requested
+    if export_dxf is not None:
+        try:
+            import ezdxf
+        except ImportError:
+            raise ImportError(
+                "ezdxf library is required for DXF export. "
+                "Install it with: pip install ezdxf"
+            )
+        
+        from pathlib import Path
+        # Ensure directory exists before saving
+        dxf_path = Path(export_dxf)
+        dxf_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Create a new DXF document
+        doc = ezdxf.new('R2010')
+        msp = doc.modelspace()
+        
+        # Create polyline points (x, y) for the upper half contour only
+        points = [(pt[0], pt[1]) for pt in chamber_pts]
+        
+        # Create polyline for the contour
+        msp.add_lwpolyline(points)
+        
+        # Add centerline (x-axis) as a reference
+        x_min = chamber_pts[:, 0].min()
+        x_max = chamber_pts[:, 0].max()
+        msp.add_line((x_min, 0), (x_max, 0))
+        
+        # Save the DXF file
+        doc.saveas(str(dxf_path))
+        print(f"Chamber contour exported to {export_dxf}")
+    
+    # Return lengths as a dictionary for easy access
+    lengths = {
+        'cylindrical': cylindrical_length,
+        'contraction': contraction_length_horizontal,
+        'total': total_chamber_length
+    }
+    
+    return chamber_pts, table_data, lengths
+
+
 if __name__ == "__main__":
     # Example usage - uses default cache file automatically
     # Test parameters

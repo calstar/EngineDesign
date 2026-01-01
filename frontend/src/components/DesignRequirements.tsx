@@ -31,7 +31,6 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
     // Stability requirements (new comprehensive analysis)
     min_stability_score: 0.75,
     require_stable_state: true,
-    stability_margin_handicap: 0.0,
     
     // Stability requirements (legacy margins)
     min_stability_margin: 1.2,
@@ -310,27 +309,6 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
             <label className="ml-2 text-sm text-[var(--color-text-primary)]">
               Require 'Stable' State (not just 'Marginal')
             </label>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
-              Stability Margin Handicap
-            </label>
-            <input
-              type="range"
-              value={requirements.stability_margin_handicap}
-              onChange={(e) => updateField('stability_margin_handicap', parseFloat(e.target.value))}
-              className="w-full"
-              min="0.0"
-              max="1.0"
-              step="0.05"
-            />
-            <div className="flex justify-between text-xs text-[var(--color-text-secondary)] mt-1">
-              <span>0.0 (Strict)</span>
-              <span className="text-[var(--color-text-primary)]">{requirements.stability_margin_handicap.toFixed(2)}</span>
-              <span>1.0 (Any)</span>
-            </div>
-            <p className="text-xs text-[var(--color-text-secondary)] mt-1">0.0 = use full stability requirements. 1.0 = accept any stability score/margins.</p>
           </div>
 
           {/* Legacy Margins */}

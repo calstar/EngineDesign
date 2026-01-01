@@ -588,20 +588,6 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
             help="If checked, optimizer will only converge when stability_state == 'stable'. If unchecked, allows 'marginal' state."
         )
         
-        stability_margin_handicap = st.slider(
-            "Stability Margin Handicap",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.0,
-            step=0.05,
-            key="opt_stability_margin_handicap",
-            help=(
-                "0.0 = use full stability requirements (score and margins).\n"
-                "1.0 = accept any stability score/margins.\n"
-                "Intermediate values scale how strict the stability gates are."
-            ),
-        )
-        
         st.markdown("#### Individual Stability Margins (for detailed tracking)")
         st.caption("These are used for detailed feedback but the optimizer primarily uses stability_score above.")
         
@@ -671,7 +657,6 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         # Stability (new comprehensive analysis)
         "min_stability_score": min_stability_score,
         "require_stable_state": require_stable_state,
-        "stability_margin_handicap": stability_margin_handicap,
         # Stability (legacy margins for backward compatibility)
         "min_stability_margin": min_stability_margin,
         "chugging_margin_min": chugging_margin_min,

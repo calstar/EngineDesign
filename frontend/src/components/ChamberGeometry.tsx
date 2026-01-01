@@ -1,8 +1,7 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   ComposedChart,
   Area,
-  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -13,6 +12,7 @@ import {
 } from 'recharts';
 import { getChamberGeometry } from '../api/client';
 import type { ChamberGeometryResponse, EngineConfig } from '../api/client';
+import { ChamberContourPlot } from './ChamberContourPlot';
 
 interface ChamberGeometryProps {
   config: EngineConfig | null;
@@ -20,108 +20,23 @@ interface ChamberGeometryProps {
 
 // Convert m to mm for display
 const M_TO_MM = 1000;
-const MM_TO_INCH = 1 / 25.4;
-const INCH_TO_MM = 25.4;
 
-// Helper function to get nice step size for a given range
-function getNiceStep(range: number): number {
-  const magnitude = Math.floor(Math.log10(range));
-  const normalized = range / Math.pow(10, magnitude);
-  
-  let step;
-  if (normalized <= 1) step = 1;
-  else if (normalized <= 2) step = 2;
-  else if (normalized <= 5) step = 5;
-  else step = 10;
-  
-  return step * Math.pow(10, magnitude);
-}
-
-// Helper function to ensure domain includes 0 and has nice rounded bounds
-function makeNiceDomain(min: number, max: number, includeZero: boolean = true): [number, number] {
-  // Calculate the range
-  let range = max - min;
-  
-  // If including zero, expand range to include it
-  if (includeZero) {
-    if (min > 0) {
-      range = max;
-      min = 0;
-    } else if (max < 0) {
-      range = Math.abs(min);
-      max = 0;
-    } else {
-      range = Math.max(Math.abs(min), Math.abs(max)) * 2;
-      min = -range / 2;
-      max = range / 2;
-    }
-  }
-  
-  // Get a nice step size
-  const step = getNiceStep(range / 8); // Aim for about 8 ticks
-  
-  // Round min down and max up to nice values
-  const domainMin = includeZero && min <= 0 && max >= 0 
-    ? Math.floor(min / step) * step
-    : Math.floor(min / step) * step;
-  const domainMax = includeZero && min <= 0 && max >= 0
-    ? Math.ceil(max / step) * step
-    : Math.ceil(max / step) * step;
-  
-  // Ensure 0 is included if requested
-  let finalMin = domainMin;
-  let finalMax = domainMax;
-  if (includeZero) {
-    if (finalMin > 0) finalMin = 0;
-    if (finalMax < 0) finalMax = 0;
-  }
-  
-  // Ensure min < max
-  if (finalMin >= finalMax) {
-    const absMax = Math.max(Math.abs(finalMin), Math.abs(finalMax));
-    finalMin = -absMax;
-    finalMax = absMax;
-  }
-  
-  return [finalMin, finalMax];
-}
-
-// Helper function to format tick values nicely
-function formatTick(value: number, unit: 'mm' | 'inch'): string {
-  // For small values, show more decimals; for large values, show fewer
-  const absValue = Math.abs(value);
-  
-  if (unit === 'inch') {
-    if (absValue < 0.1) return value.toFixed(3);
-    if (absValue < 1) return value.toFixed(2);
-    if (absValue < 10) return value.toFixed(1);
-    return value.toFixed(0);
-  } else {
-    // mm
-    if (absValue < 1) return value.toFixed(2);
-    if (absValue < 10) return value.toFixed(1);
-    return value.toFixed(0);
-  }
-}
 
 export function ChamberGeometry({ config }: ChamberGeometryProps) {
   const [geometry, setGeometry] = useState<ChamberGeometryResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showLowerHalf, setShowLowerHalf] = useState(true);
-  const [ceaUnit, setCeaUnit] = useState<'mm' | 'inch'>('mm');
-  const ceaContourContainerRef = useRef<HTMLDivElement>(null);
-  const [containerSize, setContainerSize] = useState({ width: 1000, height: 350 });
 
   // Fetch geometry when component mounts or config changes
   const fetchGeometry = useCallback(async () => {
     setIsLoading(true);
     setError(null);
-    
+
     const result = await getChamberGeometry();
-    
+
     setIsLoading(false);
-    
+
     if (result.error) {
       setError(result.error);
       setGeometry(null);
@@ -140,27 +55,27 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
   // This includes chamber layers + Rao nozzle contour
   const chartData = useMemo(() => {
     if (!geometry) return [];
-    
+
     const data: Record<string, number>[] = [];
-    
+
     // First, add chamber region data (before throat)
     const n = geometry.positions.length;
     for (let i = 0; i < n; i++) {
       const pos = geometry.positions[i];
       // Only include chamber region (up to throat)
       if (pos > geometry.throat_position) continue;
-      
+
       const x = pos * M_TO_MM;  // Convert to mm
       const rGas = geometry.R_gas[i] * M_TO_MM;
       const rAblative = geometry.R_ablative_outer[i] * M_TO_MM;
       const rGraphite = geometry.R_graphite_outer[i] * M_TO_MM;
       const rStainless = geometry.R_stainless[i] * M_TO_MM;
-      
+
       // Check if this point is in graphite region
-      const isGraphiteRegion = 
-        pos >= geometry.graphite_start && 
+      const isGraphiteRegion =
+        pos >= geometry.graphite_start &&
         pos <= geometry.graphite_end;
-      
+
       data.push({
         x,
         // Upper half
@@ -175,149 +90,14 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
         R_gas_lower: showLowerHalf ? -rGas : 0,
       });
     }
-    
+
     return data;
   }, [geometry, showLowerHalf]);
-
-  // CEA-solved chamber contour data
-  const chamberContourData = useMemo(() => {
-    if (!geometry || !geometry.chamber_contour_x || geometry.chamber_contour_x.length === 0) return [];
-    
-    // Convert from meters to selected unit
-    const unitMultiplier = ceaUnit === 'mm' ? M_TO_MM : M_TO_MM * MM_TO_INCH;
-    
-    return geometry.chamber_contour_x.map((x, i) => ({
-      x: x * unitMultiplier,
-      R_chamber_upper: geometry.chamber_contour_y[i] * unitMultiplier,
-      R_chamber_lower: showLowerHalf ? -geometry.chamber_contour_y[i] * unitMultiplier : 0,
-    }));
-  }, [geometry, showLowerHalf, ceaUnit]);
-
-  // Measure container size for equal-scale calculation
-  useEffect(() => {
-    if (!ceaContourContainerRef.current) return;
-    
-    const updateSize = () => {
-      if (ceaContourContainerRef.current) {
-        const rect = ceaContourContainerRef.current.getBoundingClientRect();
-        setContainerSize({ width: rect.width, height: rect.height });
-      }
-    };
-    
-    // Initial measurement
-    updateSize();
-    
-    // Use ResizeObserver for accurate container size tracking
-    const resizeObserver = new ResizeObserver(() => {
-      updateSize();
-    });
-    
-    resizeObserver.observe(ceaContourContainerRef.current);
-    
-    // Also listen to window resize as fallback
-    window.addEventListener('resize', updateSize);
-    
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener('resize', updateSize);
-    };
-  }, [geometry]);
-
-  // Calculate equal-scale domains for CEA contour plot (1:1 aspect ratio)
-  const ceaContourDomains = useMemo(() => {
-    if (!chamberContourData || chamberContourData.length === 0) {
-      return { 
-        xDomain: ['dataMin', 'dataMax'], 
-        yDomain: showLowerHalf ? ['auto', 'auto'] : [0, 'auto'],
-        xLabel: `Axial Position (${ceaUnit})`,
-        yLabel: `Radius (${ceaUnit})`
-      };
-    }
-    
-    // Calculate data ranges
-    const xValues = chamberContourData.map(d => d.x);
-    const yValues = showLowerHalf 
-      ? [...chamberContourData.map(d => d.R_chamber_upper), ...chamberContourData.map(d => d.R_chamber_lower)]
-      : chamberContourData.map(d => d.R_chamber_upper);
-    
-    const xMin = Math.min(...xValues);
-    const xMax = Math.max(...xValues);
-    const yMin = Math.min(...yValues);
-    const yMax = Math.max(...yValues);
-    
-    const xRange = xMax - xMin;
-    const yRange = yMax - yMin;
-    
-    // Container dimensions (accounting for margins: left: 20, right: 30, top: 20, bottom: 20)
-    // Use default if container not measured yet
-    const effectiveWidth = containerSize.width > 0 ? containerSize.width : 1000;
-    const effectiveHeight = containerSize.height > 0 ? containerSize.height : 350;
-    const plotWidth = effectiveWidth - 20 - 30;
-    const plotHeight = effectiveHeight - 20 - 20;
-    
-    // Guard against invalid dimensions
-    if (plotWidth <= 0 || plotHeight <= 0) {
-      return { 
-        xDomain: [xMin, xMax], 
-        yDomain: [yMin, yMax],
-        xLabel: `Axial Position (${ceaUnit})`,
-        yLabel: `Radius (${ceaUnit})`
-      };
-    }
-    
-    // Calculate aspect ratio of plot area
-    const plotAspectRatio = plotWidth / plotHeight;
-    
-    // For equal scales (1:1), we want 1mm on x-axis to equal 1mm on y-axis visually
-    // This means: xRange / plotWidth should equal yRange / plotHeight
-    // Or: xRange / yRange should equal plotWidth / plotHeight
-    
-    let xDomain: [number, number] = [xMin, xMax];
-    let yDomain: [number, number] = [yMin, yMax];
-    
-    // Calculate the data aspect ratio (x-range / y-range)
-    const dataAspectRatio = xRange / yRange;
-    
-    // To achieve 1:1 scale, adjust domains so that the visual representation
-    // shows equal physical scales on both axes
-    if (dataAspectRatio > plotAspectRatio) {
-      // Data is wider relative to its height than the plot - expand y range to match
-      const targetYRange = xRange / plotAspectRatio;
-      const yCenter = (yMin + yMax) / 2;
-      yDomain = [yCenter - targetYRange / 2, yCenter + targetYRange / 2];
-    } else {
-      // Data is taller relative to its width than the plot - expand x range to match
-      const targetXRange = yRange * plotAspectRatio;
-      const xCenter = (xMin + xMax) / 2;
-      xDomain = [xCenter - targetXRange / 2, xCenter + targetXRange / 2];
-    }
-    
-    // Add small padding (5%)
-    const xPadding = (xDomain[1] - xDomain[0]) * 0.05;
-    const yPadding = (yDomain[1] - yDomain[0]) * 0.05;
-    xDomain = [xDomain[0] - xPadding, xDomain[1] + xPadding];
-    yDomain = [yDomain[0] - yPadding, yDomain[1] + yPadding];
-    
-    // Round to nice values and ensure 0 is included
-    // For x-axis, include 0 if the domain spans across 0
-    const xIncludesZero = xDomain[0] <= 0 && xDomain[1] >= 0;
-    xDomain = makeNiceDomain(xDomain[0], xDomain[1], xIncludesZero);
-    
-    // For y-axis, always include 0 (since it's the centerline)
-    yDomain = makeNiceDomain(yDomain[0], yDomain[1], true);
-    
-    return {
-      xDomain: xDomain as [number, number],
-      yDomain: yDomain as [number, number],
-      xLabel: `Axial Position (${ceaUnit})`,
-      yLabel: `Radius (${ceaUnit})`
-    };
-  }, [chamberContourData, showLowerHalf, containerSize, ceaUnit]);
 
   // Calculate dimensions for display
   const dimensions = useMemo(() => {
     if (!geometry) return null;
-    
+
     return {
       L_chamber_mm: geometry.L_chamber * M_TO_MM,
       L_nozzle_mm: geometry.L_nozzle * M_TO_MM,
@@ -332,13 +112,13 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
   // Custom tooltip
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload || !payload.length) return null;
-    
+
     // Find the actual radii at this position
     const gasRadius = payload.find((p: any) => p.dataKey === 'R_gas_upper')?.value || 0;
     const ablativeRadius = payload.find((p: any) => p.dataKey === 'R_ablative_upper')?.value || 0;
     const graphiteRadius = payload.find((p: any) => p.dataKey === 'R_graphite_upper')?.value || 0;
     const stainlessRadius = payload.find((p: any) => p.dataKey === 'R_stainless_upper')?.value || 0;
-    
+
     return (
       <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg p-3 shadow-xl">
         <p className="text-sm font-medium text-[var(--color-text-primary)] mb-2">
@@ -403,7 +183,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
               </p>
             </div>
           </div>
-          
+
           <div className="flex items-center gap-4">
             <label className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
               <input
@@ -414,7 +194,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
               />
               Show Full Cross-Section
             </label>
-            
+
             <button
               onClick={fetchGeometry}
               disabled={isLoading}
@@ -451,39 +231,39 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
           <h4 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">
             Chamber Cross-Section (Side View)
           </h4>
-          
+
           <ResponsiveContainer width="100%" height={450}>
             <ComposedChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
-              
+
               <XAxis
                 dataKey="x"
                 type="number"
                 domain={['dataMin', 'dataMax']}
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                label={{ 
-                  value: 'Axial Position (mm)', 
-                  position: 'insideBottom', 
-                  offset: -10, 
-                  fill: 'var(--color-text-secondary)' 
+                label={{
+                  value: 'Axial Position (mm)',
+                  position: 'insideBottom',
+                  offset: -10,
+                  fill: 'var(--color-text-secondary)'
                 }}
               />
-              
+
               <YAxis
                 domain={showLowerHalf ? ['auto', 'auto'] : [0, 'auto']}
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                label={{ 
-                  value: 'Radius (mm)', 
-                  angle: -90, 
-                  position: 'insideLeft', 
-                  fill: 'var(--color-text-secondary)' 
+                label={{
+                  value: 'Radius (mm)',
+                  angle: -90,
+                  position: 'insideLeft',
+                  fill: 'var(--color-text-secondary)'
                 }}
               />
-              
+
               <Tooltip content={<CustomTooltip />} />
-              
+
               {/* Stainless Steel (outermost) - Upper */}
               <Area
                 type="monotone"
@@ -494,7 +274,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 strokeWidth={1.5}
                 name="Stainless Steel"
               />
-              
+
               {/* Graphite (throat region) - Upper */}
               <Area
                 type="monotone"
@@ -505,7 +285,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 strokeWidth={1.5}
                 name="Graphite Insert"
               />
-              
+
               {/* Ablative (chamber region) - Upper */}
               <Area
                 type="monotone"
@@ -516,7 +296,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 strokeWidth={1.5}
                 name="Ablative Liner"
               />
-              
+
               {/* Gas Boundary - Upper */}
               <Area
                 type="monotone"
@@ -527,7 +307,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 strokeWidth={2}
                 name="Gas Boundary"
               />
-              
+
               {/* Lower half (symmetric) */}
               {showLowerHalf && (
                 <>
@@ -569,7 +349,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                   />
                 </>
               )}
-              
+
               {/* Throat position reference line */}
               {dimensions && (
                 <ReferenceLine
@@ -577,15 +357,15 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                   stroke="#ef4444"
                   strokeWidth={2}
                   strokeDasharray="5 5"
-                  label={{ 
-                    value: 'Throat', 
-                    position: 'top', 
+                  label={{
+                    value: 'Throat',
+                    position: 'top',
                     fill: '#ef4444',
                     fontSize: 11,
                   }}
                 />
               )}
-              
+
               {/* Centerline */}
               <ReferenceLine
                 y={0}
@@ -593,9 +373,9 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 strokeWidth={1}
                 strokeDasharray="3 3"
               />
-              
-              <Legend 
-                verticalAlign="top" 
+
+              <Legend
+                verticalAlign="top"
                 height={36}
                 wrapperStyle={{ paddingBottom: '10px' }}
               />
@@ -605,122 +385,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
       )}
 
       {/* CEA-Solved Chamber Contour */}
-      {geometry && chamberContourData.length > 0 && (
-        <div 
-          ref={ceaContourContainerRef}
-          className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]"
-        >
-          <div className="flex items-center justify-between mb-4">
-            <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
-              Chamber Contour (CEA Thermochemistry)
-            </h4>
-            <div className="flex items-center gap-3">
-              {/* Unit switcher */}
-              <div className="flex items-center gap-2 bg-[var(--color-bg-primary)] rounded-lg border border-[var(--color-border)] p-1">
-                <button
-                  onClick={() => setCeaUnit('mm')}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                    ceaUnit === 'mm'
-                      ? 'bg-rose-600 text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                >
-                  mm
-                </button>
-                <button
-                  onClick={() => setCeaUnit('inch')}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                    ceaUnit === 'inch'
-                      ? 'bg-rose-600 text-white'
-                      : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-                  }`}
-                >
-                  in
-                </button>
-              </div>
-              <span className="text-xs px-2 py-1 rounded bg-emerald-500/20 text-emerald-400">
-                Cf = {geometry.Cf?.toFixed(4) ?? 'N/A'}
-              </span>
-            </div>
-          </div>
-          
-          <ResponsiveContainer width="100%" height={350}>
-            <ComposedChart data={chamberContourData} margin={{ top: 20, right: 30, left: 20, bottom: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
-              
-              <XAxis
-                dataKey="x"
-                type="number"
-                domain={ceaContourDomains.xDomain}
-                stroke="var(--color-text-secondary)"
-                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                tickFormatter={(value) => formatTick(value, ceaUnit)}
-                allowDecimals={true}
-                label={{ 
-                  value: ceaContourDomains.xLabel, 
-                  position: 'insideBottom', 
-                  offset: -10, 
-                  fill: 'var(--color-text-secondary)' 
-                }}
-              />
-              
-              <YAxis
-                domain={ceaContourDomains.yDomain}
-                stroke="var(--color-text-secondary)"
-                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                tickFormatter={(value) => formatTick(value, ceaUnit)}
-                allowDecimals={true}
-                label={{ 
-                  value: ceaContourDomains.yLabel, 
-                  angle: -90, 
-                  position: 'insideLeft', 
-                  fill: 'var(--color-text-secondary)' 
-                }}
-              />
-              
-              {/* Chamber contour - Upper */}
-              <Line
-                type="monotone"
-                dataKey="R_chamber_upper"
-                stroke="#10b981"
-                strokeWidth={2.5}
-                dot={false}
-                name="Chamber Contour (CEA)"
-              />
-              
-              {/* Chamber contour - Lower (symmetric) */}
-              {showLowerHalf && (
-                <Line
-                  type="monotone"
-                  dataKey="R_chamber_lower"
-                  stroke="#10b981"
-                  strokeWidth={2.5}
-                  dot={false}
-                  legendType="none"
-                />
-              )}
-              
-              {/* Centerline */}
-              <ReferenceLine
-                y={0}
-                stroke="var(--color-text-secondary)"
-                strokeWidth={1}
-                strokeDasharray="3 3"
-              />
-              
-              <Legend 
-                verticalAlign="top" 
-                height={36}
-                wrapperStyle={{ paddingBottom: '10px' }}
-              />
-            </ComposedChart>
-          </ResponsiveContainer>
-          
-          <p className="text-xs text-[var(--color-text-secondary)] mt-2">
-            Full chamber contour (cylindrical + contraction + nozzle) solved using CEA thermochemistry for accurate Cf.
-          </p>
-        </div>
-      )}
+      <ChamberContourPlot geometry={geometry} />
 
       {/* Dimensions Table */}
       {geometry && dimensions && (
@@ -728,7 +393,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
           <h4 className="text-sm font-semibold text-[var(--color-text-primary)] mb-4">
             Chamber Dimensions
           </h4>
-          
+
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Chamber Length</p>
@@ -736,63 +401,63 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 {dimensions.L_chamber_mm.toFixed(1)} mm
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Nozzle Length</p>
               <p className="text-lg font-semibold text-[var(--color-text-primary)]">
                 {dimensions.L_nozzle_mm.toFixed(1)} mm
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Chamber Diameter</p>
               <p className="text-lg font-semibold text-[var(--color-text-primary)]">
                 {dimensions.D_chamber_mm.toFixed(1)} mm
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Throat Diameter</p>
               <p className="text-lg font-semibold text-rose-400">
                 {dimensions.D_throat_mm.toFixed(1)} mm
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Exit Diameter</p>
               <p className="text-lg font-semibold text-[var(--color-text-primary)]">
                 {dimensions.D_exit_mm.toFixed(1)} mm
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Expansion Ratio</p>
               <p className="text-lg font-semibold text-[var(--color-text-primary)]">
                 {geometry.expansion_ratio.toFixed(2)}
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Ablative Cooling</p>
               <p className={`text-lg font-semibold ${geometry.ablative_enabled ? 'text-green-400' : 'text-gray-500'}`}>
                 {geometry.ablative_enabled ? 'Enabled' : 'Disabled'}
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Graphite Insert</p>
               <p className={`text-lg font-semibold ${geometry.graphite_enabled ? 'text-green-400' : 'text-gray-500'}`}>
                 {geometry.graphite_enabled ? 'Enabled' : 'Disabled'}
               </p>
             </div>
-            
+
             <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">Nozzle Type</p>
               <p className="text-lg font-semibold text-blue-400">
                 {geometry.nozzle_method.includes('rao') ? 'Rao Bell (80%)' : 'Conical'}
               </p>
             </div>
-            
+
             {geometry.Cf !== null && (
               <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
                 <p className="text-xs text-[var(--color-text-secondary)]">Thrust Coeff (Cf)</p>
@@ -801,7 +466,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 </p>
               </div>
             )}
-            
+
             {geometry.Cf_ideal !== null && (
               <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
                 <p className="text-xs text-[var(--color-text-secondary)]">Cf Ideal (CEA)</p>
@@ -810,7 +475,7 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
                 </p>
               </div>
             )}
-            
+
             {geometry.A_throat_solved !== null && (
               <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
                 <p className="text-xs text-[var(--color-text-secondary)]">A_throat (solved)</p>

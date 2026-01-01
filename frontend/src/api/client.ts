@@ -562,6 +562,7 @@ export interface ChamberGeometryResponse {
   Cf: number | null;
   Cf_ideal: number | null;
   A_throat_solved: number | null;
+  chamber_contour_method: string | null;  // "solved" or "cea_iterative"
 }
 
 export async function getChamberGeometry(): Promise<ApiResponse<ChamberGeometryResponse>> {
