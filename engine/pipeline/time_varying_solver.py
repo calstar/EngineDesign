@@ -582,14 +582,17 @@ class TimeVaryingCoupledSolver:
                 calculate_nozzle_melting,
             )
             
-            # Nozzle exit velocity and efficiency (already have v_exit, but calculate efficiency)
+            # Get nozzle efficiency from config
+            nozzle_eff_config = getattr(config_current.chamber_geometry, 'nozzle_efficiency', 0.92)
+            
+            # Nozzle exit velocity and efficiency (now geometry-driven)
             nozzle_velocity_results = calculate_nozzle_exit_velocity(
                 Pc=Pc,
                 Tc=Tc,
                 gamma=gamma_exit,
                 R=R_exit,
                 expansion_ratio=eps_new,
-                P_exit=P_exit,
+                nozzle_efficiency=nozzle_eff_config,
                 P_ambient=101325.0,
             )
             nozzle_efficiency = nozzle_velocity_results["efficiency"]

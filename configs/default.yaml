@@ -275,25 +275,6 @@ chamber_geometry:
   length_contraction: 0.0451      # Contraction section length [m]
   Cf: 1.70                        # UPDATED design-point Cf
 
-
-# # Legacy sections (for backward compatibility with existing code)
-# chamber:
-#   volume: 0.001244586
-#   A_throat: 0.001037155
-#   length: 0.1423623
-#   Lstar: 1.11
-#   chamber_inner_diameter: 0.12065
-#   exit_diameter: 0.101
-#   design_pressure: 4481594.0
-#   design_thrust: 7000.0
-#   design_MR: 2.55
-#   design_force_coefficient: 1.505989588378393
-# nozzle:
-#   A_throat: 0.001037155
-#   A_exit: 0.00810732
-#   expansion_ratio: 7.8169
-#   exit_diameter: 0.101
-#   efficiency: 0.95
 solver:
   method: brentq
   Pc_bounds:
@@ -389,3 +370,20 @@ environment:
   # p_amb removed - RocketPy uses GFS atmospheric forecast
 thrust:
   burn_time: 10.0
+optimizer:
+  mode: hybrid_cma_blocks
+  hybrid:
+    elite_k: 50
+    block_method: corr_greedy
+    num_blocks: 3
+    overlap_fraction: 0.0
+    cycles: 3
+    lambda0: 0.001
+    lambda_mult: 10.0
+    lambda_max: 1.0
+    lambda_normalize: true
+    per_block_budget_fraction: 0.5
+    refresh_every_pass: true
+    refresh_budget_fraction: 0.1
+    refresh_sigma_scale: 0.2
+    num_tracks: 1

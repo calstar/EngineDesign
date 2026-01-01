@@ -267,7 +267,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
   // Custom dot renderer: lower objective value = larger dot (log-scaled)
   const renderDot = useMemo(() => {
     const minSize = 5;  // Largest dot size (for best/lowest values)
-    const maxSize = 0.1;  // Smallest dot size (for worst/highest values)
+    const maxSize = 0.2;  // Smallest dot size (for worst/highest values)
     
     // Pre-calculate log values for efficiency
     const logMinObj = Math.log(minObj);
@@ -282,7 +282,12 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
       }
       
       if (logRange === 0 || minObj === maxObj) {
-        return <circle cx={cx} cy={cy} r={minSize} fill="#3b82f6" />;
+        // Check if this point represents a new best
+        const isBest = payload.best_objective !== undefined && 
+                       typeof payload.best_objective === 'number' &&
+                       Math.abs(payload.objective - payload.best_objective) < 1e-10;
+        const fillColor = isBest ? "#ef4444" : "#3b82f6";
+        return <circle cx={cx} cy={cy} r={minSize} fill={fillColor} />;
       }
       
       // Log-scaled inverse: lower value gets larger size
@@ -291,7 +296,13 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
       const normalized = (logMaxObj - logValue) / logRange;
       const radius = maxSize + (minSize - maxSize) * normalized;
       
-      return <circle cx={cx} cy={cy} r={radius} fill="#3b82f6" />;
+      // Check if this point represents a new best (objective equals best_objective)
+      const isBest = payload.best_objective !== undefined && 
+                     typeof payload.best_objective === 'number' &&
+                     Math.abs(payload.objective - payload.best_objective) < 1e-10;
+      const fillColor = isBest ? "#ef4444" : "#3b82f6"; // Red for best, blue for others
+      
+      return <circle cx={cx} cy={cy} r={radius} fill={fillColor} />;
     };
   }, [minObj, maxObj]);
 
@@ -415,13 +426,6 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
               disabled={isRunning}
             />
             <p className="text-xs text-[var(--color-text-secondary)] mt-1">Acceptable deviation from target thrust</p>
-          </div>
-
-          {/* Info message about  hardcoded max_iterations */}
-          <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
-            <p className="text-xs text-blue-400">
-              ℹ️ Max iterations is automatically tuned (150 iterations with 2-3 restarts) for consistent robust convergence.
-            </p>
           </div>
         </div>
       </div>
@@ -613,13 +617,21 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                 decimals={1}
                 color="green"
               />
-              <ResultCard
-                label="Exit Pressure"
-                value={results.performance.P_exit ? (results.performance.P_exit as number) / 6894.76 : undefined}
-                unit="psi"
-                decimals={1}
-                color="cyan"
-              />
+              {/* Exit Pressure with target display */}
+              <div className="rounded-lg p-3 border bg-cyan-500/10 border-cyan-500/30">
+                <p className="text-xs text-[var(--color-text-secondary)] mb-1">Exit Pressure</p>
+                <p className="text-lg font-bold text-cyan-400">
+                  {results.performance.P_exit
+                    ? ((results.performance.P_exit as number) / 6894.76).toFixed(1)
+                    : '-'}
+                  <span className="text-sm font-normal text-[var(--color-text-secondary)] ml-1">psi</span>
+                  {results.performance.target_P_exit !== undefined && results.performance.target_P_exit !== null && (
+                    <span className="text-xs font-normal text-[var(--color-text-secondary)] ml-1">
+                      (Target: {((results.performance.target_P_exit as number) / 6894.76).toFixed(1)} psi)
+                    </span>
+                  )}
+                </p>
+              </div>
               <ResultCard
                 label="Thrust Coefficient"
                 value={results.performance.Cf || results.performance.Cf_actual}

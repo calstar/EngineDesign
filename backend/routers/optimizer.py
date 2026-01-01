@@ -305,8 +305,14 @@ async def run_layer1(
             app_state.config = optimized_config
             
             # Store results (convert numpy types for JSON serialization)
+            performance = results.get("performance", {})
+            # Add target exit pressure to performance for easy access
+            exit_pressure_targeting = results.get("exit_pressure_targeting", {})
+            if exit_pressure_targeting.get("target_P_exit") is not None:
+                performance["target_P_exit"] = exit_pressure_targeting["target_P_exit"]
+            
             results_dict = convert_numpy({
-                "performance": results.get("performance", {}),
+                "performance": performance,
                 "validation": results.get("validation", {}),
                 "geometry": results.get("optimized_parameters", {}),
                 "objective_history": objective_history,

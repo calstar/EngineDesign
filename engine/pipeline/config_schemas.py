@@ -685,6 +685,46 @@ class DesignRequirementsConfig(BaseModel):
     copv_free_volume_m3: Optional[float] = Field(default=None, gt=0, description="COPV free volume [m³] (auto-converted from L if None)")
 
 
+class HybridOptimizerConfig(BaseModel):
+    """Configuration for Hybrid CMA + Block Re-optimization"""
+    elite_k: int = Field(default=50, gt=0, description="Size of elite pool for block building")
+    
+    block_method: Literal["random", "corr_greedy"] = Field(
+        default="random",
+        description="Method to build variable blocks: 'random' or 'corr_greedy' (correlation-based)"
+    )
+    num_blocks: int = Field(default=3, gt=0, description="Number of blocks")
+    overlap_fraction: float = Field(default=0.0, ge=0.0, le=0.5, description="Fraction of block indices that overlap with the previous block")
+    
+    cycles: int = Field(default=3, gt=0, description="Number of re-optimization cycles")
+    
+    # Soft freezing / Penalty parameters
+    lambda0: float = Field(default=1e-3, gt=0, description="Initial penalty weight base")
+    lambda_mult: float = Field(default=10.0, gt=1.0, description="Multiplier for lambda per cycle")
+    lambda_max: float = Field(default=1.0, gt=0, description="Maximum lambda (relative to f-scale)")
+    lambda_normalize: bool = Field(default=True, description="Normalize lambda using objective function scale magnitude")
+    
+    # Budgeting
+    per_block_budget_fraction: float = Field(default=0.5, gt=0.0, le=0.9, description="Fraction of TOTAL budget allocated to block optimization cycles")
+    
+    # Global Refresh
+    refresh_every_pass: bool = Field(default=True, description="Run a global refresh after every full pass of blocks")
+    refresh_budget_fraction: float = Field(default=0.1, gt=0.0, le=1.0, description="Fraction of initial global budget for each refresh")
+    refresh_sigma_scale: float = Field(default=0.2, gt=0.0, le=1.0, description="Scale of sigma for refresh relative to initial sigma")
+    
+    # Multi-track
+    num_tracks: int = Field(default=1, gt=0, description="Number of independent optimization tracks")
+
+
+class OptimizerConfig(BaseModel):
+    """Main Optimizer Configuration"""
+    mode: Literal["cma", "hybrid_cma_blocks"] = Field(
+        default="cma",
+        description="Optimization mode: 'cma' (baseline) or 'hybrid_cma_blocks'"
+    )
+    hybrid: Optional[HybridOptimizerConfig] = Field(default=None, description="Configuration for hybrid mode")
+
+
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
     fluids: dict[str, FluidConfig]
@@ -704,6 +744,7 @@ class PintleEngineConfig(BaseModel):
     chamber: Optional[ChamberConfig] = Field(default=None, description="Legacy chamber config (use chamber_geometry instead)")
     nozzle: Optional[NozzleConfig] = Field(default=None, description="Legacy nozzle config (use chamber_geometry instead)")
     solver: SolverConfig = Field(default_factory=SolverConfig)
+    optimizer: Optional[OptimizerConfig] = Field(default=None, description="Optimizer configuration")
     # Flight simulation fields (optional)
     lox_tank: Optional[LOXTankConfig] = Field(default=None, description="LOX tank configuration for flight simulation")
     fuel_tank: Optional[FuelTankConfig] = Field(default=None, description="Fuel tank configuration for flight simulation")
@@ -801,4 +842,3 @@ def ensure_chamber_geometry(config: PintleEngineConfig) -> ChamberGeometryConfig
     )
     
     return config.chamber_geometry
-

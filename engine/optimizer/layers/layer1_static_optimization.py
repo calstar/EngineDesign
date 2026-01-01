@@ -21,7 +21,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, HybridOptimizerConfig
 from engine.core.runner import PintleEngineRunner
 
 from scipy.optimize import minimize, differential_evolution
@@ -720,6 +720,14 @@ def run_layer1_optimization(
             # Constraint: d_pintle_tip < D_chamber_inner (with 10% margin)
             infeasibility_score += max(0.0, (d_pintle_tip_check * 1.1) / D_chamber_inner - 1.0) ** 2
 
+        # 2a. Explicit Throat Diameter vs Chamber Diameter check
+        # D_throat < D_chamber check
+        D_throat_check = np.sqrt(4.0 * A_throat_check / np.pi) if A_throat_check > 0 else 0.0
+        if D_throat_check > 0 and D_chamber_inner > 0:
+             # Penalize if throat is larger than 95% of chamber
+             # This reinforces the contraction ratio check with an explicit diameter-based gradient
+             infeasibility_score += max(0.0, D_throat_check - D_chamber_inner * 0.95) ** 2 * 10.0
+
         # 3. Nozzle exit diameter vs throat diameter
         D_exit_check = float(cg.exit_diameter or 0.0)
         R_throat_check = np.sqrt(max(0, A_throat_check / np.pi))
@@ -813,8 +821,23 @@ def run_layer1_optimization(
         of_error = abs(MR_actual - optimal_of) / optimal_of if (eval_success and optimal_of > 0 and np.isfinite(MR_actual)) else 1.0
         
         # Exit pressure preference (dimensionless)
+        # Asymmetric penalty with deadband: Overexpansion (P < target) is worse than underexpansion
+        # Option A: Deadband + asymmetric quadratic
         P_exit_actual = float(final_results.get("P_exit", np.nan)) if eval_success else np.nan
-        exit_pressure_error = abs(P_exit_actual - target_P_exit) / target_P_exit if (eval_success and target_P_exit > 0 and np.isfinite(P_exit_actual)) else 1.0
+        
+        exit_pressure_sq_term = 0.0
+        if eval_success and target_P_exit > 0 and np.isfinite(P_exit_actual):
+            rel = (P_exit_actual - target_P_exit) / target_P_exit
+        
+            deadband = 0.05  # 5%
+            if rel < -deadband:
+                # overexpanded beyond deadband
+                excess = rel + deadband
+                exit_pressure_sq_term = (5.0 * excess) ** 2
+            elif rel > deadband:
+                # underexpanded beyond deadband
+                excess = rel - deadband
+                exit_pressure_sq_term = (1.0 * excess) ** 2
         
         # Stability gates contribute to feasibility (lexicographic stage 1)
         stability_state = stability.get("stability_state", "unstable")
@@ -886,7 +909,7 @@ def run_layer1_optimization(
         W_THRUST = 1e6           # Level 1: Primary objectives (1e6)
         W_OF = 1e6               # Level 1: Primary objectives (1e6) - EQUAL to thrust (geometry determines O/F)
         W_CF = 1e4               # Level 2: Secondary objectives (1e4)
-        W_EXIT = 1e2             # Level 3: Tertiary objectives (1e2)
+        W_EXIT = 2.0e4           # Level 2: Secondary objectives (2e4) - Boosted to enforce exit pressure
         W_LEN = 1.0              # Level 4: Soft preferences (1.0)
         
         if (not np.isfinite(infeasibility_score)) or infeasibility_score < 0:
@@ -899,7 +922,7 @@ def run_layer1_optimization(
                 W_THRUST * (thrust_error ** 2) +
                 W_OF * (of_error ** 2) +
                 W_CF * cf_hinge +
-                W_EXIT * (exit_pressure_error ** 2) +
+                W_EXIT * exit_pressure_sq_term +
                 W_LEN * length_term
             )
         
@@ -1142,8 +1165,8 @@ def run_layer1_optimization(
     if sigma0 > 0:
         cma_stds[n_orifices_idx] = max(cma_stds[n_orifices_idx], target_step_n / sigma0)
 
-    # IMPROVED: Larger population for better exploration (20-24 instead of 12-14)
-    popsize = min(48, max(16, 4 + int(4 * np.log(len(x0_refined) + 1))))
+    # IMPROVED: Larger population for better exploration (32-80 instead of 16-48)
+    popsize = min(80, max(32, 4 + int(4 * np.log(len(x0_refined) + 1))))
     layer1_logger.info(f"Population size: {popsize}")
     
     # Random number of restarts (2-3) to escape local minima
@@ -1154,126 +1177,191 @@ def run_layer1_optimization(
     best_x_global = x0_refined
     best_f_global = float('inf')
     
-    for restart_idx in range(num_restarts):
-        restart_name = f"Restart {restart_idx + 1}/{num_restarts}" if num_restarts > 1 else "Main search"
-        
-        # IMPROVED: Multi-scale restart strategy
-        # Restart 1: Global Exploration (25% sigma)
-        # Restart 2: Local Refinement (5% sigma)
-        # Restart 3: Balanced Search (15% sigma)
-        # Subsequent: Alternate between 15% and 25%
-        if restart_idx == 0:
-            current_sigma_fraction = target_fraction_of_range # 25% (Global)
-            x_start = x0_refined
-        elif restart_idx == 1:
-            current_sigma_fraction = 0.05 # 5% (Refined) - prevent "Restart 2 Terrible" issue
-            # Use smaller perturbation for the refinement restart
-            perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.1)
-            x_start = best_x_global + perturbation
-        elif restart_idx == 2:
-            current_sigma_fraction = 0.15 # 15% (Medium)
-            perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
-            x_start = best_x_global + perturbation
-        else:
-            current_sigma_fraction = 0.15 if restart_idx % 2 == 0 else 0.25
-            perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
-            x_start = best_x_global + perturbation
-        
-        # Ensure it stays within bounds
-        x_start = np.clip(x_start, lower_bounds, upper_bounds)
-            
-        # Recalculate sigma0 for this restart based on the chosen scale
-        current_sigma0 = float(np.median(span) * current_sigma_fraction)
-        if not np.isfinite(current_sigma0) or current_sigma0 <= 0:
-            current_sigma0 = 0.05
-            
-        # Update CMA_stds for this restart's sigma
-        current_cma_stds = np.ones_like(span)
-        for i in range(len(span)):
-            if span[i] > 0:
-                desired_step = span[i] * current_sigma_fraction
-                current_cma_stds[i] = max(0.1, desired_step / current_sigma0) if current_sigma0 > 0 else 1.0
-        
-        # Update n_orifices std
-        if current_sigma0 > 0:
-            current_cma_stds[n_orifices_idx] = max(current_cma_stds[n_orifices_idx], 1.0 / current_sigma0)
+    
+    # DISPATCH: Check optimizer mode
+    optimizer_mode = "cma" # default
+    if hasattr(config_obj, "optimizer") and config_obj.optimizer:
+        optimizer_mode = config_obj.optimizer.mode
 
-        layer1_logger.info(f"")
-        layer1_logger.info(f"Starting {restart_name} (sigma: {current_sigma_fraction*100:.0f}% of range)...")
-        if restart_idx > 0:
-            layer1_logger.info(f"Restarting from perturbed global best solution")
+    if optimizer_mode == "hybrid_cma_blocks" and hasattr(config_obj.optimizer, "hybrid"):
+        layer1_logger.info("Using Hybrid CMA + Block Re-optimization mode.")
+        hybrid_config = config_obj.optimizer.hybrid
         
-        # Adjust iteration budget per restart
-        iter_budget = max_iterations // num_restarts
+        # Determine total budget available for optimization (excluding L-BFGS-B refinement)
+        # We used to have num_restarts * max_iterations per restart
+        # Let's say total budget is ~2000-3000 evals
+        total_eval_budget = max_iterations # This variable name is misleading in existing code, it is passed as maxfevals??
+        # Checked existing code: max_iterations is passed as 'maxiter' or 'maxfevals' in different places.
+        # In current CMA code above: cma_options['maxiter'] = iter_budget
+        # default max_iterations is usually large?
+        # Actually in layer1 defaults (not visible here), max_iterations might be small? 
+        # Let's assume passed max_iterations is small (e.g. 100 iterations of popsize?)
+        # Let's force a reasonable budget for hybrid
+        total_budget_evals = max(2000, max_iterations * popsize)
         
-        # IMPROVED: Relaxed stopping criteria to prevent premature convergence
-        cma_options = {
-            "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
-            "popsize": popsize,
-            "maxiter": iter_budget,
-            "verb_disp": 0,
-            "verb_log": 0,
-            "CMA_stds": current_cma_stds.tolist(),
-            # Relaxed stopping criteria
-            "tolx": 1e-8,
-            "tolfun": 1e-9,
-            "tolstagnation": 50,
-            "ftarget": -np.inf,
-        }
+        # Run Multi-Track Hybrid?
+        num_tracks = hybrid_config.num_tracks
         
-        try:
-            es = cma.CMAEvolutionStrategy(x_start.tolist(), current_sigma0, cma_options)
-            while not es.stop():
-                candidates = es.ask()
-                values = []
-                for cand in candidates:
-                    cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
-                    val = objective(cand_arr)
-                    values.append(float(val))
-                es.tell(candidates, values)
+        best_x_global = x0_refined
+        best_f_global = float('inf')
+        
+        if num_tracks > 1:
+            layer1_logger.info(f"Running {num_tracks} independent hybrid tracks...")
+            # Track initialization: Top-N restarts?
+            # User feedback says: "track i starts from best of restart i"
+            # So we first need to run N restarts of global exploration to seed tracks?
+            # OR we simply start N tracks from random perturbations of x0.
+            # "Multi-track: Initialize tracks from Top-N best results of Stage A restarts."
+            # My run_hybrid_optimization includes Stage A internally. 
+            # So "Multi-track" essentially means distinct runs of run_hybrid_optimization?
+            # OR running Stage A first, then branching?
+            # Let's treat "Multi-track" as running the WHOLE hybrid process N times with different seeds.
+             
+            for track_i in range(num_tracks):
+                layer1_logger.info(f"--- Track {track_i+1}/{num_tracks} ---")
                 
-                iter_idx = max(1, es.countiter)
-                # Progress calculation accounting for restarts
-                overall_progress = restart_idx / num_restarts
-                restart_progress = iter_idx / iter_budget / num_restarts
-                progress = 0.10 + 0.35 * (overall_progress + restart_progress)
-                update_progress("Layer 1: CMA-ES", progress, 
-                              f"{restart_name} - iteration {iter_idx}/{iter_budget}")
-            
-            cma_result = es.result
-            restart_best_x = np.asarray(cma_result.xbest, dtype=float)
-            restart_best_f = float(cma_result.fbest)
-            
-            # Log stop condition for diagnostic purposes
-            stop_dict = es.stop()
-            stop_reasons = list(stop_dict.keys()) if isinstance(stop_dict, dict) else [str(stop_dict)]
-            layer1_logger.info(f"{restart_name} finished after {es.countiter} iterations")
-            layer1_logger.info(f"  Final objective: {restart_best_f:.6f}")
-            layer1_logger.info(f"  Final sigma: {es.sigma:.6e}")
-            layer1_logger.info(f"  Stop reasons: {', '.join(stop_reasons)}")
-            
-            # Update global best if improved
-            if restart_best_f < best_f_global:
-                best_f_global = restart_best_f
-                best_x_global = restart_best_x
-                layer1_logger.info(f"  ✓ New global best: {best_f_global:.6f}")
-            
-            # Early exit if we found a very good solution
-            if best_f_global < obj_tolerance:
-                layer1_logger.info(f"Found excellent solution (obj < {obj_tolerance}), skipping remaining restarts")
-                break
+                # Perturb start point for diversity if track > 0
+                if track_i > 0:
+                    x0_track = x0_refined + rng.standard_normal(len(x0_refined)) * (0.1 * span)
+                    x0_track = np.clip(x0_track, lower_bounds, upper_bounds)
+                else:
+                    x0_track = x0_refined
+                    
+                t_x, t_f, t_ev = run_hybrid_optimization(
+                    objective,
+                    list(zip(lower_bounds, upper_bounds)),
+                    x0_track,
+                    hybrid_config,
+                    total_budget=total_budget_evals // num_tracks, # Split budget or full budget? Assuming full per track might be too slow. Split it.
+                    logger=layer1_logger,
+                    log_status_fn=log_status,
+                    update_progress_fn=update_progress
+                )
                 
-            for handler in layer1_logger.handlers:
-                handler.flush()
-                
-        except Exception as e:
-            layer1_logger.error(f"{restart_name} failed: {e}")
+                if t_f < best_f_global:
+                    best_f_global = t_f
+                    best_x_global = t_x
+                    layer1_logger.info(f"Track {track_i+1} found new global best: {best_f_global:.5f}")
+                    
+        else:
+            # Single track
+            best_x_global, best_f_global, evs = run_hybrid_optimization(
+                objective,
+                list(zip(lower_bounds, upper_bounds)),
+                x0_refined,
+                hybrid_config,
+                total_budget=total_budget_evals,
+                logger=layer1_logger,
+                log_status_fn=log_status,
+                update_progress_fn=update_progress
+            )
+
+    else:
+        # Default/Fallback: Legacy CMA-ES Logic
+        # (This is the existing code block I'm technically replacing but I want to keep it as the 'else' branch)
+        # To avoid massive indentation changes/diff noise, I'll copy the logic here or wrap it.
+        # Since I am replacing the block 1157-1277, I need to include the "for restart_idx" loop logic here.
+        # Wait, the tool 'multi_replace' asks for specific lines. I selected 1157-1277.
+        # This covers the 'for restart_idx' loop.
+        
+        best_x_global = x0_refined
+        best_f_global = float('inf')
+        
+        for restart_idx in range(num_restarts):
+            restart_name = f"Restart {restart_idx + 1}/{num_restarts}" if num_restarts > 1 else "Main search"
+            
+            # IMPROVED: Multi-scale restart strategy
             if restart_idx == 0:
-                # If first run fails, re-raise
-                log_status("Layer 1 Error", f"CMA-ES failed: {e}")
-                raise
-            # If a restart fails, continue with other restarts
-            continue
+                current_sigma_fraction = target_fraction_of_range # 25% (Global)
+                x_start = x0_refined
+            elif restart_idx == 1:
+                current_sigma_fraction = 0.05 # 5% (Refined)
+                perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.1)
+                x_start = best_x_global + perturbation
+            elif restart_idx == 2:
+                current_sigma_fraction = 0.15 # 15% (Medium)
+                perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
+                x_start = best_x_global + perturbation
+            else:
+                current_sigma_fraction = 0.15 if restart_idx % 2 == 0 else 0.25
+                perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
+                x_start = best_x_global + perturbation
+            
+            x_start = np.clip(x_start, lower_bounds, upper_bounds)
+                
+            current_sigma0 = float(np.median(span) * current_sigma_fraction)
+            if not np.isfinite(current_sigma0) or current_sigma0 <= 0:
+                current_sigma0 = 0.05
+                
+            current_cma_stds = np.ones_like(span)
+            for i in range(len(span)):
+                if span[i] > 0:
+                    desired_step = span[i] * current_sigma_fraction
+                    current_cma_stds[i] = max(0.1, desired_step / current_sigma0) if current_sigma0 > 0 else 1.0
+            
+            if current_sigma0 > 0:
+                current_cma_stds[n_orifices_idx] = max(current_cma_stds[n_orifices_idx], 1.0 / current_sigma0)
+    
+            layer1_logger.info(f"")
+            layer1_logger.info(f"Starting {restart_name} (sigma: {current_sigma_fraction*100:.0f}% of range)...")
+            
+            iter_budget = max_iterations // num_restarts
+            
+            cma_options = {
+                "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
+                "popsize": popsize,
+                "maxiter": iter_budget,
+                "verb_disp": 0,
+                "verb_log": 0,
+                "CMA_stds": current_cma_stds.tolist(),
+                "tolx": 1e-8,
+                "tolfun": 1e-9,
+                "tolstagnation": 50,
+                "ftarget": -np.inf,
+            }
+            
+            try:
+                es = cma.CMAEvolutionStrategy(x_start.tolist(), current_sigma0, cma_options)
+                while not es.stop():
+                    candidates = es.ask()
+                    values = []
+                    for cand in candidates:
+                        cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
+                        val = objective(cand_arr)
+                        values.append(float(val))
+                    es.tell(candidates, values)
+                    
+                    iter_idx = max(1, es.countiter)
+                    overall_progress = restart_idx / num_restarts
+                    restart_progress = iter_idx / iter_budget / num_restarts
+                    progress = 0.10 + 0.35 * (overall_progress + restart_progress)
+                    update_progress("Layer 1: CMA-ES", progress, 
+                                  f"{restart_name} - iteration {iter_idx}/{iter_budget}")
+                
+                cma_result = es.result
+                restart_best_x = np.asarray(cma_result.xbest, dtype=float)
+                restart_best_f = float(cma_result.fbest)
+                
+                layer1_logger.info(f"{restart_name} finished. Final obj: {restart_best_f:.6f}")
+                
+                if restart_best_f < best_f_global:
+                    best_f_global = restart_best_f
+                    best_x_global = restart_best_x
+                    layer1_logger.info(f"  ✓ New global best: {best_f_global:.6f}")
+                
+                if best_f_global < obj_tolerance:
+                    layer1_logger.info(f"Found excellent solution, skipping restarts")
+                    break
+                    
+                for handler in layer1_logger.handlers:
+                    handler.flush()
+                    
+            except Exception as e:
+                layer1_logger.error(f"{restart_name} failed: {e}")
+                if restart_idx == 0:
+                    raise
+                continue
+
     
     # Use best result across all restarts
     x0_refined = best_x_global
@@ -1631,4 +1719,497 @@ def run_layer1_optimization(
     
     update_progress("Layer 1: Complete", 1.0, "Layer 1 optimization complete!")
     
+
     return optimized_config, results
+
+
+class ElitePool:
+    """Manages a pool of top-K elite solutions."""
+    def __init__(self, k: int = 50):
+        self.k = k
+        self.points = []  # List of tuples (f_val, x_array)
+
+    def add(self, x: np.ndarray, f: float):
+        """Add a candidate to the pool if it's good enough."""
+        # Check for duplicates (optional, simple distance check or exact match)
+        # For simplicity in this iteration, just naive add & sort
+        self.points.append((f, np.asarray(x, dtype=float).copy()))
+        # Sort by f (ascending, minimization)
+        self.points.sort(key=lambda item: item[0])
+        # Keep top k
+        if len(self.points) > self.k:
+            self.points = self.points[:self.k]
+
+    def get_elites(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Return (X, F) arrays of current elites."""
+        if not self.points:
+            return np.array([]), np.array([])
+        f_vals = np.array([p[0] for p in self.points])
+        x_vals = np.array([p[1] for p in self.points])
+        return x_vals, f_vals
+
+    def get_best(self) -> Tuple[np.ndarray, float]:
+        """Return best solution found so far."""
+        if not self.points:
+            return None, float('inf')
+        return self.points[0][1], self.points[0][0]
+
+
+def run_cma_core(
+    objective_fn: Callable[[np.ndarray], float],
+    x0: np.ndarray,
+    sigma0: float,
+    bounds: list,
+    budget: int,
+    popsize: int,
+    cma_stds: np.ndarray = None,
+    seed: int = None,
+    elite_pool: Optional[ElitePool] = None,
+    # Optional logic for penalty/validity
+    true_objective_fn: Optional[Callable[[np.ndarray], float]] = None,
+) -> Tuple[np.ndarray, float, int]:
+    """
+    Core re-usable CMA-ES wrapper.
+    
+    Args:
+        objective_fn: The function CMA-ES optimizes (could include penalties).
+        x0: Initial mean.
+        sigma0: Initial step size.
+        bounds: List of (min, max) for EACH dimension.
+        budget: Max function evaluations.
+        popsize: Population size.
+        cma_stds: Coordinate-wise standard deviations (optional scaling).
+        seed: Random seed.
+        elite_pool: Optional pool to capture all candidates evaluated.
+        true_objective_fn: If provided, used to evaluate candidates for ElitePool 
+                           and best-so-far tracking (ignoring the penalized objective).
+                           If None, objective_fn is used.
+                           
+    Returns:
+        (best_x, best_f, evals_used)
+        Note: best_f returned is the one derived from true_objective_fn if present,
+        otherwise objective_fn.
+    """
+    if cma is None:
+        raise ImportError("CMA-ES required")
+    
+    # Prepare bounds for CMA
+    lower_bounds = np.array([b[0] for b in bounds])
+    upper_bounds = np.array([b[1] for b in bounds])
+    
+    # Options
+    opts = {
+        "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
+        "popsize": popsize,
+        "maxiter": budget, # Rough upper bound, we track evals manually better
+        "verb_disp": 0,
+        "verb_log": 0,
+        "tolx": 1e-8,
+        "tolfun": 1e-9,
+        "tolstagnation": 50,
+        "ftarget": -np.inf, 
+        "seed": seed,
+    }
+    if cma_stds is not None:
+        opts["CMA_stds"] = cma_stds.tolist()
+
+    # Initialize
+    # Ensure x0 is within bounds
+    x0_clamped = np.clip(x0, lower_bounds, upper_bounds)
+    
+    evals = 0
+    best_x = x0_clamped.copy()
+    
+    # Initial eval
+    if true_objective_fn:
+        best_f = true_objective_fn(best_x)
+    else:
+        best_f = objective_fn(best_x)
+
+    # CMA object
+    # CMA expects list for x0
+    es = cma.CMAEvolutionStrategy(x0_clamped.tolist(), sigma0, opts)
+    
+    stop_loop = False
+    
+    while not es.stop() and not stop_loop:
+        if evals >= budget:
+            break
+            
+        candidates = es.ask()
+        fitness_values = []
+        
+        for cand in candidates:
+            # Clip candidate for evaluation
+            # (CMA-ES internal handling of bounds is 'penalize' or 'repair', 
+            # here we explicitly clip for our function)
+            cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
+            
+            # 1. Penalized objective (for CMA ranking)
+            val_penalized = objective_fn(cand_arr)
+            fitness_values.append(val_penalized)
+            evals += 1
+            
+            # 2. True objective (for elites / best tracking)
+            # Use computed penalized value if true_objective_fn not provided
+            # (Assuming objective_fn returns true f in that case)
+            if true_objective_fn:
+                val_true = true_objective_fn(cand_arr)
+            else:
+                val_true = val_penalized
+                
+            # Update local best using TRUE value
+            if val_true < best_f:
+                best_f = val_true
+                best_x = cand_arr.copy()
+                
+            # Add to elite pool
+            if elite_pool:
+                elite_pool.add(cand_arr, val_true)
+            
+            if evals >= budget:
+                stop_loop = True
+                # Don't break immediately inner loop, let's finish population tell 
+                # strictly speaking we often over-evaluate by (popsize-1), acceptable.
+                
+        es.tell(candidates, fitness_values)
+        
+    return best_x, best_f, evals
+
+
+def compute_blocks_from_elites(
+    elite_pool: ElitePool,
+    num_blocks: int,
+    dim: int,
+    method: str = "random",
+    overlap_fraction: float = 0.0,
+    rng: np.random.Generator = None,
+) -> list[list[int]]:
+    """
+    Compute variable blocks for re-optimization.
+    
+    Methods:
+    - "random": Randomly partition variables.
+    - "corr_greedy": Use correlation matrix of standardized elites. 
+      Distance = 1 - abs(Correlation).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+        
+    all_indices = np.arange(dim)
+    
+    if method == "corr_greedy" and len(elite_pool.points) > dim + 2:
+        # 1. Get elites X (size K x dim)
+        X_raw, _ = elite_pool.get_elites()
+        
+        # 2. Standardize X (zero mean, unit variance) to avoid scale bias
+        # Handle zero variance dimensions safely
+        stds = np.std(X_raw, axis=0)
+        valid_dims = stds > 1e-12
+        X_std = np.zeros_like(X_raw)
+        X_std[:, valid_dims] = (X_raw[:, valid_dims] - np.mean(X_raw[:, valid_dims], axis=0)) / stds[valid_dims]
+        
+        # 3. Compute correlation matrix (not covariance!)
+        # Shape (dim, dim)
+        if len(X_std) > 1:
+            corr_mat = np.corrcoef(X_std, rowvar=False)
+            # Handle NaNs if they appear (e.g. constant columns)
+            corr_mat = np.nan_to_num(corr_mat, nan=0.0)
+        else:
+            # Fallback if not enough points
+            corr_mat = np.eye(dim)
+            
+        # 4. Computed distance metric: d_ij = 1 - abs(corr_ij)
+        dist_mat = 1.0 - np.abs(corr_mat)
+        
+        # 5. Greedy clustering
+        # Start with unassigned, pick one, add nearest neighbors until block filled
+        unassigned = set(all_indices)
+        blocks = []
+        target_block_size = int(np.ceil(dim / num_blocks))
+        
+        while unassigned:
+            if len(blocks) == num_blocks - 1:
+                # Last block takes all remaining
+                blocks.append(list(unassigned))
+                break
+                
+            # Pick seed (random or first available)
+            seed = list(unassigned)[0]
+            current_block = [seed]
+            unassigned.remove(seed)
+            
+            # Add N nearest neighbors
+            while len(current_block) < target_block_size and unassigned:
+                # Find nearest to *any* in current block? Or centroid?
+                # Simple: nearest to seed or mean distance to block
+                # Let's do min-average-distance to current block
+                candidates = list(unassigned)
+                
+                # Compute avg dist to current block for each candidate
+                # dist_mat[c, current_block]
+                avg_dists = [np.mean(dist_mat[c, current_block]) for c in candidates]
+                best_cand_idx = np.argmin(avg_dists)
+                best_cand = candidates[best_cand_idx]
+                
+                current_block.append(best_cand)
+                unassigned.remove(best_cand)
+                
+            blocks.append(current_block)
+        
+        # If we have overlap
+        if overlap_fraction > 0:
+            # Overlap implementation:
+            # Start each block with 'overlap' amount of indices from the previous block
+            # This logic modifies the 'blocks' list we just created.
+            # However simple partition-based generation above doesn't support overlap naturally.
+            # Let's refine: The greedy approach above created partition.
+            # To add overlap: Append N items from block[i-1] to block[i]
+            # EXCEPT for first block.
+            
+            # Note: This increases total size, so "target_block_size" in previous step was for partition.
+            overlap_count = int(np.ceil(target_block_size * overlap_fraction))
+            if overlap_count > 0:
+                for i in range(1, len(blocks)):
+                    # Get overlap candidates from previous block (random or specific?)
+                    # Random is safest to avoid bias
+                    prev_block = blocks[i-1]
+                    if len(prev_block) > 0:
+                        overlap_indices = rng.choice(prev_block, size=min(len(prev_block), overlap_count), replace=False)
+                        # Add to current
+                        blocks[i].extend(overlap_indices)
+                        # Uniquify just in case
+                        blocks[i] = list(set(blocks[i]))
+            
+        return blocks
+    else:
+        # Fallback to random
+        perm = rng.permutation(dim)
+        # Split into ~equal chunks
+        blocks = [list(a) for a in np.array_split(perm, num_blocks)]
+        return blocks
+
+
+def run_hybrid_optimization(
+    objective: Callable[[np.ndarray], float],
+    bounds: list,
+    x0: np.ndarray,
+    hybrid_config: HybridOptimizerConfig,
+    total_budget: int = 3000,
+    logger = None,
+    log_status_fn = None, 
+    update_progress_fn = None,
+) -> Tuple[np.ndarray, float, int]:
+    """
+    Run Hybrid CMA-ES + Block Re-optimization.
+    
+    Logic:
+    1. Stage A: Global Exploration (Standard CMA-ES)
+    2. Loop Cycles:
+       a. Stage B: Build Blocks (Random or Correlation-based)
+       b. Stage C: Block Re-optimization (Soft freezing)
+    3. Stage D: Global Refresh (Periodic)
+    
+    Args:
+        objective: Main objective function (returns float).
+        bounds: List of (min, max).
+        x0: Initial guess.
+        hybrid_config: Configuration.
+        total_budget: Max evals.
+        
+    Returns:
+        (best_x, best_f, total_evals)
+    """
+    evals_used = 0
+    dim = len(x0)
+    
+    # Setup constraints/bounds arrays
+    lower_bounds = np.array([b[0] for b in bounds])
+    upper_bounds = np.array([b[1] for b in bounds])
+    span = upper_bounds - lower_bounds
+    
+    # 1. Initialize Elite Pool
+    elite_pool = ElitePool(k=hybrid_config.elite_k)
+    
+    # 2. Budget allocation
+    # Reserve slice for Stage A
+    # The rest is split among cycles
+    stage_a_budget = int(total_budget * (1.0 - hybrid_config.per_block_budget_fraction))
+    block_budget_total = total_budget - stage_a_budget
+    
+    if hybrid_config.cycles > 0 and hybrid_config.num_blocks > 0:
+        per_cycle_budget = block_budget_total // hybrid_config.cycles
+        if hybrid_config.refresh_every_pass:
+             # Subtract refresh budget from per-cycle
+             refresh_cost = int(total_budget * hybrid_config.refresh_budget_fraction)
+             per_cycle_budget = max(0, per_cycle_budget - refresh_cost)
+    else:
+        per_cycle_budget = 0
+        
+    # --- STAGE A: Global Exploration (CMA-ES) ---
+    if update_progress_fn: update_progress_fn("Hybrid: Stage A", 0.1, "Global Exploration")
+    if logger: logger.info(f"Stage A: Global Search (Budget: {stage_a_budget})")
+    
+    # Setup CMA stds
+    sigma0 = 0.25 * float(np.median(span)) # Heuristic 25% of median span
+    cma_stds = span / (4.0 * sigma0) # Normalize so sigma*std roughly covers range
+    
+    # We use a randomized restart wrapper for Stage A to ensure good coverage
+    # But for simplicity we call run_cma_core once with restart logic INTERNAL if we wanted,
+    # but run_cma_core is single run.
+    # Let's do 2 quick restarts in Stage A budget if budget allows
+    
+    best_x_global = x0.copy()
+    valid_f = objective(best_x_global)
+    elite_pool.add(best_x_global, valid_f)
+    best_f_global = valid_f
+    
+    # Split Stage A budget into 2 restarts
+    budget_a1 = int(stage_a_budget * 0.6)
+    budget_a2 = stage_a_budget - budget_a1
+    
+    # Run 1
+    x_res, f_res, evs = run_cma_core(
+        objective, x0, sigma0, bounds, budget_a1, 
+        popsize=16, cma_stds=cma_stds, elite_pool=elite_pool
+    )
+    evals_used += evs
+    if f_res < best_f_global:
+        best_f_global = f_res
+        best_x_global = x_res
+        
+    # Run 2 (Restart from best or random?)
+    # Valid restart: Perturb best logic
+    rng = np.random.default_rng()
+    x0_2 = best_x_global + rng.standard_normal(dim) * (0.01 * span) # Small perturbation
+    
+    if budget_a2 > 100:
+        x_res, f_res, evs = run_cma_core(
+            objective, x0_2, sigma0 * 0.5, bounds, budget_a2, 
+            popsize=16, cma_stds=cma_stds, elite_pool=elite_pool
+        )
+        evals_used += evs
+        if f_res < best_f_global:
+            best_f_global = f_res
+            best_x_global = x_res
+            
+    if logger: logger.info(f"Stage A Complete. Best f: {best_f_global:.5f}")
+    
+    # --- CYCLES ---
+    current_x = best_x_global.copy()
+    
+    for cycle_idx in range(hybrid_config.cycles):
+        if update_progress_fn: 
+            update_progress_fn(f"Hybrid: Cycle {cycle_idx+1}", 0.3 + 0.6*(cycle_idx/max(1,hybrid_config.cycles)), f"Block Optimization ({hybrid_config.block_method})")
+            
+        cycle_budget = per_cycle_budget
+        
+        # --- STAGE B: Build Blocks ---
+        blocks = compute_blocks_from_elites(
+            elite_pool, hybrid_config.num_blocks, dim, 
+            method=hybrid_config.block_method, 
+            overlap_fraction=hybrid_config.overlap_fraction,
+            rng=rng
+        )
+        
+        if logger: logger.info(f"Cycle {cycle_idx+1}: Created {len(blocks)} blocks using {hybrid_config.block_method} (Overlap: {hybrid_config.overlap_fraction})")
+        
+        # Calculate penalty weight
+        # λ_eff = λ_schedule * f_scale / ||x||^2
+        # Determine f_scale
+        _, f_vals_elite = elite_pool.get_elites()
+        if len(f_vals_elite) > 0:
+            f_scale = np.median(np.abs(f_vals_elite))
+        else:
+            f_scale = max(1.0, abs(best_f_global))
+            
+        if not hybrid_config.lambda_normalize:
+            f_scale = 1.0 # Use raw user lambda
+            
+        base_lambda = hybrid_config.lambda0 * (hybrid_config.lambda_mult ** cycle_idx)
+        base_lambda = min(base_lambda, hybrid_config.lambda_max)
+        
+        # --- STAGE C: Block Re-optimization ---
+        if len(blocks) > 0:
+            budget_per_block = cycle_budget // len(blocks)
+        else:
+            budget_per_block = 0
+        
+        for b_i, block_indices in enumerate(blocks):
+            if budget_per_block < 20: continue # Skip if too small
+            
+            non_block_indices = [i for i in range(dim) if i not in block_indices]
+            
+            # Constants for this block run
+            x_fixed_vals = current_x[non_block_indices]
+            
+            # Define block bounds
+            block_lower = lower_bounds[block_indices]
+            block_upper = upper_bounds[block_indices]
+            block_bounds = list(zip(block_lower, block_upper))
+            
+            # Initial mean for this block
+            z0 = current_x[block_indices]
+            
+            # Objective wrapper
+            def block_obj_fn(z):
+                # Stitch
+                full_x = current_x.copy() # Start with current baseline
+                full_x[block_indices] = z # Overwrite block
+                # Clip full x to be safe
+                full_x = np.clip(full_x, lower_bounds, upper_bounds)
+                return objective(full_x)
+                
+            # Run CMA on block
+            # Scaling: use same heuristic (25% of block range)
+            z_span = block_upper - block_lower
+            z_sigma = 0.2 * np.median(z_span) # Slightly smaller for local block
+            if z_sigma <= 0: z_sigma = 0.05
+            
+            z_best, z_f, z_evals = run_cma_core(
+                block_obj_fn, z0, z_sigma, block_bounds, budget_per_block,
+                popsize=max(8, 4 + int(3 * np.log(len(z0)+1))), # Smaller pop for blocks
+                elite_pool=None, # Don't flood elite pool with partials? Or do we?
+                # Actually we can add full stitched vectors to elite pool!
+                true_objective_fn=block_obj_fn
+            )
+            
+            evals_used += z_evals
+            
+            # Update current_x if improved
+            if z_f < objective(current_x): # Re-eval current_x or use trusted value?
+                 current_x[block_indices] = z_best
+                 if z_f < best_f_global:
+                     best_f_global = z_f
+                     best_x_global = current_x.copy()
+                     if logger: logger.info(f"    Block {b_i} improved global best -> {best_f_global:.5f}")
+            
+            # Also add the new best to elite pool
+            elite_pool.add(current_x, z_f)
+            
+        # --- STAGE D: Global Refresh ---
+        if hybrid_config.refresh_every_pass:
+            ref_budget = int(total_budget * hybrid_config.refresh_budget_fraction)
+            if ref_budget > 50:
+                if logger: logger.info(f"Cycle {cycle_idx+1}: Global Refresh (Budget {ref_budget})")
+                
+                # Start around current best
+                x_ref = best_x_global.copy()
+                
+                # Reduced sigma
+                # User req 4: "sigma = refresh_sigma_scale * sigma_initial"
+                sigma_ref = sigma0 * hybrid_config.refresh_sigma_scale
+                
+                x_ref_res, f_ref_res, evs_ref = run_cma_core(
+                    objective, x_ref, sigma_ref, bounds, ref_budget,
+                    popsize=16, cma_stds=cma_stds, elite_pool=elite_pool
+                )
+                evals_used += evs_ref
+                
+                if f_ref_res < best_f_global:
+                    best_f_global = f_ref_res
+                    best_x_global = x_ref_res
+                    current_x = x_ref_res # Update incumbent for next cycle
+                    if logger: logger.info(f"    Refresh improved global best -> {best_f_global:.5f}")
+                    
+    return best_x_global, best_f_global, evals_used

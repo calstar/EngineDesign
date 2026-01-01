@@ -17,11 +17,17 @@ def calculate_nozzle_exit_velocity(
     gamma: float,
     R: float,
     expansion_ratio: float,
-    P_exit: float,
+    nozzle_efficiency: float = 0.98,
     P_ambient: float = 101325.0,
 ) -> Dict[str, float]:
     """
-    Calculate nozzle exit velocity using isentropic flow relations.
+    Calculate nozzle exit velocity using isentropic flow relations (Geometry-Driven).
+    
+    Implements a robust geometry-driven nozzle model:
+    1. Determine M_exit from expansion ratio (geometry)
+    2. Compute P_exit and T_exit isentropically from M_exit
+    3. Calculate ideal velocity
+    4. Apply nozzle efficiency for actual velocity
     
     Parameters:
     -----------
@@ -35,50 +41,53 @@ def calculate_nozzle_exit_velocity(
         Gas constant [J/(kg·K)]
     expansion_ratio : float
         Nozzle expansion ratio (A_exit / A_throat)
-    P_exit : float
-        Exit pressure [Pa]
+    nozzle_efficiency : float, optional
+        Nozzle energy efficiency factor (default: 0.98)
     P_ambient : float
-        Ambient pressure [Pa]
+        Ambient pressure [Pa] (unused for internal conversion, but kept for interface)
     
     Returns:
     --------
     results : dict
-        - v_exit: Exit velocity [m/s]
+        - v_exit: Exit velocity [m/s] (actual, with efficiency)
         - M_exit: Exit Mach number
         - T_exit: Exit temperature [K]
-        - efficiency: Nozzle efficiency (0-1)
+        - efficiency: Nozzle efficiency used
+        - P_exit: Exit pressure [Pa]
+        - P_throat: Throat pressure [Pa]
     """
-    # Isentropic relations
-    # T_exit / T_throat = (P_exit / P_throat)^((gamma-1)/gamma)
-    # For isentropic flow: P_throat = Pc * (2/(gamma+1))^(gamma/(gamma-1))
+    # Throat conditions (for reference)
+    # P_throat/Pc = [2/(gamma+1)]^(gamma/(gamma-1))
     P_throat = Pc * ((2.0 / (gamma + 1.0)) ** (gamma / (gamma - 1.0)))
     
-    # Exit temperature (isentropic)
-    T_exit = Tc * ((P_exit / P_throat) ** ((gamma - 1.0) / gamma))
-    
-    # Exit Mach number from area ratio
+    # Exit Mach number from area ratio (Geometry-Driven)
     # For isentropic flow: A/A* = (1/M) * ((2/(gamma+1)) * (1 + (gamma-1)/2 * M^2))^((gamma+1)/(2*(gamma-1)))
-    # Use robust consolidated solver
     M_exit, _ = solve_mach_robust(expansion_ratio, gamma, supersonic=True)
     
+    # Exit temperature (isentropic from stagnation)
+    # T_exit/Tc = 1 / [1 + (γ-1)/2 × M_exit²]
+    temperature_factor = 1.0 / (1.0 + (gamma - 1.0) / 2.0 * M_exit ** 2)
+    T_exit = Tc * temperature_factor
+    
+    # Exit Pressure (isentropic from stagnation)
+    # P_exit/Pc = [1 + (γ-1)/2 × M_exit²]^(-γ/(γ-1))
+    pressure_exponent = -gamma / (gamma - 1.0)
+    pressure_factor = (1.0 + (gamma - 1.0) / 2.0 * M_exit ** 2) ** pressure_exponent
+    P_exit = Pc * pressure_factor
+    
     # Exit velocity: v = M * sqrt(gamma * R * T)
-    v_exit = M_exit * np.sqrt(gamma * R * T_exit)
+    # This is the IDEAL isentropic velocity
+    v_exit_ideal = M_exit * np.sqrt(gamma * R * T_exit)
     
-    # Nozzle efficiency (ideal vs actual)
-    # Ideal: isentropic expansion
-    # Actual: account for losses (friction, divergence, etc.)
-    # Typical efficiency: 0.92-0.98
-    ideal_v_exit = np.sqrt(2.0 * gamma / (gamma - 1.0) * R * Tc * (1.0 - (P_exit / Pc) ** ((gamma - 1.0) / gamma)))
-    efficiency = v_exit / ideal_v_exit if ideal_v_exit > 0 else 0.95
-    
-    # Clamp efficiency to reasonable range
-    efficiency = np.clip(efficiency, 0.85, 1.0)
+    # Apply efficiency explicitly
+    # v_actual = eta * v_ideal
+    v_exit = v_exit_ideal * nozzle_efficiency
     
     return {
         "v_exit": float(v_exit),
         "M_exit": float(M_exit),
         "T_exit": float(T_exit),
-        "efficiency": float(efficiency),
+        "efficiency": float(nozzle_efficiency),
         "P_exit": float(P_exit),
         "P_throat": float(P_throat),
     }
@@ -158,12 +167,11 @@ def calculate_nozzle_heat_flux(
     # Solve for exit Mach number (isentropic)
     # A/A* = (1/M) * ((2/(gamma+1)) * (1 + (gamma-1)/2 * M^2))^((gamma+1)/(2*(gamma-1)))
     # Use robust consolidated solver
+    # Note: Only M_exit is used for interpolation; P_exit, T_exit, v_exit are calculated locally in the loop
     M_exit, _ = solve_mach_robust(expansion_ratio, gamma, supersonic=True)
     
-    # Exit pressure (isentropic)
-    P_exit = P_throat * ((1.0 + (gamma - 1.0) / 2.0 * M_exit ** 2) ** (-gamma / (gamma - 1.0)))
-    T_exit = T_throat * ((1.0 + (gamma - 1.0) / 2.0 * M_exit ** 2) ** (-1.0))
-    v_exit = M_exit * np.sqrt(gamma * R * T_exit)
+    # Calculate pressure exponent (used in loop for local pressure calculation)
+    pressure_exponent = -gamma / (gamma - 1.0)
     
     # Interpolate along nozzle
     for i, x in enumerate(positions):
@@ -183,8 +191,13 @@ def calculate_nozzle_heat_flux(
             M_local = 1.0 + (M_exit - 1.0) * xi
         
         # Local properties (isentropic)
-        T_local = T_throat * ((1.0 + (gamma - 1.0) / 2.0 * M_local ** 2) ** (-1.0))
-        P_local = P_throat * ((1.0 + (gamma - 1.0) / 2.0 * M_local ** 2) ** (-gamma / (gamma - 1.0)))
+        # CORRECT: Use Pc and Tc (stagnation conditions) as reference
+        # T_local/Tc = [1 + (γ-1)/2 × M_local²]^(-1)
+        temperature_factor_local = 1.0 / (1.0 + (gamma - 1.0) / 2.0 * M_local ** 2)
+        T_local = Tc * temperature_factor_local
+        # P_local/Pc = [1 + (γ-1)/2 × M_local²]^(-γ/(γ-1))
+        pressure_factor_local = (1.0 + (gamma - 1.0) / 2.0 * M_local ** 2) ** pressure_exponent
+        P_local = Pc * pressure_factor_local
         v_local = M_local * np.sqrt(gamma * R * T_local)
         
         # Heat flux using Bartz correlation
