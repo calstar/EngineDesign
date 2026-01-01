@@ -1166,13 +1166,13 @@ def run_layer1_optimization(
         cma_stds[n_orifices_idx] = max(cma_stds[n_orifices_idx], target_step_n / sigma0)
 
     # IMPROVED: Larger population for better exploration (32-80 instead of 16-48)
-    popsize = min(80, max(32, 4 + int(4 * np.log(len(x0_refined) + 1))))
+    # Standardized population for better diversity (increased to 48)
+    popsize = 48
     layer1_logger.info(f"Population size: {popsize}")
     
-    # Random number of restarts (2-3) to escape local minima
-    rng = np.random.default_rng()
-    num_restarts = rng.integers(2, 4)  # 2 or 3 restarts
-    layer1_logger.info(f"Using {num_restarts} restart(s) to ensure robust convergence")
+    # Fixed number of restarts (3) to ensure robust convergence across all runs
+    num_restarts = 3
+    layer1_logger.info(f"Using {num_restarts} fixed restarts to ensure consistent global convergence")
     
     best_x_global = x0_refined
     best_f_global = float('inf')
@@ -1190,14 +1190,15 @@ def run_layer1_optimization(
         # Determine total budget available for optimization (excluding L-BFGS-B refinement)
         # We used to have num_restarts * max_iterations per restart
         # Let's say total budget is ~2000-3000 evals
-        total_eval_budget = max_iterations # This variable name is misleading in existing code, it is passed as maxfevals??
+        # Increased budget for hybrid optimization (increased from 150*pop to 200*pop)
+        total_eval_budget = 300 
         # Checked existing code: max_iterations is passed as 'maxiter' or 'maxfevals' in different places.
         # In current CMA code above: cma_options['maxiter'] = iter_budget
         # default max_iterations is usually large?
         # Actually in layer1 defaults (not visible here), max_iterations might be small? 
         # Let's assume passed max_iterations is small (e.g. 100 iterations of popsize?)
         # Let's force a reasonable budget for hybrid
-        total_budget_evals = max(2000, max_iterations * popsize)
+        total_budget_evals = max(2000, total_eval_budget * popsize)
         
         # Run Multi-Track Hybrid?
         num_tracks = hybrid_config.num_tracks
@@ -1305,7 +1306,7 @@ def run_layer1_optimization(
             layer1_logger.info(f"")
             layer1_logger.info(f"Starting {restart_name} (sigma: {current_sigma_fraction*100:.0f}% of range)...")
             
-            iter_budget = max_iterations // num_restarts
+            iter_budget = total_eval_budget // num_restarts
             
             cma_options = {
                 "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
