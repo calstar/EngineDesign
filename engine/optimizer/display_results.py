@@ -213,6 +213,9 @@ def plot_layer1_parameterization_history(optimization_results: Dict[str, Any]) -
     d_orifice = [get_var(h, "d_orifice", 7, 0.003) * 1000 for h in history]  # Convert to mm
     P_O_start_psi = [get_var(h, "P_O_start_psi", 10, 500) for h in history]
     P_F_start_psi = [get_var(h, "P_F_start_psi", 11, 600) for h in history]
+    # Calculate exit diameter from A_throat and expansion_ratio: D_exit = sqrt(4 * A_throat * expansion_ratio / pi)
+    A_throat_m2 = [get_var(h, "A_throat", 0, 0.001, scale=1.0) for h in history]  # Keep in m² for calculation
+    D_exit = [np.sqrt(max(0, (4 * A_throat_m2[i] * expansion_ratio[i]) / np.pi)) * 1000 for i in range(len(history))]  # Convert to mm
     
     # Create subplots: 4 rows x 3 cols = 12 plots
     fig = make_subplots(
@@ -221,7 +224,7 @@ def plot_layer1_parameterization_history(optimization_results: Dict[str, Any]) -
             "Throat Area [mm²]", "L* [m]", "Expansion Ratio",
             "Chamber Outer Diameter [mm]", "Chamber Inner Diameter [mm]", "Pintle Tip Diameter [mm]",
             "Gap Height [mm]", "Number of Orifices", "Orifice Diameter [mm]",
-            "LOX Start Pressure [psi]", "Fuel Start Pressure [psi]", ""
+            "LOX Start Pressure [psi]", "Fuel Start Pressure [psi]", "Exit Diameter [mm]"
         ),
         vertical_spacing=0.12,
         horizontal_spacing=0.10,
@@ -269,7 +272,7 @@ def plot_layer1_parameterization_history(optimization_results: Dict[str, Any]) -
         row=3, col=3
     )
     
-    # Row 4: Pressures
+    # Row 4: Pressures and exit diameter
     fig.add_trace(
         go.Scatter(x=iterations, y=P_O_start_psi, mode='lines+markers', name='P_LOX', line=dict(color='blue'), showlegend=False),
         row=4, col=1
@@ -277,6 +280,10 @@ def plot_layer1_parameterization_history(optimization_results: Dict[str, Any]) -
     fig.add_trace(
         go.Scatter(x=iterations, y=P_F_start_psi, mode='lines+markers', name='P_Fuel', line=dict(color='orange'), showlegend=False),
         row=4, col=2
+    )
+    fig.add_trace(
+        go.Scatter(x=iterations, y=D_exit, mode='lines+markers', name='D_exit', line=dict(color='teal'), showlegend=False),
+        row=4, col=3
     )
     
     # Update x-axis labels for bottom row

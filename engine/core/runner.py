@@ -396,12 +396,15 @@ class PintleEngineRunner:
         if cooling_results is None:
             cooling_results = {}  # Empty dict if no cooling
         
+        # Use Lstar from config if available, otherwise calculate from geometry
+        current_Lstar = cg.Lstar if cg.Lstar is not None else (cg.volume / cg.A_throat if cg.A_throat > 0 else 0)
+        
         # Calculate chamber pressure profile along length
         pressure_profile = None
         try:
             pressure_profile = calculate_chamber_pressure_profile(
                 Pc=Pc,
-                Lstar=self.solver.Lstar,
+                Lstar=current_Lstar,
                 mdot_total=mdot_total,
                 gamma=gamma,
                 R=R,
@@ -424,10 +427,14 @@ class PintleEngineRunner:
                 R=R,
                 V_chamber=cg.volume,
                 A_throat=cg.A_throat,
-                Lstar=self.solver.Lstar,
+                Lstar=current_Lstar,
                 MR=MR,
             )
         except Exception as e:
+            import traceback
+            log_info(f"WARNING: Chamber intrinsics calculation failed: {type(e).__name__}: {e}")
+            if debug:
+                log_info(f"Traceback: {''.join(traceback.format_exc())}")
             import warnings
             warnings.warn(f"Chamber intrinsics calculation failed: {e}")
         

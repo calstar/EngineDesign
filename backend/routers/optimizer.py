@@ -85,6 +85,10 @@ _optimization_status = {
     "error": None,
 }
 
+# Global stop event for optimization cancellation
+_stop_event = None
+_stop_event_lock = threading.Lock()
+
 
 @router.post("/design-requirements")
 async def save_design_requirements(request: DesignRequirementsRequest):
@@ -156,10 +160,37 @@ async def get_layer1_results():
     }
 
 
+@router.post("/layer1/stop")
+async def stop_layer1():
+    """Stop the currently running Layer 1 optimization."""
+    global _stop_event
+    
+    if not _optimization_status["running"]:
+        raise HTTPException(
+            status_code=400,
+            detail="No optimization is currently running."
+        )
+    
+    with _stop_event_lock:
+        if _stop_event is not None:
+            _stop_event.set()
+            _optimization_status["message"] = "Stopping optimization..."
+            return {
+                "status": "success",
+                "message": "Stop signal sent to optimizer."
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Stop event not initialized."
+            }
+
+
 @router.get("/layer1")
 async def run_layer1(
     thrust_tolerance: float = 0.1,
-    target_burn_time: float | None = None
+    target_burn_time: float | None = None,
+    report_every_n: int = 1
 ):
     """Run Layer 1 optimization with Server-Sent Events for progress updates.
     
@@ -195,7 +226,11 @@ async def run_layer1(
     
     async def event_generator():
         """Generate SSE events for optimization progress."""
-        global _optimization_status
+        global _optimization_status, _stop_event
+        
+        # Create new stop event for this optimization run
+        with _stop_event_lock:
+            _stop_event = threading.Event()
         
         _optimization_status["running"] = True
         _optimization_status["progress"] = 0.0
@@ -210,6 +245,9 @@ async def run_layer1(
         try:
             # Get design requirements
             requirements = app_state.config.design_requirements.model_dump()
+            # Add report_every_n to requirements if not already set
+            if "report_every_n" not in requirements:
+                requirements["report_every_n"] = report_every_n
             burn_time = target_burn_time or requirements.get("target_burn_time", 10.0)
             
             # Prepare pressure config
@@ -263,6 +301,7 @@ async def run_layer1(
                     update_progress=update_progress,
                     log_status=lambda stage, msg: None,  # Not used for SSE
                     objective_callback=objective_callback,
+                    stop_event=_stop_event,  # Pass stop event to optimizer
                 )
             
             # Run in thread pool to avoid blocking
@@ -298,8 +337,29 @@ async def run_layer1(
                     
                     await asyncio.sleep(0.5)
                 
-                # Get results
-                optimized_config, results = future.result()
+                # Get results - check if stopped
+                try:
+                    optimized_config, results = future.result()
+                    # Check if stop was requested after completion
+                    with _stop_event_lock:
+                        if _stop_event and _stop_event.is_set():
+                            _optimization_status["running"] = False
+                            _optimization_status["progress"] = 0.0
+                            _optimization_status["stage"] = "Stopped"
+                            _optimization_status["message"] = "Optimization stopped by user"
+                            yield f"data: {safe_json_dumps({'type': 'error', 'error': 'Optimization stopped by user'})}\n\n"
+                            return
+                except Exception as e:
+                    # Check if error was due to stop request
+                    with _stop_event_lock:
+                        if _stop_event and _stop_event.is_set():
+                            _optimization_status["running"] = False
+                            _optimization_status["progress"] = 0.0
+                            _optimization_status["stage"] = "Stopped"
+                            _optimization_status["message"] = "Optimization stopped by user"
+                            yield f"data: {safe_json_dumps({'type': 'error', 'error': 'Optimization stopped by user'})}\n\n"
+                            return
+                    raise
             
             # Update config
             app_state.config = optimized_config
@@ -329,16 +389,28 @@ async def run_layer1(
             yield f"data: {safe_json_dumps({'type': 'complete', 'results': results_dict})}\n\n"
             
         except Exception as e:
-            error_msg = f"Optimization failed: {str(e)}"
-            error_trace = traceback.format_exc()
-            _optimization_status["error"] = error_msg
-            _optimization_status["message"] = error_msg
-            
-            # Send error event
-            yield f"data: {safe_json_dumps({'type': 'error', 'error': error_msg, 'traceback': error_trace})}\n\n"
+            # Check if this is a stop request
+            error_str = str(e).lower()
+            if "stopped by user" in error_str or "optimization stopped" in error_str:
+                error_msg = "Optimization stopped by user"
+                _optimization_status["error"] = None
+                _optimization_status["message"] = error_msg
+                _optimization_status["stage"] = "Stopped"
+                # Send stop event
+                yield f"data: {safe_json_dumps({'type': 'error', 'error': error_msg})}\n\n"
+            else:
+                error_msg = f"Optimization failed: {str(e)}"
+                error_trace = traceback.format_exc()
+                _optimization_status["error"] = error_msg
+                _optimization_status["message"] = error_msg
+                # Send error event
+                yield f"data: {safe_json_dumps({'type': 'error', 'error': error_msg, 'traceback': error_trace})}\n\n"
         
         finally:
             _optimization_status["running"] = False
+            # Clear stop event
+            with _stop_event_lock:
+                _stop_event = None
     
     return StreamingResponse(
         event_generator(),

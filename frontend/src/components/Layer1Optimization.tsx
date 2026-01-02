@@ -12,7 +12,8 @@ import {
 import {
   runLayer1Optimization,
   getLayer1Status,
-  getChamberGeometry
+  getChamberGeometry,
+  stopLayer1Optimization
 } from '../api/client';
 import type {
   Layer1Settings,
@@ -170,6 +171,7 @@ function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Arr
     ['d_orifice', 'Orifice Diameter', 'mm', 7, 0.003, 1000],
     ['P_O_start_psi', 'LOX Tank Pressure', 'psi', 8, 500, 1.0],
     ['P_F_start_psi', 'Fuel Tank Pressure', 'psi', 9, 600, 1.0],
+    ['exit_diameter', 'Exit Diameter', 'mm', -1, 0.1, 1000],
   ] as const;
 
   // Extract data for each parameter
@@ -182,6 +184,13 @@ function ParameterConvergencePlots({ iterationHistory }: { iterationHistory: Arr
         const outer = getVar(h, 'D_chamber_outer', 3, 0.1, 1.0);
         const inner = (h.D_chamber_inner as number) ?? (outer - 0.0254);
         point[key] = inner * 1000;
+      } else if (key === 'exit_diameter') {
+        // Calculate exit diameter from A_throat and expansion_ratio
+        // D_exit = sqrt(4 * A_throat * expansion_ratio / pi) in meters, then convert to mm
+        const A_throat_m2 = getVar(h, 'A_throat', 0, 0.001, 1.0);
+        const expansion_ratio_val = getVar(h, 'expansion_ratio', 2, 10.0, 1.0);
+        const D_exit_m = Math.sqrt(Math.max(0, (4 * A_throat_m2 * expansion_ratio_val) / Math.PI));
+        point[key] = D_exit_m * 1000; // Convert to mm
       } else if (key === 'n_orifices') {
         point[key] = Math.round(getVar(h, key, xIdx, defaultVal, scale));
       } else {
@@ -252,6 +261,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
   }>>([]);
   const [showParameterPlots, setShowParameterPlots] = useState(false);
   const [chamberGeometry, setChamberGeometry] = useState<ChamberGeometryResponse | null>(null);
+  const [eventSourceRef, setEventSourceRef] = useState<EventSource | null>(null);
 
   // Calculate min/max objective values for dot scaling
   const { minObj, maxObj } = useMemo(() => {
@@ -315,6 +325,15 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
     checkStatus();
   }, []);
 
+  // Cleanup EventSource on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef) {
+        eventSourceRef.close();
+      }
+    };
+  }, [eventSourceRef]);
+
   const checkStatus = async () => {
     const response = await getLayer1Status();
     if (response.data) {
@@ -366,6 +385,7 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           setProgress(1.0);
           setStage('Complete');
           setMessage('Optimization completed successfully');
+          setEventSourceRef(null); // Clear reference
           if (event.results) {
             setResults(event.results);
             // Update objective history from final results (in case we missed any)
@@ -377,21 +397,50 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
           }
         } else if (event.type === 'error') {
           setIsRunning(false);
-          setError(event.error || 'Unknown error');
-          setMessage(event.error || 'Optimization failed');
+          setEventSourceRef(null); // Clear reference
+          // Check if this is a stop message
+          if (event.error && event.error.toLowerCase().includes('stopped')) {
+            setError(null); // Don't show error for user-initiated stop
+            setMessage('Optimization stopped');
+            setStage('Stopped');
+          } else {
+            setError(event.error || 'Unknown error');
+            setMessage(event.error || 'Optimization failed');
+          }
         }
       },
       (err: string) => {
         setIsRunning(false);
+        setEventSourceRef(null); // Clear reference
         setError(err);
         setMessage('Connection error');
       }
     );
 
-    // Cleanup on unmount
-    return () => {
-      eventSource.close();
-    };
+    // Store EventSource reference for stop functionality
+    setEventSourceRef(eventSource);
+  };
+
+  const handleStop = async () => {
+    try {
+      // Close the EventSource connection
+      if (eventSourceRef) {
+        eventSourceRef.close();
+        setEventSourceRef(null);
+      }
+      
+      // Call the stop API
+      await stopLayer1Optimization();
+      
+      // Update UI state
+      setIsRunning(false);
+      setMessage('Stopping optimization...');
+      setStage('Stopped');
+      setError(null);
+    } catch (err) {
+      console.error('Error stopping optimization:', err);
+      setError('Failed to stop optimization');
+    }
   };
 
   return (
@@ -443,8 +492,8 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
         </div>
       </div>
 
-      {/* Run Button */}
-      <div className="flex justify-center">
+      {/* Run/Stop Button */}
+      <div className="flex justify-center gap-4">
         <button
           onClick={handleRun}
           disabled={isRunning || !requirements}
@@ -455,6 +504,14 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
         >
           {isRunning ? '🔄 Running Optimization...' : '🚀 Run Layer 1 Optimization'}
         </button>
+        {isRunning && (
+          <button
+            onClick={handleStop}
+            className="px-8 py-4 font-bold rounded-lg text-white text-lg transition-all bg-red-600 hover:bg-red-700 hover:scale-105"
+          >
+            ⏹ Stop Optimizer
+          </button>
+        )}
       </div>
 
       {/* Progress */}

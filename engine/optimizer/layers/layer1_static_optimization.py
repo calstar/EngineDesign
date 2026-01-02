@@ -18,8 +18,10 @@ import numpy as np
 import copy
 import logging
 import time
+import os
 from datetime import datetime
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor
 
 from engine.pipeline.config_schemas import PintleEngineConfig, HybridOptimizerConfig
 from engine.core.runner import PintleEngineRunner
@@ -64,6 +66,19 @@ from engine.core.chamber_geometry import (
 
 
 TOTAL_WALL_THICKNESS_M = 0.0254  # 1.0 inch total wall (0.5 inch per side: outer - inner diameter)
+
+
+# ============================================================================
+# Worker Process Globals (for parallel CMA-ES evaluation)
+# ============================================================================
+# These are set by _init_worker() in each worker process and reused across evaluations
+_worker_runner = None
+_worker_base_config = None
+_worker_bounds = None
+_worker_requirements = None
+_worker_constants = None
+_worker_debug_strict = False
+
 
 
 def create_layer1_apply_x_to_config(
@@ -229,6 +244,522 @@ def create_layer1_apply_x_to_config(
     return apply_x_to_config
 
 
+# ============================================================================
+# Helper Functions for Parallel CMA-ES Evaluation
+# ============================================================================
+
+def _config_to_dict(config: PintleEngineConfig) -> dict:
+    """Convert config to lightweight dict for pickling.
+    
+    Uses pydantic's dict() method if available, otherwise falls back to __dict__.
+    """
+    return config.dict() if hasattr(config, 'dict') else config.__dict__
+
+
+def _dict_to_config(config_dict: dict) -> PintleEngineConfig:
+    """Reconstruct config from dict."""
+    return PintleEngineConfig(**config_dict)
+
+
+def _snap_integer_dims(x: np.ndarray, integer_indices: list) -> np.ndarray:
+    """Snap integer dimensions to nearest integer.
+    
+    Ensures cache consistency and physical validity for discrete variables.
+    
+    Args:
+        x: Candidate vector
+        integer_indices: List of indices to snap (e.g., [6] for n_orifices)
+    
+    Returns:
+        Snapped vector with integer dimensions rounded
+    """
+    x_snapped = x.copy()
+    for idx in integer_indices:
+        x_snapped[idx] = round(x_snapped[idx])
+    return x_snapped
+
+
+def _get_num_workers(config_obj) -> int:
+    """Get number of workers from config or default to cpu_count - 1."""
+    if hasattr(config_obj, 'optimizer') and hasattr(config_obj.optimizer, 'num_workers'):
+        num_workers = config_obj.optimizer.num_workers
+    else:
+        # Default to cpu_count - 1 (leave one core free)
+        num_workers = max(1, os.cpu_count() - 1)
+    
+    return num_workers
+
+
+def _init_worker(config_dict: dict, bounds_array: np.ndarray, requirements_dict: dict, 
+                 constants_dict: dict, debug_strict: bool = False):
+    """Initialize worker process with lightweight data.
+    
+    Builds PintleEngineRunner ONCE per worker for major speedup.
+    Runner is reused by mutating its config in-place (runner.evaluate is stateless).
+    
+    Args:
+        config_dict: Serialized config (primitives only)
+        bounds_array: Bounds array [n_dims x 2]
+        requirements_dict: Requirements dict
+        constants_dict: Constants needed for geometry calculations
+        debug_strict: If True, re-raise exceptions; if False, return penalties
+    """
+    global _worker_runner, _worker_base_config, _worker_bounds, _worker_requirements, _worker_constants, _worker_debug_strict
+    
+    # Reconstruct config from dict
+    _worker_base_config = _dict_to_config(config_dict)
+    
+    # Build runner ONCE per worker (major speedup)
+    # Note: PintleEngineRunner.evaluate() is stateless between calls
+    _worker_runner = PintleEngineRunner(_worker_base_config)
+    
+    # Store bounds and requirements
+    _worker_bounds = np.array(bounds_array, dtype=np.float64)
+    _worker_requirements = requirements_dict
+    _worker_constants = constants_dict
+    _worker_debug_strict = debug_strict
+
+
+def _apply_x_to_worker_config_inplace(x: np.ndarray, config: PintleEngineConfig, constants: dict):
+    """Apply x to config IN-PLACE (mutates config, no copy).
+    
+    Assumes x is already bounded and snapped (CMA-ES + parent handle this).
+    This allows runner reuse without rebuilding.
+    
+    Args:
+        x: Candidate vector (already bounded and snapped)
+        config: Config to mutate in place
+        constants: Constants dict with TOTAL_WALL_THICKNESS_M, etc.
+    """
+    from engine.pipeline.config_schemas import ensure_chamber_geometry
+    
+    # Extract values (NO CLIPPING - CMA-ES handles bounds)
+    A_throat = float(x[0])
+    Lstar = float(x[1])
+    expansion_ratio = float(x[2])
+    D_chamber_outer = float(x[3])
+    d_pintle_tip = float(x[4])
+    h_gap = float(x[5])
+    n_orifices = int(x[6])  # Already snapped in parent
+    d_orifice = float(x[7])
+    
+    # Compute derived values (same logic as apply_x_to_config)
+    V_chamber = Lstar * A_throat
+    D_chamber_inner = D_chamber_outer - constants['TOTAL_WALL_THICKNESS_M']
+    if D_chamber_inner <= 0:
+        D_chamber_inner = max(D_chamber_outer * 0.3, 0.01)
+    
+    A_chamber = np.pi * (D_chamber_inner / 2) ** 2
+    R_chamber = D_chamber_inner / 2
+    R_throat = np.sqrt(max(0, A_throat / np.pi))
+    
+    contraction_ratio = A_chamber / A_throat if (A_throat > 0 and A_chamber > 0) else 10.0
+    theta_contraction = np.pi / 4  # 45 degrees
+    nozzle_entrance_radius_est = R_throat
+    
+    L_cylindrical = chamber_length_calc(
+        chamber_volume=V_chamber,
+        area_throat=A_throat,
+        contraction_ratio=contraction_ratio,
+        theta=theta_contraction,
+    )
+    L_contraction = contraction_length_horizontal_calc(
+        area_chamber=A_chamber,
+        entrance_arc_start_y=nozzle_entrance_radius_est,
+        theta=theta_contraction,
+    )
+    L_chamber = L_cylindrical + L_contraction
+    
+    if L_chamber <= 0 or L_cylindrical <= 0 or not np.isfinite(L_chamber):
+        L_chamber = V_chamber / A_chamber if A_chamber > 0 else 0.2
+        L_cylindrical = max(L_chamber * 0.5, 0.05)
+    
+    L_chamber = np.clip(L_chamber, 0.005, 1.0)
+    
+    # Nozzle calculations
+    A_exit = A_throat * expansion_ratio
+    if A_exit < 0:
+        A_exit = A_throat * 10.0
+    D_exit = np.sqrt(max(0, 4 * A_exit / np.pi))
+    
+    max_nozzle_exit = constants.get('max_nozzle_exit', 1.0)
+    if D_exit > max_nozzle_exit:
+        D_exit = max_nozzle_exit
+        A_exit = np.pi * (D_exit / 2) ** 2
+        expansion_ratio = A_exit / A_throat if A_throat > 0 else 10.0
+    
+    # Ensure chamber_geometry exists
+    if config.chamber_geometry is None:
+        cg = ensure_chamber_geometry(config)
+    else:
+        cg = config.chamber_geometry
+    
+    # Mutate config.chamber_geometry in place
+    cg.A_throat = A_throat
+    cg.volume = V_chamber
+    cg.Lstar = Lstar
+    cg.length = L_chamber
+    cg.chamber_diameter = D_chamber_inner
+    cg.A_exit = A_exit
+    cg.exit_diameter = D_exit
+    cg.expansion_ratio = expansion_ratio
+    
+    # Also update legacy sections if they exist
+    if config.chamber is not None:
+        config.chamber.A_throat = A_throat
+        config.chamber.volume = V_chamber
+        config.chamber.Lstar = Lstar
+        config.chamber.length = L_chamber
+        setattr(config.chamber, 'chamber_inner_diameter', D_chamber_inner)
+        if hasattr(config.chamber, 'contraction_ratio'):
+            config.chamber.contraction_ratio = contraction_ratio
+        if hasattr(config.chamber, 'A_chamber'):
+            config.chamber.A_chamber = A_chamber
+    
+    if config.nozzle is not None:
+        config.nozzle.A_exit = A_exit
+        config.nozzle.exit_diameter = D_exit
+        config.nozzle.expansion_ratio = expansion_ratio
+    
+    # Update injector geometry
+    if hasattr(config, 'injector') and config.injector.type == "pintle":
+        if hasattr(config.injector.geometry, 'fuel'):
+            config.injector.geometry.fuel.d_pintle_tip = d_pintle_tip
+            config.injector.geometry.fuel.h_gap = h_gap
+        if hasattr(config.injector.geometry, 'lox'):
+            config.injector.geometry.lox.n_orifices = n_orifices
+            config.injector.geometry.lox.d_orifice = d_orifice
+            config.injector.geometry.lox.theta_orifice = 90.0
+
+
+def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, constants: dict) -> float:
+    """Compute objective value from evaluation result.
+    
+    Pure function: no state mutation.
+    Extracted from main objective() to ensure same logic in workers.
+    
+    This implements the full lexicographic objective with:
+    - Geometric validation
+    - Injector validation
+    - Stability checks
+    - Lexicographic scalarization
+    
+    Args:
+        result: Evaluation result dict from runner.evaluate()
+        x: Candidate vector (already snapped and bounded)
+        requirements: Requirements dict
+        constants: Constants dict
+    
+    Returns:
+        Objective value (float)
+    """
+    from engine.pipeline.config_schemas import ensure_chamber_geometry
+    
+    # Extract constants
+    target_thrust = constants.get('target_thrust', 1000)
+    optimal_of = constants.get('optimal_of', 2.5)
+    target_P_exit = constants.get('P_ambient', 101325.0)  # Ambient pressure
+    max_lox_P_psi = constants.get('max_lox_P_psi', 500)
+    max_fuel_P_psi = constants.get('max_fuel_P_psi', 500)
+    TOTAL_WALL_THICKNESS_M = constants.get('TOTAL_WALL_THICKNESS_M', 0.0254)
+    min_stability = requirements.get('min_stability_margin', 0.15)
+    psi_to_Pa = 6894.76
+    
+    # Reconstruct config from x (we need geometry info)
+    # Extract values from x
+    A_throat = float(x[0])
+    Lstar = float(x[1])
+    expansion_ratio = float(x[2])
+    D_chamber_outer = float(x[3])
+    d_pintle_tip = float(x[4])
+    h_gap = float(x[5])
+    n_orifices = int(x[6])
+    d_orifice = float(x[7])
+    
+    # Compute derived geometry
+    V_chamber = Lstar * A_throat
+    D_chamber_inner = D_chamber_outer - TOTAL_WALL_THICKNESS_M
+    if D_chamber_inner <= 0:
+        D_chamber_inner = max(D_chamber_outer * 0.3, 0.01)
+    
+    A_chamber_check = np.pi * (D_chamber_inner / 2) ** 2
+    A_throat_check = A_throat
+    
+    # Nozzle
+    A_exit = A_throat * expansion_ratio
+    D_exit_check = np.sqrt(max(0, 4 * A_exit / np.pi))
+    D_throat_check = np.sqrt(4.0 * A_throat_check / np.pi) if A_throat_check > 0 else 0.0
+    
+    # Injector areas
+    A_lox_injector = float(n_orifices * np.pi * (d_orifice / 2) ** 2)
+    R_inner = float(d_pintle_tip / 2)
+    R_outer = float(R_inner + h_gap)
+    A_fuel_injector = float(np.pi * (R_outer ** 2 - R_inner ** 2))
+    
+    lox_ratio = A_lox_injector / A_throat_check if A_throat_check > 0 else np.nan
+    fuel_ratio = A_fuel_injector / A_throat_check if A_throat_check > 0 else np.nan
+    
+    # Tank pressures
+    P_O_psi = float(x[8])
+    P_F_psi = float(x[9])
+    P_O_ratio = P_O_psi / max_lox_P_psi if max_lox_P_psi > 0 else 0.0
+    P_F_ratio = P_F_psi / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.0
+    
+    # --- Geometric Validation ---
+    infeasibility_score = 0.0
+    
+    # 1. Contraction ratio check
+    if A_chamber_check > 0 and A_throat_check > 0:
+        contraction_ratio_check = A_chamber_check / A_throat_check
+        infeasibility_score += max(0.0, (A_throat_check * 1.1) / A_chamber_check - 1.0) ** 2
+        
+        if contraction_ratio_check < 1.5:
+            infeasibility_score += (1.5 - contraction_ratio_check) ** 2
+        elif contraction_ratio_check > 15.0:
+            infeasibility_score += (contraction_ratio_check - 15.0) ** 2
+    
+    # 2. Pintle diameter vs chamber diameter
+    if D_chamber_inner > 0:
+        infeasibility_score += max(0.0, (d_pintle_tip * 1.1) / D_chamber_inner - 1.0) ** 2
+    
+    # 2a. Throat diameter vs chamber diameter
+    if D_throat_check > 0 and D_chamber_inner > 0:
+        infeasibility_score += max(0.0, D_throat_check - D_chamber_inner * 0.95) ** 2 * 10.0
+    
+    # 3. Nozzle exit vs throat
+    if D_exit_check > 0 and D_throat_check > 0:
+        infeasibility_score += max(0.0, D_throat_check / D_exit_check - 1.0) ** 2
+    
+    # 4. Injector area constraints
+    if A_throat_check > 0:
+        infeasibility_score += max(0.0, lox_ratio - 1.0) ** 2
+        infeasibility_score += max(0.0, fuel_ratio - 1.0) ** 2
+        
+        # O/F area ratio sanity
+        if A_fuel_injector > 0:
+            area_ratio = A_lox_injector / A_fuel_injector
+            Cd_ratio = 0.4 / 0.65
+            rho_ratio = np.sqrt(1140.0 / 780.0)
+            delta_p_ratio_est = np.sqrt(1.2)
+            area_ratio_factor = Cd_ratio * rho_ratio * delta_p_ratio_est
+            required_area_ratio = optimal_of / area_ratio_factor if area_ratio_factor > 0 else np.inf
+            if required_area_ratio > 0 and np.isfinite(required_area_ratio):
+                area_ratio_error = abs(area_ratio - required_area_ratio) / required_area_ratio
+                infeasibility_score += max(0.0, area_ratio_error - 0.5) ** 2
+    
+    # --- Evaluation Results ---
+    eval_success = result.get('success', False) if isinstance(result, dict) else False
+    
+    if not eval_success:
+        # Evaluation failed - return high penalty
+        infeasibility_score += 1.0
+        # Add directional guidance based on pressure ratios
+        infeasibility_score += max(0.0, 0.90 - P_O_ratio) ** 2 + max(0.0, 0.90 - P_F_ratio) ** 2
+        
+        # SCALED DOWN: Max penalty ~1e7
+        BASE_INFEAS = 1e6
+        W_INFEAS = 1e5
+        return BASE_INFEAS + W_INFEAS * float(infeasibility_score)
+    
+    # Extract performance metrics
+    F_actual = float(result.get('F', np.nan))
+    MR_actual = float(result.get('MR', np.nan))
+    Cf_actual = float(result.get('Cf_actual', result.get('Cf', np.nan)))
+    P_exit_actual = float(result.get('P_exit', np.nan))
+    stability = result.get('stability_results', {})
+    
+    # Primary errors
+    thrust_error = abs(F_actual - target_thrust) / target_thrust if (target_thrust > 0 and np.isfinite(F_actual)) else 1.0
+    of_error = abs(MR_actual - optimal_of) / optimal_of if (optimal_of > 0 and np.isfinite(MR_actual)) else 1.0
+    
+    # Thrust penalty with 2% deadband (no penalty if within 2% error)
+    thrust_penalty_sq_term = 0.0
+    if target_thrust > 0 and np.isfinite(F_actual):
+        rel_error = abs(F_actual - target_thrust) / target_thrust
+        deadband = 0.02  # 2% tolerance
+        
+        # Soft deadband: Always apply a tiny gradient so the optimizer isn't "blind" 
+        # inside the deadband. This encourages exact matching even if < 2% error.
+        thrust_penalty_sq_term += (0.1 * rel_error) ** 2
+
+        if rel_error > deadband:
+            # Strong penalty for exceeding deadband
+            excess = rel_error - deadband
+            thrust_penalty_sq_term += excess ** 2
+    else:
+        # Failed evaluation gets full penalty
+        thrust_penalty_sq_term = 1.0
+    
+    # Exit pressure penalty (asymmetric with deadband)
+    exit_pressure_sq_term = 0.0
+    if target_P_exit > 0 and np.isfinite(P_exit_actual):
+        rel = (P_exit_actual - target_P_exit) / target_P_exit
+        deadband = 0.05  # 5%
+        if rel < -deadband:
+            # Overexpanded beyond deadband (worse)
+            excess = rel + deadband
+            exit_pressure_sq_term = (5.0 * excess) ** 2
+        elif rel > deadband:
+            # Underexpanded beyond deadband (less bad)
+            excess = rel - deadband
+            exit_pressure_sq_term = (1.0 * excess) ** 2
+    
+    # Stability checks
+    stability_state = stability.get('stability_state', 'unstable')
+    stability_score = float(stability.get('stability_score', 0.0))
+    chugging_margin = max(0.0, float(stability.get('chugging', {}).get('stability_margin', 0.0)))
+    acoustic_margin = max(0.0, float(stability.get('acoustic', {}).get('stability_margin', 0.0)))
+    feed_margin = max(0.0, float(stability.get('feed_system', {}).get('stability_margin', 0.0)))
+    
+    min_stability_score_raw = float(requirements.get('min_stability_score', 0.75))
+    stability_margin_handicap = float(requirements.get('stability_margin_handicap', 0.0))
+    score_factor = max(0.0, 1.0 - stability_margin_handicap)
+    margin_factor = max(0.0, 1.0 - stability_margin_handicap)
+    effective_min_score = min_stability_score_raw * score_factor
+    effective_margin = float(min_stability) * margin_factor
+    
+    require_stable_state = bool(requirements.get('require_stable_state', True))
+    allowed_states = {'stable', 'marginal'}
+    state_ok = (stability_state in allowed_states) if require_stable_state else (stability_state != 'unstable')
+    
+    if not state_ok:
+        infeasibility_score += 1.0
+    if effective_min_score > 0:
+        infeasibility_score += max(0.0, (effective_min_score - stability_score) / effective_min_score) ** 2
+    if effective_margin > 0:
+        infeasibility_score += max(0.0, (effective_margin - chugging_margin) / effective_margin) ** 2
+        infeasibility_score += max(0.0, (effective_margin - acoustic_margin) / effective_margin) ** 2
+        infeasibility_score += max(0.0, (effective_margin - feed_margin) / effective_margin) ** 2
+    
+    # Regularization: Cf band
+    def _hinge_band(val, lo, hi, scale=1.0):
+        if val < lo:
+            return ((lo - val) / scale) ** 2
+        elif val > hi:
+            return ((val - hi) / scale) ** 2
+        return 0.0
+    
+    Cf_min_acceptable = 1.3
+    Cf_max_acceptable = 1.8
+    cf_hinge = _hinge_band(float(Cf_actual) if np.isfinite(Cf_actual) else 0.0,
+                           Cf_min_acceptable, Cf_max_acceptable,
+                           scale=(Cf_max_acceptable - Cf_min_acceptable))
+    
+    # Lexicographic scalarization
+    # Lexicographic scalarization (SCALED DOWN)
+    BASE_INFEAS = 1e6
+    W_INFEAS = 1e5
+    W_THRUST = 1e4
+    W_OF = 1e4
+    W_CF = 1e2
+    W_EXIT = 2.0e2
+    
+    if not np.isfinite(infeasibility_score) or infeasibility_score < 0:
+        infeasibility_score = 1.0
+    
+    if infeasibility_score > 0.0:
+        obj = BASE_INFEAS + W_INFEAS * float(infeasibility_score)
+    else:
+        obj = (
+            W_THRUST * thrust_penalty_sq_term +
+            W_OF * (of_error ** 2) +
+            W_CF * cf_hinge +
+            W_EXIT * exit_pressure_sq_term
+        )
+    
+    if not np.isfinite(obj):
+        obj = BASE_INFEAS
+    
+    return float(obj)
+
+
+
+def _eval_candidate(x_raw):
+    """Pure evaluation function for parallel execution.
+    
+    Reuses worker's PintleEngineRunner by mutating its config in-place.
+    Assumes x_raw is already snapped (integers) and within bounds (CMA-ES handles this).
+    Returns lightweight scalar diagnostics only.
+    
+    Args:
+        x_raw: Candidate vector (already snapped and bounded)
+    
+    Returns:
+        dict with 'value', 'success', and optional diagnostics
+    """
+    try:
+        # x_raw is already snapped and bounded - just convert to array
+        x = np.asarray(x_raw, dtype=np.float64)
+        
+        # Apply x to runner's config IN-PLACE (no clipping, CMA-ES handles bounds)
+        _apply_x_to_worker_config_inplace(x, _worker_runner.config, _worker_constants)
+        
+        # Extract pressures from x
+        P_O_psi = float(x[8])
+        P_F_psi = float(x[9])
+        P_O_Pa = P_O_psi * 6894.76
+        P_F_Pa = P_F_psi * 6894.76
+        
+        # Evaluate using worker's runner (reused across calls)
+        result = _worker_runner.evaluate(
+            P_O_Pa, P_F_Pa,
+            P_ambient=_worker_constants['P_ambient'],
+            debug=False,
+            silent=True
+        )
+        
+        # Compute objective value (pure function)
+        obj_value = _compute_objective_value(result, x, _worker_requirements, _worker_constants)
+        
+        # Return top-level scalars (cheaper than nested dicts)
+        return {
+            'value': float(obj_value),
+            'success': True,
+            'F': float(result.get('F', 0)),
+            'MR': float(result.get('MR', 0)),
+            'Pc': float(result.get('Pc', 0)),
+        }
+    except Exception as e:
+        if _worker_debug_strict:
+            # Strict mode: re-raise to crash fast (for debugging)
+            raise
+        else:
+            # Robust mode: return structured penalty
+            # Classify error to give more useful feedback to optimizer/logger
+            err_type = type(e).__name__
+            err_msg = str(e).lower()
+            
+            # Base penalty for failed evaluation (much lower than 1e10 to avoid destroying covariance)
+            # Feasible solutions are ~2e4 - 5e4
+            penalty_base = 1.0e7
+            
+            # Categorize failure
+            if "geometry" in err_msg or "bound" in err_msg:
+                # Geometry/Bound violation (Critical but maybe structural)
+                penalty_val = penalty_base * 1.0
+                fail_reason = "GeometryViolation"
+            elif "negative" in err_msg or "pressure" in err_msg or "choked" in err_msg:
+                # Physics failure (Negative area, pressure, unchoked, etc.)
+                penalty_val = penalty_base * 0.5  # Slightly "better" failure than total nonsense
+                fail_reason = "PhysicsViolation"
+            elif "solver" in err_msg or "convergence" in err_msg:
+                # Numerical solver failure
+                penalty_val = penalty_base * 0.2  # Least bad failure, might just be stiff region
+                fail_reason = "SolverConvergence"
+            else:
+                # Unknown/Generic
+                penalty_val = penalty_base * 0.8
+                fail_reason = f"Error_{err_type}"
+
+            return {
+                'value': float(penalty_val),
+                'success': False,
+                'error_type': fail_reason,
+                'error_msg': str(e)[:200],
+            }
+
+
+
 def run_layer1_global_search(
     objective: Callable[[np.ndarray], float],
     bounds: list,
@@ -312,7 +843,7 @@ def run_layer1_global_search(
                     f_val_inner = float(objective(v))
                 except Exception:
                     evals_used += 1
-                    return 1e9
+                    return 1e7
                 evals_used += 1
                 if np.isfinite(f_val_inner) and f_val_inner < best_f:
                     best_f = f_val_inner
@@ -349,6 +880,7 @@ def run_layer1_optimization(
     update_progress: Optional[Callable[[str, float, str], None]] = None,
     log_status: Optional[Callable[[str, str], None]] = None,
     objective_callback: Optional[Callable[[int, float, float], None]] = None,
+    stop_event: Optional[Any] = None,  # threading.Event for stop signal
 ) -> Tuple[PintleEngineConfig, Dict[str, Any]]:
     """
     Run complete Layer 1 optimization: geometry + initial tank pressures.
@@ -416,6 +948,16 @@ def run_layer1_optimization(
     if log_status is None:
         def log_status(stage: str, message: str):
             pass
+    
+    # Helper to check stop event
+    class OptimizationStopped(Exception):
+        """Exception raised when optimization is stopped by user."""
+        pass
+    
+    def check_stop():
+        """Check if optimization should stop and raise exception if so."""
+        if stop_event is not None and stop_event.is_set():
+            raise OptimizationStopped("Optimization stopped by user")
     
     # Extract requirements
     target_thrust = requirements.get("target_thrust", 7000.0)
@@ -503,9 +1045,9 @@ def run_layer1_optimization(
     R_outer_max = R_inner_max + max_h_gap
     max_fuel_area = np.pi * (R_outer_max ** 2 - R_inner_max ** 2)
     max_injector_area = max(max_LOX_area, max_fuel_area)
-    # Increased margin from 1.1× to 1.5× to allow more exploration
-    # Constraint in objective will still enforce injector_area < throat_area
-    min_A_throat_safe = max_injector_area * 1.5
+    # Set minimum throat area to a small physical limit (5e-5 m² ≈ 8mm diameter)
+    # Constraint in objective will enforce injector_area < throat_area
+    min_A_throat_safe = 5e-5
     
     # Initial pressure bounds (65-98% of max for stable injection with full capability)
     min_P_ratio = 0.65  # Tightened lower bound for stable injection
@@ -525,29 +1067,109 @@ def run_layer1_optimization(
         (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [9] P_F_start_psi
     ]
     
-    # Calculate initial guess - sized for ~1.7 kg/s LOX flow at ΔP≈1.5 MPa
-    default_n_orifices = 14
-    default_d_orifice = 0.002  # 2mm orifices - sized for target mass flow
-    default_d_pintle = 0.016
-    default_h_gap = 0.0006
-    A_lox_est = default_n_orifices * np.pi * (default_d_orifice / 2) ** 2
-    R_inner_est = default_d_pintle / 2
-    R_outer_est = R_inner_est + default_h_gap
-    A_fuel_est = np.pi * (R_outer_est ** 2 - R_inner_est ** 2)
-    max_injector_area_est = max(A_lox_est, A_fuel_est)
-    # Use same relaxed multiplier for initial guess
-    A_throat_min_safe = max_injector_area_est * 1.1
-    A_throat_init = max(A_throat_init, A_throat_min_safe)
+    # Calculate initial guess
+    # Check if we can use the input config as the starting point (x0)
+    # This key feature allows the user to providing a "good guess" to speed up optimization
+    has_valid_start_geom = False
+    
+    # Extract candidate values from config
+    try:
+        # Helper to safely get float > 0
+        def _get_val(obj, attr, default=None):
+            val = getattr(obj, attr, default)
+            return float(val) if val is not None and val > 0 else None
+
+        # Chamber/Nozzle Geometry
+        # Try chamber_geometry first, then legacy sections
+        cg_in = getattr(config_obj, 'chamber_geometry', None)
+        c_in = getattr(config_obj, 'chamber', None)
+        n_in = getattr(config_obj, 'nozzle', None)
+        
+        A_throat_in = _get_val(cg_in, 'A_throat') or _get_val(c_in, 'A_throat') or _get_val(n_in, 'A_throat')
+        Lstar_in = _get_val(cg_in, 'Lstar') or _get_val(c_in, 'Lstar')
+        eps_in = _get_val(cg_in, 'expansion_ratio') or _get_val(n_in, 'expansion_ratio')
+        # Inner diameter -> Outer diameter
+        D_inner_in = _get_val(cg_in, 'chamber_diameter') or _get_val(c_in, 'chamber_inner_diameter')
+        
+        # Injector Geometry
+        inj_in = getattr(config_obj, 'injector', None)
+        inj_geom = getattr(inj_in, 'geometry', None)
+        is_pintle = (getattr(inj_in, 'type', '') == 'pintle')
+        
+        if is_pintle and inj_geom:
+            fuel_in = getattr(inj_geom, 'fuel', None)
+            lox_in = getattr(inj_geom, 'lox', None)
+            
+            d_pintle_in = _get_val(fuel_in, 'd_pintle_tip')
+            h_gap_in = _get_val(fuel_in, 'h_gap')
+            n_orifices_in = _get_val(lox_in, 'n_orifices')
+            d_orifice_in = _get_val(lox_in, 'd_orifice')
+        else:
+            d_pintle_in = h_gap_in = n_orifices_in = d_orifice_in = None
+
+        # Validate we have a complete set of non-None values to use as a starting point
+        if all(v is not None for v in [A_throat_in, Lstar_in, eps_in, D_inner_in, 
+                                      d_pintle_in, h_gap_in, n_orifices_in, d_orifice_in]):
+            
+            # Use input config values
+            A_throat_init = A_throat_in
+            Lstar_init = Lstar_in
+            eps_init = eps_in
+            outer_diameter_init = D_inner_in + TOTAL_WALL_THICKNESS_M
+            
+            # Injector values
+            default_d_pintle = d_pintle_in
+            default_h_gap = h_gap_in
+            default_n_orifices = int(n_orifices_in)
+            default_d_orifice = d_orifice_in
+            
+            # Re-verify derived checks (like throat sizing) just to be safe, but trust user input primarily
+            has_valid_start_geom = True
+            layer1_logger.info("Using values from input configuration as initial guess (x0).")
+            
+        else:
+            layer1_logger.info("Input configuration incomplete/invalid for x0. Using heuristic defaults.")
+            # Fall through to existing heuristics below (re-calculating them if needed)
+            pass
+
+    except Exception as e:
+        layer1_logger.warning(f"Failed to extract x0 from config: {e}. Using defaults.")
+        has_valid_start_geom = False
+
+    if not has_valid_start_geom:
+        # === Heuristic Defaults (Original Logic) ===
+        # Sized for ~1.7 kg/s LOX flow at ΔP≈1.5 MPa
+        default_n_orifices = 14
+        default_d_orifice = 0.002  # 2mm orifices - sized for target mass flow
+        default_d_pintle = 0.016
+        default_h_gap = 0.0006
+        
+        A_lox_est = default_n_orifices * np.pi * (default_d_orifice / 2) ** 2
+        R_inner_est = default_d_pintle / 2
+        R_outer_est = R_inner_est + default_h_gap
+        A_fuel_est = np.pi * (R_outer_est ** 2 - R_inner_est ** 2)
+        max_injector_area_est = max(A_lox_est, A_fuel_est)
+        
+        # Use simple throat sizing from target thrust
+        A_throat_min_safe = max_injector_area_est * 1.1
+        A_throat_init = max(A_throat_init, A_throat_min_safe)
+        
+        Lstar_init = (min_Lstar + max_Lstar) / 2
+        eps_init = 8.0 # near optimal for sea level
+        outer_diameter_init = np.clip(max_chamber_od * 0.55, min_outer_diameter, max_chamber_od)
+
+    # Clean up variables for array creation
     A_throat_init = np.clip(A_throat_init, 5e-5, 3.0e-3)
     
+    # Pressures: Always use heuristic start (80% of max) unless we want to try to infer from somewhere else
+    # Ideally should optimize to finding the right pressure regardless of start
     P_O_start_init = max_lox_P_psi * 0.80
     P_F_start_init = max_fuel_P_psi * 0.80
-    outer_diameter_init = np.clip(max_chamber_od * 0.55, min_outer_diameter, max_chamber_od)
     
     x0 = np.array([
         A_throat_init,
-        (min_Lstar + max_Lstar) / 2,
-        8.0,  # eps=8 is near optimal for Cf≈1.6 at sea level
+        Lstar_init if 'Lstar_init' in locals() else (min_Lstar + max_Lstar) / 2,
+        eps_init if 'eps_init' in locals() else 8.0,
         outer_diameter_init,
         default_d_pintle,
         default_h_gap,
@@ -569,6 +1191,10 @@ def run_layer1_optimization(
     upper_bounds = np.array([b[1] for b in bounds], dtype=float)
     span = np.maximum(upper_bounds - lower_bounds, 1e-9)
     
+    # Get report_every_n from requirements (default: 1 for real-time)
+    report_every_n = int(requirements.get("report_every_n", 1))
+    report_every_n = max(1, report_every_n)  # At least every iteration
+    
     # Initialize optimization state
     opt_state = {
         "iteration": 0,
@@ -587,6 +1213,7 @@ def run_layer1_optimization(
         "consecutive_failures": 0,
         "last_valid_obj": float('inf'),
         "history": [],
+        "objective_buffer": [],  # Buffer for batch reporting
         "stop_optimization": False,
         "force_maxfun_1": False,
         "last_best_eval": 0,
@@ -801,11 +1428,25 @@ def run_layer1_optimization(
         cache_key = _make_eval_cache_key(x_clipped)
         if infeasibility_score <= 0.0:
             cached = eval_cache.get(cache_key)
+            use_cached = False
             if cached is not None:
-                eval_success = bool(cached.get("success", False))
-                final_results = copy.deepcopy(cached.get("results", {})) if eval_success else {}
-                eval_error_str = cached.get("error", None)
-            else:
+                # Handle both dict format (full cache from objective) and float/dict format (from parallel eval)
+                if isinstance(cached, dict):
+                    # Check if it's the full format with "results" key
+                    if "results" in cached:
+                        eval_success = bool(cached.get("success", False))
+                        final_results = copy.deepcopy(cached.get("results", {})) if eval_success else {}
+                        eval_error_str = cached.get("error", None)
+                        use_cached = True
+                    else:
+                        # Partial format from parallel eval (only has 'value', 'success')
+                        # Can't use this - we need the full results dict, so treat as cache miss
+                        use_cached = False
+                else:
+                    # Old format: direct float value - can't use, need full results
+                    use_cached = False
+            
+            if not use_cached:
                 # Disable thermal protection for evaluation (for speed + avoid unrelated failures)
                 config_runner = copy.deepcopy(config)
                 if hasattr(config_runner, "ablative_cooling") and config_runner.ablative_cooling:
@@ -839,6 +1480,19 @@ def run_layer1_optimization(
         # Primary errors (dimensionless)
         thrust_error = abs(F_actual - target_thrust) / target_thrust if (eval_success and target_thrust > 0 and np.isfinite(F_actual)) else 1.0
         of_error = abs(MR_actual - optimal_of) / optimal_of if (eval_success and optimal_of > 0 and np.isfinite(MR_actual)) else 1.0
+        
+        # Thrust penalty with 2% deadband (no penalty if within 2% error)
+        thrust_penalty_sq_term = 0.0
+        if eval_success and target_thrust > 0 and np.isfinite(F_actual):
+            rel_error = abs(F_actual - target_thrust) / target_thrust
+            deadband = 0.02  # 2% tolerance
+            if rel_error > deadband:
+                # Only penalize error beyond the deadband
+                excess = rel_error - deadband
+                thrust_penalty_sq_term = excess ** 2
+        elif not eval_success or not np.isfinite(F_actual):
+            # Failed evaluation gets full penalty
+            thrust_penalty_sq_term = 1.0
         
         # Exit pressure preference (dimensionless)
         # Asymmetric penalty with deadband: Overexpansion (P < target) is worse than underexpansion
@@ -923,14 +1577,15 @@ def run_layer1_optimization(
         # ------------------------------------------------------------------
         # Lexicographic-ish scalarization with normalized weights
         # Each priority level is 100× the next for clear separation
+        # SCALED DOWN: Max penalty ~1e7 instead of 1e10
         # ------------------------------------------------------------------
-        BASE_INFEAS = 1e10       # Infeasibility baseline
-        W_INFEAS = 1e8           # Level 0: Hard constraints (1e8)
-        W_THRUST = 1e6           # Level 1: Primary objectives (1e6)
-        W_OF = 1e6               # Level 1: Primary objectives (1e6) - EQUAL to thrust (geometry determines O/F)
-        W_CF = 1e4               # Level 2: Secondary objectives (1e4)
-        W_EXIT = 2.0e4           # Level 2: Secondary objectives (2e4) - Boosted to enforce exit pressure
-        W_LEN = 1.0              # Level 4: Soft preferences (1.0)
+        BASE_INFEAS = 1e6        # Infeasibility baseline (was 1e10)
+        W_INFEAS = 1e5           # Level 0: Hard constraints (was 1e8)
+        W_THRUST = 1e4           # Level 1: Primary objectives (was 1e6)
+        W_OF = 1e4               # Level 1: Primary objectives (was 1e6)
+        W_CF = 1e2               # Level 2: Secondary objectives (was 1e4)
+        W_EXIT = 2.0e2           # Level 2: Secondary objectives (was 2e4)
+        W_LEN = 1.0              # Level 4: Soft preferences (was 1.0)
         
         if (not np.isfinite(infeasibility_score)) or infeasibility_score < 0:
             infeasibility_score = 1.0
@@ -939,7 +1594,7 @@ def run_layer1_optimization(
             obj = BASE_INFEAS + W_INFEAS * float(infeasibility_score)
         else:
             obj = (
-                W_THRUST * (thrust_error ** 2) +
+                W_THRUST * thrust_penalty_sq_term +
                 W_OF * (of_error ** 2) +
                 W_CF * cf_hinge +
                 W_EXIT * exit_pressure_sq_term +
@@ -1101,14 +1756,27 @@ def run_layer1_optimization(
             for handler in layer1_logger.handlers:
                 handler.flush()
         
+        # Buffer objective data every iteration (for batch reporting)
+        opt_state["objective_buffer"].append({
+            "iteration": int(iteration),
+            "objective": float(obj),
+            "best_objective": float(opt_state.get("best_objective", obj)),
+        })
+        
         # Stream objective history to external callback (e.g., UI plot) if provided
-        if objective_callback is not None:
+        # Only call callback every report_every_n iterations (batch reporting)
+        should_report = (iteration % report_every_n == 0) or opt_state.get('objective_satisfied', False)
+        if objective_callback is not None and should_report:
             try:
-                objective_callback(
-                    int(iteration),
-                    float(obj),
-                    float(opt_state.get("best_objective", obj)),
-                )
+                # Send all buffered entries (batch reporting)
+                for buffered_entry in opt_state["objective_buffer"]:
+                    objective_callback(
+                        buffered_entry["iteration"],
+                        buffered_entry["objective"],
+                        buffered_entry["best_objective"],
+                    )
+                # Clear buffer after reporting
+                opt_state["objective_buffer"] = []
             except Exception:
                 # Never let UI/consumer callback break the optimizer loop
                 pass
@@ -1169,8 +1837,9 @@ def run_layer1_optimization(
     # IMPROVED: Larger initial step size for better global exploration (25% instead of 15%)
     target_fraction_of_range = 0.25  # 25% of range per sigma for aggressive exploration
     
-    # Calculate base sigma0 from median span (reasonable global scale)
-    sigma0 = float(np.median(span) * target_fraction_of_range)
+    # Calculate base sigma0 from 25th percentile span (less sensitive to large diameter bounds)
+    # Using percentile instead of median prevents large bound changes from dominating step size
+    sigma0 = float(np.percentile(span, 25) * target_fraction_of_range)
     if not np.isfinite(sigma0) or sigma0 <= 0:
         sigma0 = 0.05
     
@@ -1204,222 +1873,343 @@ def run_layer1_optimization(
     best_f_global = float('inf')
     
     
+    # ============================================================================
+    # Setup for Parallel Evaluation (used by both hybrid and default CMA-ES)
+    # ============================================================================
+    num_workers = _get_num_workers(config_obj)
+    debug_strict = getattr(config_obj.optimizer, 'debug_strict', False) if hasattr(config_obj, 'optimizer') else False
+    
+    layer1_logger.info(f"Using {num_workers} worker processes for parallel evaluation")
+    
+    # Prepare worker init args
+    config_dict = _config_to_dict(config_base)
+    bounds_array = np.column_stack([lower_bounds, upper_bounds])
+    constants_dict = {
+        'target_thrust': target_thrust,
+        'optimal_of': optimal_of,
+        'P_ambient': target_P_exit,  # Ambient pressure (atmospheric)
+        'max_lox_P_psi': max_lox_P_psi,
+        'max_fuel_P_psi': max_fuel_P_psi,
+        'TOTAL_WALL_THICKNESS_M': TOTAL_WALL_THICKNESS_M,
+        'max_nozzle_exit': max_nozzle_exit,
+        'max_chamber_od': max_chamber_od,
+    }
+    
+    # Integer dimension indices (for snapping)
+    integer_dims = [6]  # n_orifices
+    
     # DISPATCH: Check optimizer mode
     optimizer_mode = "cma" # default
     if hasattr(config_obj, "optimizer") and config_obj.optimizer:
         optimizer_mode = config_obj.optimizer.mode
+    
+    # Create ProcessPoolExecutor for parallel evaluation (used by both modes)
+    with ProcessPoolExecutor(
+        max_workers=num_workers,
+        initializer=_init_worker,
+        initargs=(config_dict, bounds_array, requirements, constants_dict, debug_strict)
+    ) as executor:
+        
+        # Optional: Warm-up call per worker (first call can trigger lazy imports)
+        if num_workers > 1:
+            dummy_candidate = _snap_integer_dims(x0_refined.copy(), integer_dims)
+            list(executor.map(_eval_candidate, [dummy_candidate] * num_workers))
 
-    if optimizer_mode == "hybrid_cma_blocks" and hasattr(config_obj.optimizer, "hybrid"):
-        layer1_logger.info("Using Hybrid CMA + Block Re-optimization mode.")
-        hybrid_config = config_obj.optimizer.hybrid
-        
-        # Determine total budget available for optimization (excluding L-BFGS-B refinement)
-        # We used to have num_restarts * max_iterations per restart
-        # Let's say total budget is ~2000-3000 evals
-        # Increased budget for hybrid optimization (increased from 150*pop to 200*pop)
-        total_eval_budget = 300 
-        # Checked existing code: max_iterations is passed as 'maxiter' or 'maxfevals' in different places.
-        # In current CMA code above: cma_options['maxiter'] = iter_budget
-        # default max_iterations is usually large?
-        # Actually in layer1 defaults (not visible here), max_iterations might be small? 
-        # Let's assume passed max_iterations is small (e.g. 100 iterations of popsize?)
-        # Let's force a reasonable budget for hybrid
-        total_budget_evals = max(2000, total_eval_budget * popsize)
-        
-        # Run Multi-Track Hybrid?
-        num_tracks = hybrid_config.num_tracks
-        
-        best_x_global = x0_refined
-        best_f_global = float('inf')
-        
-        if num_tracks > 1:
-            layer1_logger.info(f"Running {num_tracks} independent hybrid tracks...")
-            # Track initialization: Top-N restarts?
-            # User feedback says: "track i starts from best of restart i"
-            # So we first need to run N restarts of global exploration to seed tracks?
-            # OR we simply start N tracks from random perturbations of x0.
-            # "Multi-track: Initialize tracks from Top-N best results of Stage A restarts."
-            # My run_hybrid_optimization includes Stage A internally. 
-            # So "Multi-track" essentially means distinct runs of run_hybrid_optimization?
-            # OR running Stage A first, then branching?
-            # Let's treat "Multi-track" as running the WHOLE hybrid process N times with different seeds.
-             
-            for track_i in range(num_tracks):
-                layer1_logger.info(f"--- Track {track_i+1}/{num_tracks} ---")
-                
-                # Perturb start point for diversity if track > 0
-                if track_i > 0:
-                    x0_track = x0_refined + rng.standard_normal(len(x0_refined)) * (0.1 * span)
-                    x0_track = np.clip(x0_track, lower_bounds, upper_bounds)
-                else:
-                    x0_track = x0_refined
+        if optimizer_mode == "hybrid_cma_blocks" and hasattr(config_obj.optimizer, "hybrid"):
+            layer1_logger.info("Using Hybrid CMA + Block Re-optimization mode.")
+            hybrid_config = config_obj.optimizer.hybrid
+            
+            # Determine total budget available for optimization (excluding L-BFGS-B refinement)
+            # We used to have num_restarts * max_iterations per restart
+            # Let's say total budget is ~2000-3000 evals
+            # Increased budget for hybrid optimization (increased from 150*pop to 200*pop)
+            total_eval_budget = 300 
+            # Checked existing code: max_iterations is passed as 'maxiter' or 'maxfevals' in different places.
+            # In current CMA code above: cma_options['maxiter'] = iter_budget
+            # default max_iterations is usually large?
+            # Actually in layer1 defaults (not visible here), max_iterations might be small? 
+            # Let's assume passed max_iterations is small (e.g. 100 iterations of popsize?)
+            # Let's force a reasonable budget for hybrid
+            total_budget_evals = max(2000, total_eval_budget * popsize)
+            
+            # Run Multi-Track Hybrid?
+            num_tracks = hybrid_config.num_tracks
+            
+            best_x_global = x0_refined
+            best_f_global = float('inf')
+            
+            if num_tracks > 1:
+                layer1_logger.info(f"Running {num_tracks} independent hybrid tracks...")
+                # Track initialization: Top-N restarts?
+                # User feedback says: "track i starts from best of restart i"
+                # So we first need to run N restarts of global exploration to seed tracks?
+                # OR we simply start N tracks from random perturbations of x0.
+                # "Multi-track: Initialize tracks from Top-N best results of Stage A restarts."
+                # My run_hybrid_optimization includes Stage A internally. 
+                # So "Multi-track" essentially means distinct runs of run_hybrid_optimization?
+                # OR running Stage A first, then branching?
+                # Let's treat "Multi-track" as running the WHOLE hybrid process N times with different seeds.
+                 
+                for track_i in range(num_tracks):
+                    check_stop()  # Check if optimization should stop
+                    layer1_logger.info(f"--- Track {track_i+1}/{num_tracks} ---")
                     
-                t_x, t_f, t_ev = run_hybrid_optimization(
+                    # Perturb start point for diversity if track > 0
+                    if track_i > 0:
+                        x0_track = x0_refined + rng.standard_normal(len(x0_refined)) * (0.1 * span)
+                        x0_track = np.clip(x0_track, lower_bounds, upper_bounds)
+                    else:
+                        x0_track = x0_refined
+                        
+                    t_x, t_f, t_ev = run_hybrid_optimization(
+                        objective,
+                        list(zip(lower_bounds, upper_bounds)),
+                        x0_track,
+                        hybrid_config,
+                        total_budget=total_budget_evals // num_tracks,
+                        logger=layer1_logger,
+                        log_status_fn=log_status,
+                        update_progress_fn=update_progress,
+                        valley_escape_tracker=opt_state,
+                        # Parallel evaluation parameters
+                        executor=executor,
+                        integer_dims=integer_dims,
+                        eval_cache=eval_cache,
+                        make_cache_key_fn=_make_eval_cache_key,
+                        stop_event=stop_event,
+                    )
+                    
+                    if t_f < best_f_global:
+                        best_f_global = t_f
+                        best_x_global = t_x
+                        layer1_logger.info(f"Track {track_i+1} found new global best: {best_f_global:.5f}")
+                        
+            else:
+                # Single track
+                best_x_global, best_f_global, evs = run_hybrid_optimization(
                     objective,
                     list(zip(lower_bounds, upper_bounds)),
-                    x0_track,
+                    x0_refined,
                     hybrid_config,
-                    total_budget=total_budget_evals // num_tracks, # Split budget or full budget? Assuming full per track might be too slow. Split it.
+                    total_budget=total_budget_evals,
                     logger=layer1_logger,
                     log_status_fn=log_status,
                     update_progress_fn=update_progress,
-                    valley_escape_tracker=opt_state
+                    valley_escape_tracker=opt_state,
+                    # Parallel evaluation parameters
+                    executor=executor,
+                    integer_dims=integer_dims,
+                    eval_cache=eval_cache,
+                    make_cache_key_fn=_make_eval_cache_key,
+                    stop_event=stop_event,
                 )
-                
-                if t_f < best_f_global:
-                    best_f_global = t_f
-                    best_x_global = t_x
-                    layer1_logger.info(f"Track {track_i+1} found new global best: {best_f_global:.5f}")
-                    
+
         else:
-            # Single track
-            best_x_global, best_f_global, evs = run_hybrid_optimization(
-                objective,
-                list(zip(lower_bounds, upper_bounds)),
-                x0_refined,
-                hybrid_config,
-                total_budget=total_budget_evals,
-                logger=layer1_logger,
-                log_status_fn=log_status,
-                update_progress_fn=update_progress,
-                valley_escape_tracker=opt_state
-            )
-
-    else:
-        # Default/Fallback: Legacy CMA-ES Logic
-        # (This is the existing code block I'm technically replacing but I want to keep it as the 'else' branch)
-        # To avoid massive indentation changes/diff noise, I'll copy the logic here or wrap it.
-        # Since I am replacing the block 1157-1277, I need to include the "for restart_idx" loop logic here.
-        # Wait, the tool 'multi_replace' asks for specific lines. I selected 1157-1277.
-        # This covers the 'for restart_idx' loop.
-        
-        best_x_global = x0_refined
-        best_f_global = float('inf')
-        
-        for restart_idx in range(num_restarts):
-            restart_name = f"Restart {restart_idx + 1}/{num_restarts}" if num_restarts > 1 else "Main search"
+            # Default/Fallback: Legacy CMA-ES Logic with Parallel Evaluation
+            # (Executor already created above, wrapping both hybrid and default paths)
             
-            # IMPROVED: Multi-scale restart strategy
-            if restart_idx == 0:
-                current_sigma_fraction = target_fraction_of_range # 25% (Global)
-                x_start = x0_refined
-            elif restart_idx == 1:
-                current_sigma_fraction = 0.05 # 5% (Refined)
-                perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.1)
-                x_start = best_x_global + perturbation
-            elif restart_idx == 2:
-                current_sigma_fraction = 0.15 # 15% (Medium)
-                perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
-                x_start = best_x_global + perturbation
-            else:
-                current_sigma_fraction = 0.15 if restart_idx % 2 == 0 else 0.25
-                perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
-                x_start = best_x_global + perturbation
+            best_x_global = x0_refined
+            best_f_global = float('inf')
             
-            x_start = np.clip(x_start, lower_bounds, upper_bounds)
+            for restart_idx in range(num_restarts):
+                restart_name = f"Restart {restart_idx + 1}/{num_restarts}" if num_restarts > 1 else "Main search"
                 
-            current_sigma0 = float(np.median(span) * current_sigma_fraction)
-            if not np.isfinite(current_sigma0) or current_sigma0 <= 0:
-                current_sigma0 = 0.05
-                
-            current_cma_stds = np.ones_like(span)
-            for i in range(len(span)):
-                if span[i] > 0:
-                    desired_step = span[i] * current_sigma_fraction
-                    current_cma_stds[i] = max(0.1, desired_step / current_sigma0) if current_sigma0 > 0 else 1.0
-            
-            if current_sigma0 > 0:
-                current_cma_stds[n_orifices_idx] = max(current_cma_stds[n_orifices_idx], 1.0 / current_sigma0)
-    
-            layer1_logger.info(f"")
-            layer1_logger.info(f"Starting {restart_name} (sigma: {current_sigma_fraction*100:.0f}% of range)...")
-            
-            iter_budget = total_eval_budget // num_restarts
-            
-            cma_options = {
-                "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
-                "popsize": popsize,
-                "maxiter": iter_budget,
-                "verb_disp": 0,
-                "verb_log": 0,
-                "CMA_stds": current_cma_stds.tolist(),
-                "tolx": 1e-8,
-                "tolfun": 1e-9,
-                "tolstagnation": 50,
-                "ftarget": -np.inf,
-            }
-            
-            try:
-                es = cma.CMAEvolutionStrategy(x_start.tolist(), current_sigma0, cma_options)
-                while not es.stop():
-                    # Check for Valley Escape boost
-                    target_tier = _check_valley_escape_tier()
-                    if target_tier > opt_state["valley_escape_tier"] and opt_state["function_evaluations"] > opt_state["cooldown_until"]:
-                        # Tier definitions
-                        tier_names = ["None", "Mild", "Medium", "Full"]
-                        boost_factors = [1.0, 1.5, 2.0, 3.0]
-                        current_factor = boost_factors[opt_state["valley_escape_tier"]]
-                        target_factor = boost_factors[target_tier]
-                        relative_boost = target_factor / current_factor
-                        
-                        old_sigma = es.sigma
-                        es.sigma *= relative_boost
-                        
-                        # Clamp sigma to 30% of median span to prevent sampling nonsense
-                        max_sigma = 0.3 * float(np.median(span))
-                        if es.sigma > max_sigma:
-                            es.sigma = max_sigma
-                            
-                        # Update state
-                        opt_state["valley_escape_tier"] = target_tier
-                        opt_state["cooldown_until"] = opt_state["function_evaluations"] + 1000
-                        
-                        layer1_logger.info("!" * 20)
-                        layer1_logger.info(f"VALLEY ESCAPE TRIGGERED (Tier: {tier_names[target_tier]})")
-                        layer1_logger.info(f"Evals: {opt_state['function_evaluations']}, Best: {opt_state['best_objective']:.2f}, Stagnation: {opt_state['function_evaluations'] - opt_state['last_best_eval']}")
-                        layer1_logger.info(f"Sigma: {old_sigma:.6f} -> {es.sigma:.6f} (Boost: {relative_boost:.2f}x)")
-                        layer1_logger.info("!" * 20)
-                        for handler in layer1_logger.handlers:
-                            handler.flush()
-
-                    candidates = es.ask()
-                    values = []
-                    for cand in candidates:
-                        cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
-                        val = objective(cand_arr)
-                        values.append(float(val))
-                    es.tell(candidates, values)
-                    
-                    iter_idx = max(1, es.countiter)
-                    overall_progress = restart_idx / num_restarts
-                    restart_progress = iter_idx / iter_budget / num_restarts
-                    progress = 0.10 + 0.35 * (overall_progress + restart_progress)
-                    update_progress("Layer 1: CMA-ES", progress, 
-                                  f"{restart_name} - iteration {iter_idx}/{iter_budget}")
-                
-                cma_result = es.result
-                restart_best_x = np.asarray(cma_result.xbest, dtype=float)
-                restart_best_f = float(cma_result.fbest)
-                
-                layer1_logger.info(f"{restart_name} finished. Final obj: {restart_best_f:.6f}")
-                
-                if restart_best_f < best_f_global:
-                    best_f_global = restart_best_f
-                    best_x_global = restart_best_x
-                    layer1_logger.info(f"  ✓ New global best: {best_f_global:.6f}")
-                
-                if best_f_global < obj_tolerance:
-                    layer1_logger.info(f"Found excellent solution, skipping restarts")
-                    break
-                    
-                for handler in layer1_logger.handlers:
-                    handler.flush()
-                    
-            except Exception as e:
-                layer1_logger.error(f"{restart_name} failed: {e}")
+                # IMPROVED: Multi-scale restart strategy
                 if restart_idx == 0:
-                    raise
-                continue
+                    current_sigma_fraction = target_fraction_of_range # 25% (Global)
+                    x_start = x0_refined
+                elif restart_idx == 1:
+                    current_sigma_fraction = 0.05 # 5% (Refined)
+                    perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.1)
+                    x_start = best_x_global + perturbation
+                elif restart_idx == 2:
+                    current_sigma_fraction = 0.15 # 15% (Medium)
+                    perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
+                    x_start = best_x_global + perturbation
+                else:
+                    current_sigma_fraction = 0.15 if restart_idx % 2 == 0 else 0.25
+                    perturbation = rng.standard_normal(len(best_x_global)) * (sigma0 * 0.3)
+                    x_start = best_x_global + perturbation
+                
+                x_start = np.clip(x_start, lower_bounds, upper_bounds)
+                    
+                current_sigma0 = float(np.percentile(span, 25) * current_sigma_fraction)
+                if not np.isfinite(current_sigma0) or current_sigma0 <= 0:
+                    current_sigma0 = 0.05
+                    
+                current_cma_stds = np.ones_like(span)
+                for i in range(len(span)):
+                    if span[i] > 0:
+                        desired_step = span[i] * current_sigma_fraction
+                        current_cma_stds[i] = max(0.1, desired_step / current_sigma0) if current_sigma0 > 0 else 1.0
+                
+                if current_sigma0 > 0:
+                    current_cma_stds[n_orifices_idx] = max(current_cma_stds[n_orifices_idx], 1.0 / current_sigma0)
+        
+                layer1_logger.info(f"")
+                layer1_logger.info(f"Starting {restart_name} (sigma: {current_sigma_fraction*100:.0f}% of range)...")
+                
+                iter_budget = total_eval_budget // num_restarts
+                
+                cma_options = {
+                    "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
+                    "popsize": popsize,
+                    "maxiter": iter_budget,
+                    "verb_disp": 0,
+                    "verb_log": 0,
+                    "CMA_stds": current_cma_stds.tolist(),
+                    "tolx": 1e-8,
+                    "tolfun": 1e-9,
+                    "tolstagnation": 50,
+                    "ftarget": -np.inf,
+                }
+                
+                try:
+                    es = cma.CMAEvolutionStrategy(x_start.tolist(), current_sigma0, cma_options)
+                    while not es.stop():
+                        # Check if optimization should stop
+                        check_stop()
+                        
+                        # Check for Valley Escape boost
+                        target_tier = _check_valley_escape_tier()
+                        if target_tier > opt_state["valley_escape_tier"] and opt_state["function_evaluations"] > opt_state["cooldown_until"]:
+                            # Tier definitions
+                            tier_names = ["None", "Mild", "Medium", "Full"]
+                            boost_factors = [1.0, 1.5, 2.0, 3.0]
+                            current_factor = boost_factors[opt_state["valley_escape_tier"]]
+                            target_factor = boost_factors[target_tier]
+                            relative_boost = target_factor / current_factor
+                            
+                            old_sigma = es.sigma
+                            es.sigma *= relative_boost
+                            
+                            # Clamp sigma to 30% of 25th percentile span to prevent sampling nonsense
+                            max_sigma = 0.3 * float(np.percentile(span, 25))
+                            if es.sigma > max_sigma:
+                                es.sigma = max_sigma
+                                
+                            # Update state
+                            opt_state["valley_escape_tier"] = target_tier
+                            opt_state["cooldown_until"] = opt_state["function_evaluations"] + 1000
+                            
+                            layer1_logger.info("!" * 20)
+                            layer1_logger.info(f"VALLEY ESCAPE TRIGGERED (Tier: {tier_names[target_tier]})")
+                            layer1_logger.info(f"Evals: {opt_state['function_evaluations']}, Best: {opt_state['best_objective']:.2f}, Stagnation: {opt_state['function_evaluations'] - opt_state['last_best_eval']}")
+                            layer1_logger.info(f"Sigma: {old_sigma:.6f} -> {es.sigma:.6f} (Boost: {relative_boost:.2f}x)")
+                            layer1_logger.info("!" * 20)
+                            for handler in layer1_logger.handlers:
+                                handler.flush()
+
+
+                        # CMA-ES samples within bounds (no manual clipping needed)
+                        candidates = es.ask()
+                        
+                        # Snap integer dimensions for consistency
+                        # Convert to numpy arrays (pickle-safe in WSL)
+                        candidates_snapped = [
+                            _snap_integer_dims(np.asarray(c, dtype=np.float64), integer_dims)
+                            for c in candidates
+                        ]
+                        
+                        # Parent-side caching: check cache before submitting work
+                        # Cache keys use SNAPPED values for consistency
+                        cache_keys = [_make_eval_cache_key(c) for c in candidates_snapped]
+                        uncached_indices = []
+                        uncached_candidates = []
+                        values = [None] * len(candidates)
+                        
+                        for i, key in enumerate(cache_keys):
+                            if key in eval_cache:
+                                cached_val = eval_cache[key]
+                                # Handle dict format from parallel eval (has 'value' key)
+                                # Note: dict format from objective() has 'results' but not 'value', so we can't use it here
+                                if isinstance(cached_val, dict) and 'value' in cached_val:
+                                    values[i] = float(cached_val['value'])
+                                elif isinstance(cached_val, (int, float)):
+                                    # Old format: direct float value (backward compatibility)
+                                    values[i] = float(cached_val)
+                                else:
+                                    # Full format from objective() or unknown format - can't extract value, treat as uncached
+                                    uncached_indices.append(i)
+                                    uncached_candidates.append(candidates_snapped[i])
+                            else:
+                                uncached_indices.append(i)
+                                uncached_candidates.append(candidates_snapped[i])
+                        
+                        # Parallel evaluation of uncached candidates
+                        if uncached_candidates:
+                            chunksize = max(1, len(uncached_candidates) // (num_workers * 4))
+                            results = list(executor.map(_eval_candidate, uncached_candidates, chunksize=chunksize))
+                            
+                            # Merge results back and update parent state
+                            for idx, res in zip(uncached_indices, results):
+                                obj_val = res['value']
+                                values[idx] = obj_val
+                                
+                                # Cache result (using snapped key) - store in dict format for compatibility
+                                eval_cache[cache_keys[idx]] = {
+                                    'value': obj_val,
+                                    'success': res.get('success', True),
+                                }
+                                
+                                # Parent owns: tracking, logging, history
+                                # Count ALL evaluations (success + failure) for accurate metrics
+                                opt_state['function_evaluations'] += 1
+                                
+                                if not res['success']:
+                                    # Track failures
+                                    reason = res.get('error_type', 'Unknown')
+                                    opt_state['num_failures'] = opt_state.get('num_failures', 0) + 1
+                                    
+                                    # Track failure reasons
+                                    if 'fail_counts' not in opt_state:
+                                        opt_state['fail_counts'] = {}
+                                    opt_state['fail_counts'][reason] = opt_state['fail_counts'].get(reason, 0) + 1
+                                    
+                                    # Periodic failure logging (every 100 evals)
+                                    if opt_state['function_evaluations'] % 100 == 0:
+                                        # Sort failures by count descending
+                                        sorted_fails = sorted(opt_state['fail_counts'].items(), key=lambda item: item[1], reverse=True)
+                                        top_fails = sorted_fails[:3]
+                                        fail_msg = ", ".join([f"{k}: {v}" for k, v in top_fails])
+                                        layer1_logger.warning(f"Recent Failures (Top 3): {fail_msg}")
+                                        
+                                    layer1_logger.warning(f"Eval failed: {reason}")
+                        
+                        # Tell CMA-ES using ORIGINAL candidates (not snapped)
+                        # This is correct because CMA-ES needs to update its distribution
+                        es.tell(candidates, values)
+                        
+                        iter_idx = max(1, es.countiter)
+                        overall_progress = restart_idx / num_restarts
+                        restart_progress = iter_idx / iter_budget / num_restarts
+                        progress = 0.10 + 0.35 * (overall_progress + restart_progress)
+                        update_progress("Layer 1: CMA-ES", progress, 
+                                      f"{restart_name} - iteration {iter_idx}/{iter_budget}")
+                    
+                    cma_result = es.result
+                    restart_best_x = np.asarray(cma_result.xbest, dtype=float)
+                    restart_best_f = float(cma_result.fbest)
+                    
+                    layer1_logger.info(f"{restart_name} finished. Final obj: {restart_best_f:.6f}")
+                    
+                    if restart_best_f < best_f_global:
+                        best_f_global = restart_best_f
+                        best_x_global = restart_best_x
+                        layer1_logger.info(f"  ✓ New global best: {best_f_global:.6f}")
+                    
+                    if best_f_global < obj_tolerance:
+                        layer1_logger.info(f"Found excellent solution, skipping restarts")
+                        break
+                        
+                    for handler in layer1_logger.handlers:
+                        handler.flush()
+                        
+                except Exception as e:
+                    layer1_logger.error(f"{restart_name} failed: {e}")
+                    if restart_idx == 0:
+                        raise
+                    continue
 
     
     # Use best result across all restarts
@@ -1489,6 +2279,25 @@ def run_layer1_optimization(
         final_lox_end_ratio = P_O_final_psi / max_lox_P_psi if max_lox_P_psi > 0 else 0.7
         final_fuel_end_ratio = P_F_final_psi / max_fuel_P_psi if max_fuel_P_psi > 0 else 0.7
     
+    # Ensure tank configs exist
+    if optimized_config.lox_tank is None:
+        from engine.pipeline.config_schemas import LOXTankConfig
+        optimized_config.lox_tank = LOXTankConfig(lox_h=0.5, lox_radius=0.1, ox_tank_pos=1.0)
+    if optimized_config.fuel_tank is None:
+        from engine.pipeline.config_schemas import FuelTankConfig
+        optimized_config.fuel_tank = FuelTankConfig(rp1_h=0.5, rp1_radius=0.1, fuel_tank_pos=0.5)
+    
+    # Extract optimized pressures
+    best_x = opt_state.get("best_x", result.x if hasattr(result, 'x') else x0)
+    if len(best_x) >= 10:
+        P_O_start_optimized_psi = float(np.clip(best_x[8], bounds[8][0], bounds[8][1]))
+        P_F_start_optimized_psi = float(np.clip(best_x[9], bounds[9][0], bounds[9][1]))
+        optimized_config.lox_tank.initial_pressure_psi = P_O_start_optimized_psi
+        optimized_config.fuel_tank.initial_pressure_psi = P_F_start_optimized_psi
+    else:
+        optimized_config.lox_tank.initial_pressure_psi = max_lox_P_psi * 0.8
+        optimized_config.fuel_tank.initial_pressure_psi = max_fuel_P_psi * 0.8
+
     # Ensure orifice angle is 90°
     if hasattr(optimized_config, 'injector') and optimized_config.injector.type == "pintle":
         if hasattr(optimized_config.injector.geometry, 'lox'):
@@ -1828,9 +2637,15 @@ def run_cma_core(
     true_objective_fn: Optional[Callable[[np.ndarray], float]] = None,
     valley_escape_tracker: Optional[Dict[str, Any]] = None,
     logger = None,
+    # Parallel evaluation support
+    executor: Optional[ProcessPoolExecutor] = None,
+    integer_dims: Optional[list] = None,
+    eval_cache: Optional[dict] = None,
+    make_cache_key_fn: Optional[Callable[[np.ndarray], Tuple[int, ...]]] = None,
+    stop_event: Optional[Any] = None,  # threading.Event for stop signal
 ) -> Tuple[np.ndarray, float, int]:
     """
-    Core re-usable CMA-ES wrapper.
+    Core re-usable CMA-ES wrapper with optional parallel evaluation.
     
     Args:
         objective_fn: The function CMA-ES optimizes (could include penalties).
@@ -1845,6 +2660,9 @@ def run_cma_core(
         true_objective_fn: If provided, used to evaluate candidates for ElitePool 
                            and best-so-far tracking (ignoring the penalized objective).
                            If None, objective_fn is used.
+        executor: Optional ProcessPoolExecutor for parallel evaluation.
+        integer_dims: List of integer dimension indices for snapping.
+        eval_cache: Optional evaluation cache dict.
                            
     Returns:
         (best_x, best_f, evals_used)
@@ -1894,34 +2712,39 @@ def run_cma_core(
     stop_loop = False
     
     while not es.stop() and not stop_loop:
+        # Check if optimization should stop
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Optimization stopped by user")
+        
         if evals >= budget:
             break
             
         # Check for Valley Escape boost if tracker provided
         if valley_escape_tracker is not None:
             evals_now = valley_escape_tracker.get("function_evaluations", 0)
-            best_f = valley_escape_tracker.get("best_objective", float('inf'))
+            best_f_tracker = valley_escape_tracker.get("best_objective", float('inf'))
             last_best = valley_escape_tracker.get("last_best_eval", 0)
             stagnation = evals_now - last_best
             current_tier = valley_escape_tracker.get("valley_escape_tier", 0)
             cooldown = valley_escape_tracker.get("cooldown_until", 0)
             
             target_tier = 0
-            if evals_now > 5000 and best_f > 100.0 and stagnation > 1000: target_tier = 3
-            elif evals_now > 3000 and best_f > 150.0 and stagnation > 500: target_tier = 2
-            elif evals_now > 1500 and best_f > 300.0 and stagnation > 300: target_tier = 1
+            if evals_now > 5000 and best_f_tracker > 100.0 and stagnation > 1000: target_tier = 3
+            elif evals_now > 3000 and best_f_tracker > 150.0 and stagnation > 500: target_tier = 2
+            elif evals_now > 1500 and best_f_tracker > 300.0 and stagnation > 300: target_tier = 1
             
             if target_tier > current_tier and evals_now > cooldown:
                 # Apply boost
-                boost_factors = [1.0, 1.5, 2.0, 3.0]
+                boost_factors = [1.0, 2.0, 4.0, 8.0]
                 relative_boost = boost_factors[target_tier] / boost_factors[current_tier]
                 
                 old_sigma = es.sigma
                 es.sigma *= relative_boost
                 
-                # Clamp sigma to 30% of median span
+                # Clamp sigma to 50% of the entire span (much looser)
+                # We want to allow large jumps if needed to escape deep local minima
                 span_vals = upper_bounds - lower_bounds
-                max_sigma = 0.3 * float(np.median(span_vals))
+                max_sigma = 0.5 * float(np.max(span_vals))
                 if es.sigma > max_sigma:
                     es.sigma = max_sigma
                 
@@ -1933,49 +2756,137 @@ def run_cma_core(
                     tier_names = ["None", "Mild", "Medium", "Full"]
                     logger.info("!" * 20)
                     logger.info(f"VALLEY ESCAPE TRIGGERED in run_cma_core (Tier: {tier_names[target_tier]})")
-                    logger.info(f"Evals: {evals_now}, Best: {best_f:.2f}, Stagnation: {stagnation}")
+                    logger.info(f"Evals: {evals_now}, Best: {best_f_tracker:.2f}, Stagnation: {stagnation}")
                     logger.info(f"Sigma: {old_sigma:.6f} -> {es.sigma:.6f} (Boost: {relative_boost:.2f}x)")
                     logger.info("!" * 20)
 
         candidates = es.ask()
-        fitness_values = []
         
-        for cand in candidates:
-            # Clip candidate for evaluation
-            # (CMA-ES internal handling of bounds is 'penalize' or 'repair', 
-            # here we explicitly clip for our function)
-            cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
+        # PARALLEL EVALUATION PATH
+        if executor is not None and integer_dims is not None:
+            # Snap integer dimensions for consistency
+            candidates_snapped = [
+                _snap_integer_dims(np.asarray(c, dtype=np.float64), integer_dims)
+                for c in candidates
+            ]
             
-            # 1. Penalized objective (for CMA ranking)
-            val_penalized = objective_fn(cand_arr)
-            fitness_values.append(val_penalized)
-            evals += 1
-            
-            # 2. True objective (for elites / best tracking)
-            # Use computed penalized value if true_objective_fn not provided
-            # (Assuming objective_fn returns true f in that case)
-            if true_objective_fn:
-                val_true = true_objective_fn(cand_arr)
+            # Parent-side caching if cache provided
+            if eval_cache is not None and make_cache_key_fn is not None:
+                cache_keys = [make_cache_key_fn(c) for c in candidates_snapped]
+                uncached_indices = []
+                uncached_candidates = []
+                fitness_values = [None] * len(candidates)
+                
+                for i, key in enumerate(cache_keys):
+                    if key in eval_cache:
+                        cached_val = eval_cache[key]
+                        # Handle dict format from parallel eval (has 'value' key)
+                        # Note: dict format from objective() has 'results' but not 'value', so we can't use it here
+                        if isinstance(cached_val, dict) and 'value' in cached_val:
+                            fitness_values[i] = float(cached_val['value'])
+                        elif isinstance(cached_val, (int, float)):
+                            # Old format: direct float value (backward compatibility)
+                            fitness_values[i] = float(cached_val)
+                        else:
+                            # Full format from objective() or unknown format - can't extract value, treat as uncached
+                            uncached_indices.append(i)
+                            uncached_candidates.append(candidates_snapped[i])
+                    else:
+                        uncached_indices.append(i)
+                        uncached_candidates.append(candidates_snapped[i])
+                
+                # Parallel evaluation of uncached candidates
+                if uncached_candidates:
+                    num_workers = executor._max_workers
+                    chunksize = max(1, len(uncached_candidates) // (num_workers * 4))
+                    results = list(executor.map(_eval_candidate, uncached_candidates, chunksize=chunksize))
+                    
+                    # Merge results back
+                    for idx, res in zip(uncached_indices, results):
+                        obj_val = res['value']
+                        fitness_values[idx] = obj_val
+                        # Store in dict format for compatibility with objective() cache format
+                        eval_cache[cache_keys[idx]] = {
+                            'value': obj_val,
+                            'success': res.get('success', True),
+                        }
+                        evals += 1
+                        
+                        # Update best and elite pool using true objective
+                        if res['success']:
+                            # For hybrid mode, we use the same objective for both
+                            # (true_objective_fn is typically None in hybrid mode)
+                            if obj_val < best_f:
+                                best_f = obj_val
+                                best_x = candidates_snapped[idx].copy()
+                            
+                            if elite_pool:
+                                elite_pool.add(candidates_snapped[idx], obj_val)
+                        
+                        if evals >= budget:
+                            stop_loop = True
+                
+                # Count cached evals
+                for i, val in enumerate(fitness_values):
+                    if val is not None and i not in uncached_indices:
+                        evals += 1  # Count cache hits as evals for budget tracking
             else:
-                val_true = val_penalized
+                # No caching - evaluate all in parallel
+                num_workers = executor._max_workers
+                chunksize = max(1, len(candidates_snapped) // (num_workers * 4))
+                results = list(executor.map(_eval_candidate, candidates_snapped, chunksize=chunksize))
                 
-            # Update local best using TRUE value
-            if val_true < best_f:
-                best_f = val_true
-                best_x = cand_arr.copy()
-                
-            # Add to elite pool
-            if elite_pool:
-                elite_pool.add(cand_arr, val_true)
+                fitness_values = []
+                for i, res in enumerate(results):
+                    obj_val = res['value']
+                    fitness_values.append(obj_val)
+                    evals += 1
+                    
+                    if res['success']:
+                        if obj_val < best_f:
+                            best_f = obj_val
+                            best_x = candidates_snapped[i].copy()
+                        
+                        if elite_pool:
+                            elite_pool.add(candidates_snapped[i], obj_val)
+                    
+                    if evals >= budget:
+                        stop_loop = True
+        else:
+            # SEQUENTIAL EVALUATION PATH (original code)
+            fitness_values = []
             
-            if evals >= budget:
-                stop_loop = True
-                # Don't break immediately inner loop, let's finish population tell 
-                # strictly speaking we often over-evaluate by (popsize-1), acceptable.
+            for cand in candidates:
+                # Clip candidate for evaluation
+                cand_arr = np.clip(np.asarray(cand, dtype=float), lower_bounds, upper_bounds)
                 
+                # 1. Penalized objective (for CMA ranking)
+                val_penalized = objective_fn(cand_arr)
+                fitness_values.append(val_penalized)
+                evals += 1
+                
+                # 2. True objective (for elites / best tracking)
+                if true_objective_fn:
+                    val_true = true_objective_fn(cand_arr)
+                else:
+                    val_true = val_penalized
+                    
+                # Update local best using TRUE value
+                if val_true < best_f:
+                    best_f = val_true
+                    best_x = cand_arr.copy()
+                    
+                # Add to elite pool
+                if elite_pool:
+                    elite_pool.add(cand_arr, val_true)
+                
+                if evals >= budget:
+                    stop_loop = True
+                    
         es.tell(candidates, fitness_values)
         
     return best_x, best_f, evals
+
 
 
 def compute_blocks_from_elites(
@@ -2101,6 +3012,12 @@ def run_hybrid_optimization(
     log_status_fn = None, 
     update_progress_fn = None,
     valley_escape_tracker: Optional[Dict[str, Any]] = None,
+    # Parallel evaluation support
+    executor: Optional[ProcessPoolExecutor] = None,
+    integer_dims: Optional[list] = None,
+    eval_cache: Optional[dict] = None,
+    make_cache_key_fn: Optional[Callable[[np.ndarray], Tuple[int, ...]]] = None,
+    stop_event: Optional[Any] = None,  # threading.Event for stop signal
 ) -> Tuple[np.ndarray, float, int]:
     """
     Run Hybrid CMA-ES + Block Re-optimization.
@@ -2153,7 +3070,7 @@ def run_hybrid_optimization(
     if logger: logger.info(f"Stage A: Global Search (Budget: {stage_a_budget})")
     
     # Setup CMA stds
-    sigma0 = 0.25 * float(np.median(span)) # Heuristic 25% of median span
+    sigma0 = 0.25 * float(np.percentile(span, 25)) # Heuristic 25% of 25th percentile span
     cma_stds = span / (4.0 * sigma0) # Normalize so sigma*std roughly covers range
     
     # We use a randomized restart wrapper for Stage A to ensure good coverage
@@ -2174,7 +3091,11 @@ def run_hybrid_optimization(
     x_res, f_res, evs = run_cma_core(
         objective, x0, sigma0, bounds, budget_a1, 
         popsize=16, cma_stds=cma_stds, elite_pool=elite_pool,
-        valley_escape_tracker=valley_escape_tracker, logger=logger
+        valley_escape_tracker=valley_escape_tracker, logger=logger,
+        # Parallel evaluation
+        executor=executor, integer_dims=integer_dims, eval_cache=eval_cache,
+        make_cache_key_fn=make_cache_key_fn,
+        stop_event=stop_event,
     )
     evals_used += evs
     if f_res < best_f_global:
@@ -2190,7 +3111,11 @@ def run_hybrid_optimization(
         x_res, f_res, evs = run_cma_core(
             objective, x0_2, sigma0 * 0.5, bounds, budget_a2, 
             popsize=16, cma_stds=cma_stds, elite_pool=elite_pool,
-            valley_escape_tracker=valley_escape_tracker, logger=logger
+            valley_escape_tracker=valley_escape_tracker, logger=logger,
+            # Parallel evaluation
+            executor=executor, integer_dims=integer_dims, eval_cache=eval_cache,
+            make_cache_key_fn=make_cache_key_fn,
+            stop_event=stop_event,
         )
         evals_used += evs
         if f_res < best_f_global:
@@ -2203,6 +3128,10 @@ def run_hybrid_optimization(
     current_x = best_x_global.copy()
     
     for cycle_idx in range(hybrid_config.cycles):
+        # Check if optimization should stop
+        if stop_event is not None and stop_event.is_set():
+            raise RuntimeError("Optimization stopped by user")
+        
         if update_progress_fn: 
             update_progress_fn(f"Hybrid: Cycle {cycle_idx+1}", 0.3 + 0.6*(cycle_idx/max(1,hybrid_config.cycles)), f"Block Optimization ({hybrid_config.block_method})")
             
@@ -2281,7 +3210,9 @@ def run_hybrid_optimization(
                 popsize=max(8, 4 + int(3 * np.log(len(z0)+1))), # Smaller pop for blocks
                 elite_pool=None, 
                 true_objective_fn=block_obj_fn,
-                valley_escape_tracker=valley_escape_tracker, logger=logger
+                valley_escape_tracker=valley_escape_tracker, logger=logger,
+                make_cache_key_fn=make_cache_key_fn,
+                stop_event=stop_event,
             )
             
             evals_used += z_evals
@@ -2321,7 +3252,9 @@ def run_hybrid_optimization(
                 x_ref_res, f_ref_res, evs_ref = run_cma_core(
                     objective, x_ref, sigma_ref, bounds, ref_budget,
                     popsize=16, cma_stds=cma_stds, elite_pool=elite_pool,
-                    valley_escape_tracker=valley_escape_tracker, logger=logger
+                    valley_escape_tracker=valley_escape_tracker, logger=logger,
+                    make_cache_key_fn=make_cache_key_fn,
+                    stop_event=stop_event,
                 )
                 evals_used += evs_ref
                 

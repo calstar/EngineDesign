@@ -735,6 +735,12 @@ export async function getLayer1Results(): Promise<ApiResponse<Layer1ResultsRespo
   return request<Layer1ResultsResponse>('/optimizer/layer1/results');
 }
 
+export async function stopLayer1Optimization(): Promise<ApiResponse<{ status: string; message: string }>> {
+  return request<{ status: string; message: string }>('/optimizer/layer1/stop', {
+    method: 'POST',
+  });
+}
+
 /**
  * Run Layer 1 optimization with Server-Sent Events for real-time progress updates.
  * Returns an EventSource that emits progress events.

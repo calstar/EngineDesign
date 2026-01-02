@@ -38,16 +38,7 @@ class ChamberSolver:
         self.cea_cache = cea_cache
         
         # Ensure chamber_geometry exists
-        cg = ensure_chamber_geometry(config)
-        
-        # Calculate L* once (use config value if provided, otherwise calculate)
-
-        self.Lstar = calculate_Lstar(
-            cg.volume,
-            cg.A_throat,
-            Lstar_override=cg.Lstar
-        )
-        self.injector_diameter = self._infer_injector_diameter()
+        ensure_chamber_geometry(config)
         
         # Cache for spray quality (updated during solve)
         self.spray_quality_good = True
@@ -137,6 +128,20 @@ class ChamberSolver:
         # This corrects CEA's infinite-area assumption
 
 
+        # Apply combustion efficiency for FINITE CHAMBER
+        # This corrects CEA's infinite-area assumption
+        
+        # Calculate current Lstar and injector diameter dynamically
+        # This is critical for optimization where config is mutated in-place
+        cg = ensure_chamber_geometry(self.config)
+        current_Lstar = calculate_Lstar(
+            cg.volume,
+            cg.A_throat,
+            Lstar_override=cg.Lstar
+        )
+        current_injector_diameter = self._infer_injector_diameter()
+
+
         cooling_results, cooling_eff, _ = self._evaluate_cooling_models(
             Pc_val,
             mdot_O,
@@ -156,7 +161,7 @@ class ChamberSolver:
             "Ac": geometry["area_cross"],
             "At": cg.A_throat,  # Added At for residence time calculation
             "chamber_length": geometry["length"],  # Added for mixing models
-            "Dinj": self.injector_diameter,
+            "Dinj": current_injector_diameter,
             "m_dot_total": mdot_supply,
             "spray_diagnostics": diagnostics,
             "turbulence_intensity": diagnostics.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
@@ -174,7 +179,7 @@ class ChamberSolver:
         
         # Calculate efficiency using advanced physics-based model
         eta = eta_cstar(
-            self.Lstar,
+            current_Lstar,
             self.config.combustion.efficiency,
             cooling_eff,
             advanced_params,
@@ -526,6 +531,16 @@ class ChamberSolver:
         # Get final diagnostics
         mdot_O, mdot_F, closure_diag = flows(P_tank_O, P_tank_F, Pc_val, self.config)
         MR = mdot_O / mdot_F if mdot_F > 0 else 0
+
+        # Calculate current Lstar and injector diameter dynamically
+        # This is critical for optimization where config is mutated in-place
+        cg = ensure_chamber_geometry(self.config)
+        current_Lstar = calculate_Lstar(
+            cg.volume,
+            cg.A_throat,
+            Lstar_override=cg.Lstar
+        )
+        current_injector_diameter = self._infer_injector_diameter()
         
         # Use current expansion ratio for 3D cache
         # FIXED: Add safety check for division by zero
@@ -558,7 +573,7 @@ class ChamberSolver:
                 # Tc (Ideal) for residence time (shorter time is conservative)
                 # effective_Tc (Actual) for kinetics (slower chemistry is conservative)
                 reaction_progress = calculate_chamber_reaction_progress(
-                    self.Lstar,
+                    current_Lstar,
                     Pc_val,
                     cea_props["Tc"], # Ideal Tc (Residence Time)
                     cea_props["cstar_ideal"],
@@ -578,7 +593,7 @@ class ChamberSolver:
                 rho_chamber = Pc_val / (cea_props["R"] * cea_props["Tc"]) if cea_props["R"] > 0 and cea_props["Tc"] > 0 else 1.0
                 # Use actual mdot_total from closure (calculated above)
                 cg = ensure_chamber_geometry(self.config)
-                tau_residence_correct = self.Lstar * rho_chamber * cg.A_throat / mdot_total if mdot_total > 0 else 0.001
+                tau_residence_correct = current_Lstar * rho_chamber * cg.A_throat / mdot_total if mdot_total > 0 else 0.001
                 reaction_progress = {
                     "progress_throat": 1.0,  # Assume equilibrium
                     "tau_residence": tau_residence_correct,
@@ -612,7 +627,7 @@ class ChamberSolver:
             "Ac": geometry["area_cross"],
             "At": cg.A_throat,
             "chamber_length": geometry["length"],
-            "Dinj": self.injector_diameter,
+            "Dinj": current_injector_diameter,
             "m_dot_total": mdot_total,
             "u_fuel": closure_diag.get("u_F"),
             "u_lox": closure_diag.get("u_O"),
@@ -622,7 +637,7 @@ class ChamberSolver:
         }
         
         eta = eta_cstar(
-            self.Lstar,
+            current_Lstar,
             self.config.combustion.efficiency,
             cooling_eff,
             advanced_params,

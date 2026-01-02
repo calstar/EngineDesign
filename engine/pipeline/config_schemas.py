@@ -537,6 +537,7 @@ class LOXTankConfig(BaseModel):
     lox_radius: float = Field(gt=0, description="LOX tank internal radius [m]")
     ox_tank_pos: float = Field(description="LOX tank center position relative to nozzle exit (positive = above nozzle) [m]")
     mass: Optional[float] = Field(default=None, gt=0, description="Initial LOX PROPELLANT mass [kg] (liquid only, not tank structure). Depletes during burn.")
+    initial_pressure_psi: Optional[float] = Field(default=None, gt=0, description="Initial LOX tank pressure [psi]")
 
 
 class FuelTankConfig(BaseModel):
@@ -545,6 +546,7 @@ class FuelTankConfig(BaseModel):
     rp1_radius: float = Field(gt=0, description="RP-1 tank internal radius [m]")
     fuel_tank_pos: float = Field(description="Fuel tank center position relative to nozzle exit (positive = above, negative = below nozzle) [m]")
     mass: Optional[float] = Field(default=None, gt=0, description="Initial RP-1 PROPELLANT mass [kg] (liquid only, not tank structure). Depletes during burn.")
+    initial_pressure_psi: Optional[float] = Field(default=None, gt=0, description="Initial fuel tank pressure [psi]")
 
 
 class PressTankConfig(BaseModel):
