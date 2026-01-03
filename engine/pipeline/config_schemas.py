@@ -727,6 +727,25 @@ class OptimizerConfig(BaseModel):
     hybrid: Optional[HybridOptimizerConfig] = Field(default=None, description="Configuration for hybrid mode")
 
 
+class PressureSegmentConfig(BaseModel):
+    """Single segment of a pressure curve"""
+    length_ratio: float = Field(gt=0, le=1, description="Fraction of total burn time for this segment (0-1)")
+    type: Literal["linear", "blowdown"] = Field(description="Segment type: 'linear' or 'blowdown'")
+    start_pressure_pa: float = Field(gt=0, description="Pressure at segment start [Pa]")
+    end_pressure_pa: float = Field(gt=0, description="Pressure at segment end [Pa]")
+    k: Optional[float] = Field(default=None, gt=0, description="Blowdown parameter k (only used for blowdown type, typically 0.1-2.0)")
+
+
+class PressureCurvesConfig(BaseModel):
+    """Optimized pressure curves from Layer 2 optimization"""
+    n_points: int = Field(default=200, gt=0, description="Number of points in the generated pressure curve arrays")
+    target_burn_time_s: float = Field(gt=0, description="Target burn time [s] used for optimization")
+    initial_lox_pressure_pa: float = Field(gt=0, description="Initial LOX tank pressure [Pa]")
+    initial_fuel_pressure_pa: float = Field(gt=0, description="Initial fuel tank pressure [Pa]")
+    lox_segments: list[PressureSegmentConfig] = Field(description="LOX tank pressure curve segments")
+    fuel_segments: list[PressureSegmentConfig] = Field(description="Fuel tank pressure curve segments")
+
+
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
     fluids: dict[str, FluidConfig]
@@ -755,6 +774,7 @@ class PintleEngineConfig(BaseModel):
     environment: Optional[EnvironmentConfig] = Field(default=None, description="Environment configuration for flight simulation")
     thrust: Optional[ThrustConfig] = Field(default=None, description="Thrust configuration for flight simulation")
     design_requirements: Optional[DesignRequirementsConfig] = Field(default=None, description="Design requirements for optimizer")
+    pressure_curves: Optional[PressureCurvesConfig] = Field(default=None, description="Optimized pressure curves from Layer 2 optimization")
 
     @field_validator("feed_system", "discharge")
     @classmethod

@@ -34,9 +34,12 @@ from engine.optimizer.layers.layer1_static_optimization import (
 from engine.optimizer.layers.layer2_pressure import (
     run_layer2_pressure,
 )
-from engine.optimizer.layers.layer2_burn_candidate import (
-    run_layer2_burn_candidate,
-)
+try:
+    from engine.optimizer.layers.layer2_burn_candidate import (
+        run_layer2_burn_candidate,
+    )
+except ImportError:
+    run_layer2_burn_candidate = None
 from engine.optimizer.layers.layer3_thermal_protection import (
     run_layer3_thermal_protection,
 )

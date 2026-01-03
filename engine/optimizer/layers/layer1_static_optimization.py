@@ -219,15 +219,22 @@ def create_layer1_apply_x_to_config(
         if hasattr(config.combustion, 'cea'):
             config.combustion.cea.expansion_ratio = expansion_ratio
         
-        # Injector
+        # Injector - Primary values
         if hasattr(config.injector, 'geometry'):
             if hasattr(config.injector.geometry, 'fuel'):
                 config.injector.geometry.fuel.d_pintle_tip = d_pintle_tip
                 config.injector.geometry.fuel.h_gap = h_gap
+                # Derived fuel values
+                config.injector.geometry.fuel.d_reservoir_inner = d_pintle_tip + 2 * h_gap
+                config.injector.geometry.fuel.d_hydraulic = 2 * h_gap  # Annular gap hydraulic diameter
+                config.injector.geometry.fuel.A_entry = np.pi * (d_pintle_tip / 2) ** 2  # Placeholder (unused)
             if hasattr(config.injector.geometry, 'lox'):
                 config.injector.geometry.lox.n_orifices = n_orifices
                 config.injector.geometry.lox.d_orifice = d_orifice
                 config.injector.geometry.lox.theta_orifice = 90.0
+                # Derived LOX values
+                config.injector.geometry.lox.d_hydraulic = d_orifice  # Single orifice diameter
+                config.injector.geometry.lox.A_entry = np.pi * (d_orifice / 2) ** 2  # Placeholder (unused)
         
         # Thermal protection
         #
@@ -426,10 +433,17 @@ def _apply_x_to_worker_config_inplace(x: np.ndarray, config: PintleEngineConfig,
         if hasattr(config.injector.geometry, 'fuel'):
             config.injector.geometry.fuel.d_pintle_tip = d_pintle_tip
             config.injector.geometry.fuel.h_gap = h_gap
+            # Derived fuel values
+            config.injector.geometry.fuel.d_reservoir_inner = d_pintle_tip + 2 * h_gap
+            config.injector.geometry.fuel.d_hydraulic = 2 * h_gap  # Annular gap hydraulic diameter
+            config.injector.geometry.fuel.A_entry = np.pi * (d_pintle_tip / 2) ** 2  # Placeholder (unused)
         if hasattr(config.injector.geometry, 'lox'):
             config.injector.geometry.lox.n_orifices = n_orifices
             config.injector.geometry.lox.d_orifice = d_orifice
             config.injector.geometry.lox.theta_orifice = 90.0
+            # Derived LOX values
+            config.injector.geometry.lox.d_hydraulic = d_orifice  # Single orifice diameter
+            config.injector.geometry.lox.A_entry = np.pi * (d_orifice / 2) ** 2  # Placeholder (unused)
 
 
 def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, constants: dict) -> float:
@@ -2397,6 +2411,12 @@ def run_layer1_optimization(
                 Cf_calculated = F_val / (Pc_val * A_throat_val)
                 initial_performance["Cf_actual"] = Cf_calculated
                 initial_performance["Cf"] = Cf_calculated
+    
+    # Update chamber_geometry.Cf with the calculated thrust coefficient
+    Cf_final = initial_performance.get("Cf_actual", initial_performance.get("Cf"))
+    if Cf_final is not None and np.isfinite(Cf_final):
+        if optimized_config.chamber_geometry is not None:
+            optimized_config.chamber_geometry.Cf = float(Cf_final)
     
     # Check stability
     stored_results = opt_state.get("best_results_for_validation", {})

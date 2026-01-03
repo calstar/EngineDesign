@@ -16,6 +16,7 @@ from backend.state import app_state
 from backend.routers.config import config_to_dict
 from engine.pipeline.config_schemas import DesignRequirementsConfig
 from engine.optimizer.layers.layer1_static_optimization import run_layer1_optimization
+from engine.optimizer.layers.layer2_pressure import run_layer2_pressure
 
 
 def convert_numpy(obj):
@@ -75,8 +76,23 @@ class Layer1Request(BaseModel):
     target_burn_time: Optional[float] = Field(default=None, gt=0, description="Target burn time [s] (from design requirements if None)")
 
 
+class Layer2Request(BaseModel):
+    """Request body for Layer 2 optimization."""
+    max_iterations: int = Field(default=20, ge=1, le=100, description="Maximum optimization iterations")
+    save_plots: bool = Field(default=False, description="Save evaluation plots")
+
+
 # Global state for optimization status
 _optimization_status = {
+    "running": False,
+    "progress": 0.0,
+    "stage": "",
+    "message": "",
+    "results": None,
+    "error": None,
+}
+
+_layer2_status = {
     "running": False,
     "progress": 0.0,
     "stage": "",
@@ -158,6 +174,60 @@ async def get_layer1_results():
         "status": "success",
         "results": _optimization_status["results"],
     }
+
+
+@router.get("/layer2/status")
+async def get_layer2_status():
+    """Get Layer 2 optimization status."""
+    return {
+        "running": _layer2_status["running"],
+        "progress": _layer2_status["progress"],
+        "stage": _layer2_status["stage"],
+        "message": _layer2_status["message"],
+        "has_results": _layer2_status["results"] is not None,
+        "error": _layer2_status["error"],
+    }
+
+
+@router.get("/layer2/results")
+async def get_layer2_results():
+    """Get Layer 2 optimization results."""
+    if _layer2_status["results"] is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No Layer 2 optimization results available. Run Layer 2 optimization first."
+        )
+    
+    return {
+        "status": "success",
+        "results": _layer2_status["results"],
+    }
+
+
+@router.post("/layer2/stop")
+async def stop_layer2():
+    """Stop the currently running Layer 2 optimization."""
+    global _stop_event
+    
+    if not _layer2_status["running"]:
+        raise HTTPException(
+            status_code=400,
+            detail="No Layer 2 optimization is currently running."
+        )
+    
+    with _stop_event_lock:
+        if _stop_event is not None:
+            _stop_event.set()
+            _layer2_status["message"] = "Stopping optimization..."
+            return {
+                "status": "success",
+                "message": "Stop signal sent to optimizer."
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "Stop event not initialized."
+            }
 
 
 @router.post("/layer1/stop")
@@ -421,4 +491,257 @@ async def run_layer1(
             "X-Accel-Buffering": "no",  # Disable nginx buffering
         }
     )
+
+
+@router.get("/layer2")
+async def run_layer2(
+    max_iterations: int = 20,
+    save_plots: bool = False
+):
+    """Run Layer 2 optimization with Server-Sent Events for progress updates."""
+    if not app_state.has_config():
+        raise HTTPException(
+            status_code=400,
+            detail="No config loaded. Run Layer 1 or upload a config first."
+        )
+    
+    if not app_state.runner:
+        raise HTTPException(
+            status_code=400,
+            detail="Runner not initialized."
+        )
+    
+    # Check for design requirements
+    if app_state.config.design_requirements is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No design requirements set."
+        )
+    
+    # Check if already running
+    if _layer2_status["running"]:
+        raise HTTPException(
+            status_code=409,
+            detail="Layer 2 optimization already running."
+        )
+    
+    async def event_generator():
+        global _layer2_status, _stop_event
+        
+        with _stop_event_lock:
+            _stop_event = threading.Event()
+        
+        _layer2_status.update({
+            "running": True,
+            "progress": 0.0,
+            "stage": "Initializing",
+            "message": "Starting Layer 2 optimization...",
+            "results": None,
+            "error": None,
+        })
+        
+        yield f"data: {safe_json_dumps({'type': 'status', 'progress': 0.0, 'stage': 'Initializing', 'message': 'Starting optimization...'})}\n\n"
+        
+        try:
+            reqs = app_state.config.design_requirements
+            burn_time = reqs.target_burn_time
+            
+            # Extract initial pressures from config if available, otherwise use defaults
+            # Layer 1 should have set these in the config
+            initial_lox_p = 500.0 * 6894.76
+            if app_state.config.lox_tank and app_state.config.lox_tank.initial_pressure_psi:
+                initial_lox_p = app_state.config.lox_tank.initial_pressure_psi * 6894.76
+                
+            initial_fuel_p = 500.0 * 6894.76
+            if app_state.config.fuel_tank and app_state.config.fuel_tank.initial_pressure_psi:
+                initial_fuel_p = app_state.config.fuel_tank.initial_pressure_psi * 6894.76
+            
+            # Extract parameters from requirements or config
+            target_thrust = reqs.target_thrust
+            target_apogee = reqs.target_apogee or 3048.0
+            
+            # Rocket dry mass calculation
+            rocket_dry_mass_kg = 50.0 # Default
+            if app_state.config.rocket:
+                r = app_state.config.rocket
+                if r.airframe_mass is not None and r.engine_mass is not None:
+                    # Sum up components if broken down
+                    rocket_dry_mass_kg = (
+                        (r.airframe_mass or 0) + 
+                        (r.engine_mass or 0) + 
+                        (r.lox_tank_structure_mass or 0) + 
+                        (r.fuel_tank_structure_mass or 0) + 
+                        (r.copv_dry_mass or 0)
+                    )
+                elif r.propulsion_dry_mass is not None:
+                    rocket_dry_mass_kg = (r.airframe_mass or 0) + r.propulsion_dry_mass
+            
+            # Tank capacities
+            lox_capacity = reqs.lox_tank_capacity_kg or 25.0
+            fuel_capacity = reqs.fuel_tank_capacity_kg or 15.0
+            
+            objective_history = []
+            objective_history_lock = threading.Lock()
+            last_sent_count = 0
+            
+            # Track best pressure curves for streaming to UI
+            best_pressure_curves = {"time": None, "lox": None, "fuel": None, "copv_pressure": None, "copv_time": None}
+            pressure_curves_lock = threading.Lock()
+            pressure_curves_updated = threading.Event()
+            
+            def update_progress(stage: str, progress: float, message: str):
+                _layer2_status.update({"progress": progress, "stage": stage, "message": message})
+            
+            def objective_callback(iteration: int, objective: float, best_objective: float):
+                with objective_history_lock:
+                    objective_history.append({
+                        "iteration": int(iteration),
+                        "objective": float(objective),
+                        "best_objective": float(best_objective),
+                    })
+            
+            def pressure_curve_callback(time_arr, P_lox, P_fuel, copv_pressure=None, copv_time=None):
+                """Called when a new best solution is found - stream pressure curves to UI."""
+                with pressure_curves_lock:
+                    best_pressure_curves["time"] = time_arr
+                    best_pressure_curves["lox"] = P_lox
+                    best_pressure_curves["fuel"] = P_fuel
+                    best_pressure_curves["copv_pressure"] = copv_pressure
+                    best_pressure_curves["copv_time"] = copv_time
+                    pressure_curves_updated.set()  # Signal that new curves are available
+
+
+            
+            import concurrent.futures
+            
+            def run_opt():
+                return run_layer2_pressure(
+                    optimized_config=app_state.config,
+                    initial_lox_pressure_pa=initial_lox_p,
+                    initial_fuel_pressure_pa=initial_fuel_p,
+                    peak_thrust=target_thrust,
+                    target_apogee_m=target_apogee,
+                    rocket_dry_mass_kg=rocket_dry_mass_kg,
+                    max_lox_tank_capacity_kg=lox_capacity,
+                    max_fuel_tank_capacity_kg=fuel_capacity,
+                    target_burn_time=burn_time,
+                    n_time_points=200,
+                    update_progress=update_progress,
+                    objective_callback=objective_callback,
+                    pressure_curve_callback=pressure_curve_callback,
+                    max_iterations=max_iterations,
+                    save_evaluation_plots=save_plots,
+                )
+            
+            # Wait, I need to check the design requirements for tank capacities
+            # It seems DesignRequirementsConfig doesn't have capacity_kg?
+            # Let me check engine/pipeline/config_schemas.py
+            
+            loop = asyncio.get_event_loop()
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = loop.run_in_executor(pool, run_opt)
+                
+                while not future.done():
+                    yield f"data: {safe_json_dumps({'type': 'progress', 'progress': _layer2_status['progress'], 'stage': _layer2_status['stage'], 'message': _layer2_status['message']})}\n\n"
+                    
+                    with objective_history_lock:
+                        if len(objective_history) > last_sent_count:
+                            new_entries = objective_history[last_sent_count:]
+                            last_sent_count = len(objective_history)
+                            yield f"data: {safe_json_dumps({'type': 'objective', 'objective_history': new_entries, 'total_count': last_sent_count})}\n\n"
+                    
+                    # Check for new pressure curves and send them
+                    if pressure_curves_updated.is_set():
+                        with pressure_curves_lock:
+                            if best_pressure_curves["time"] is not None:
+                                # Send pressure curves to frontend (including COPV data)
+                                curves_data = convert_numpy({
+                                    'type': 'pressure_curves',
+                                    'time_array': best_pressure_curves["time"],
+                                    'lox_pressure': best_pressure_curves["lox"],
+                                    'fuel_pressure': best_pressure_curves["fuel"],
+                                    'copv_pressure': best_pressure_curves["copv_pressure"],
+                                    'copv_time': best_pressure_curves["copv_time"],
+                                })
+                                yield f"data: {safe_json_dumps(curves_data)}\n\n"
+                                pressure_curves_updated.clear()  # Reset flag
+
+                    
+                    await asyncio.sleep(0.5)
+                
+                optimized_config, time_array, P_lox, P_fuel, summary, success = future.result()
+                
+                # Check if stopped
+                with _stop_event_lock:
+                    if _stop_event and _stop_event.is_set():
+                        _layer2_status["running"] = False
+                        yield f"data: {safe_json_dumps({'type': 'error', 'error': 'Stopped by user'})}\n\n"
+                        return
+                
+                # Update app state
+                app_state.config = optimized_config
+                
+                results_dict = convert_numpy({
+                    "performance": summary, # Layer 2 summary contains performance info
+                    "summary": summary,
+                    "objective_history": objective_history,
+                    "time_array": time_array,
+                    "lox_pressure": P_lox,
+                    "fuel_pressure": P_fuel,
+                    "config": config_to_dict(optimized_config),
+                    "config_yaml": yaml.dump(config_to_dict(optimized_config), default_flow_style=False),
+                })
+                
+                _layer2_status.update({
+                    "results": results_dict,
+                    "progress": 1.0,
+                    "stage": "Complete",
+                    "message": "Layer 2 optimization complete",
+                })
+                
+                yield f"data: {safe_json_dumps({'type': 'complete', 'results': results_dict})}\n\n"
+                
+        except Exception as e:
+            _layer2_status["error"] = str(e)
+            yield f"data: {safe_json_dumps({'type': 'error', 'error': str(e), 'traceback': traceback.format_exc()})}\n\n"
+        finally:
+            _layer2_status["running"] = False
+            with _stop_event_lock:
+                _stop_event = None
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"}
+    )
+
+
+from fastapi import UploadFile, File as FastAPIFile
+
+@router.post("/layer2/upload-config")
+async def upload_layer2_config(file: UploadFile = FastAPIFile(...)):
+    """Upload a config to use for Layer 2."""
+    try:
+        content = await file.read()
+        config_dict = yaml.safe_load(content)
+        
+        # Validate and update app state
+        from engine.pipeline.config_schemas import PintleEngineConfig
+        config = PintleEngineConfig(**config_dict)
+        app_state.config = config
+        
+        # Re-initialize runner if needed
+        from engine.core.runner import PintleEngineRunner
+        app_state.runner = PintleEngineRunner(config)
+        
+        return {
+            "status": "success",
+            "message": "Config uploaded successfully for Layer 2",
+            "config": config_to_dict(config)
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to upload config: {str(e)}"
+        )
 

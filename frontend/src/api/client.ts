@@ -303,6 +303,10 @@ export interface SegmentsRequest {
   n_points: number;
   lox_segments: PressureSegment[];
   fuel_segments: PressureSegment[];
+  // Blowdown mode parameters
+  blowdown_mode?: boolean;
+  lox_initial_pressure_psi?: number;
+  fuel_initial_pressure_psi?: number;
 }
 
 // Time-series data returned from the API
@@ -416,6 +420,30 @@ export async function previewCurve(
     method: 'POST',
     body: JSON.stringify(params),
   });
+}
+
+export async function uploadTimeseriesFromCSV(
+  file: File
+): Promise<ApiResponse<GenerateProfileResponse>> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const response = await fetch(`${API_BASE}/timeseries/from-csv`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { error: errorData.detail || `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+    return { data };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'CSV upload failed' };
+  }
 }
 
 
@@ -768,6 +796,142 @@ export function runLayer1Optimization(
       onProgress(data);
 
       // Close connection on completion or error
+      if (data.type === 'complete' || data.type === 'error') {
+        eventSource.close();
+      }
+    } catch (err) {
+      console.error('Error parsing SSE event:', err);
+      onError(err instanceof Error ? err.message : 'Failed to parse progress event');
+      eventSource.close();
+    }
+  };
+
+  eventSource.onerror = (err) => {
+    console.error('SSE connection error:', err);
+    onError('Connection to server lost');
+    eventSource.close();
+  };
+
+  return eventSource;
+}
+// ============================================================================
+// Layer 2 Optimizer Types and API
+// ============================================================================
+
+export interface Layer2Settings {
+  max_iterations: number;
+  save_plots?: boolean;
+}
+
+export interface Layer2Results {
+  performance: Record<string, any>;
+  summary: Record<string, any>;
+  objective_history: Array<{
+    iteration: number;
+    objective: number;
+    best_objective: number;
+  }>;
+  time_array: number[];
+  lox_pressure: number[];
+  fuel_pressure: number[];
+  config?: EngineConfig;
+  config_yaml?: string;
+}
+
+export interface Layer2ProgressEvent {
+  type: 'status' | 'progress' | 'objective' | 'pressure_curves' | 'complete' | 'error';
+  progress?: number;
+  stage?: string;
+  message?: string;
+  objective_history?: Array<{
+    iteration: number;
+    objective: number;
+    best_objective: number;
+  }>;
+  total_count?: number;
+  time_array?: number[];
+  lox_pressure?: number[];
+  fuel_pressure?: number[];
+  copv_pressure?: number[];
+  copv_time?: number[];
+  results?: Layer2Results;
+  error?: string;
+  traceback?: string;
+}
+
+
+export interface Layer2StatusResponse {
+  running: boolean;
+  progress: number;
+  stage: string;
+  message: string;
+  has_results: boolean;
+  error: string | null;
+}
+
+export interface Layer2ResultsResponse {
+  status: string;
+  results: Layer2Results;
+}
+
+export async function getLayer2Status(): Promise<ApiResponse<Layer2StatusResponse>> {
+  return request<Layer2StatusResponse>('/optimizer/layer2/status');
+}
+
+export async function getLayer2Results(): Promise<ApiResponse<Layer2ResultsResponse>> {
+  return request<Layer2ResultsResponse>('/optimizer/layer2/results');
+}
+
+export async function stopLayer2Optimization(): Promise<ApiResponse<{ status: string; message: string }>> {
+  return request<{ status: string; message: string }>('/optimizer/layer2/stop', {
+    method: 'POST',
+  });
+}
+
+export async function uploadLayer2Config(file: File): Promise<ApiResponse<UploadResponse>> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const response = await fetch(`${API_BASE}/optimizer/layer2/upload-config`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { error: errorData.detail || `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+    return { data };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Upload failed' };
+  }
+}
+
+/**
+ * Run Layer 2 optimization with Server-Sent Events for real-time progress updates.
+ */
+export function runLayer2Optimization(
+  settings: Layer2Settings,
+  onProgress: (event: Layer2ProgressEvent) => void,
+  onError: (error: string) => void
+): EventSource {
+  const params = new URLSearchParams({
+    max_iterations: settings.max_iterations.toString(),
+    save_plots: (settings.save_plots || false).toString(),
+  });
+
+  const url = `${API_BASE}/optimizer/layer2?${params.toString()}`;
+
+  const eventSource = new EventSource(url);
+
+  eventSource.onmessage = (event) => {
+    try {
+      const data: Layer2ProgressEvent = JSON.parse(event.data);
+      onProgress(data);
+
       if (data.type === 'complete' || data.type === 'error') {
         eventSource.close();
       }

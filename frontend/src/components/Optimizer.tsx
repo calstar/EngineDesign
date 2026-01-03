@@ -1,20 +1,21 @@
 import { useState, useEffect } from 'react';
 import { DesignRequirements } from './DesignRequirements';
 import { Layer1Optimization } from './Layer1Optimization';
-import { 
-  saveDesignRequirements, 
+import { Layer2Optimization } from './Layer2Optimization';
+import {
+  saveDesignRequirements,
   getDesignRequirements
 } from '../api/client';
-import type { 
+import type {
   DesignRequirements as DesignRequirementsType,
-  EngineConfig 
+  EngineConfig
 } from '../api/client';
 
 interface OptimizerProps {
   config: EngineConfig | null;
 }
 
-type SubTab = 'requirements' | 'layer1';
+type SubTab = 'requirements' | 'layer1' | 'layer2';
 
 export function Optimizer({ config }: OptimizerProps) {
   const [activeSubTab, setActiveSubTab] = useState<SubTab>('requirements');
@@ -35,13 +36,13 @@ export function Optimizer({ config }: OptimizerProps) {
 
   const handleSave = async (reqs: DesignRequirementsType) => {
     const response = await saveDesignRequirements(reqs);
-    
+
     if (response.error) {
       setSaveStatus({ type: 'error', message: response.error });
     } else if (response.data) {
       setRequirements(response.data.requirements);
       setSaveStatus({ type: 'success', message: 'Design requirements saved successfully!' });
-      
+
       // Clear success message after 3 seconds
       setTimeout(() => {
         setSaveStatus(null);
@@ -66,11 +67,10 @@ export function Optimizer({ config }: OptimizerProps) {
 
       {/* Save Status */}
       {saveStatus && (
-        <div className={`rounded-xl p-4 border ${
-          saveStatus.type === 'success' 
+        <div className={`rounded-xl p-4 border ${saveStatus.type === 'success'
             ? 'bg-green-500/10 border-green-500/30 text-green-400'
             : 'bg-red-500/10 border-red-500/30 text-red-400'
-        }`}>
+          }`}>
           <p className="font-semibold">
             {saveStatus.type === 'success' ? '✅' : '❌'} {saveStatus.message}
           </p>
@@ -81,23 +81,30 @@ export function Optimizer({ config }: OptimizerProps) {
       <nav className="flex gap-2 border-b border-[var(--color-border)]">
         <button
           onClick={() => setActiveSubTab('requirements')}
-          className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-            activeSubTab === 'requirements'
+          className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeSubTab === 'requirements'
               ? 'border-blue-500 text-blue-400'
               : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-          }`}
+            }`}
         >
           📋 Design Requirements
         </button>
         <button
           onClick={() => setActiveSubTab('layer1')}
-          className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
-            activeSubTab === 'layer1'
+          className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeSubTab === 'layer1'
               ? 'border-purple-500 text-purple-400'
               : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-          }`}
+            }`}
         >
           🔧 Layer 1: Static Optimization
+        </button>
+        <button
+          onClick={() => setActiveSubTab('layer2')}
+          className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeSubTab === 'layer2'
+              ? 'border-pink-500 text-pink-400'
+              : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+            }`}
+        >
+          🌊 Layer 2: Pressure Optimizer
         </button>
       </nav>
 
@@ -109,8 +116,12 @@ export function Optimizer({ config }: OptimizerProps) {
         {activeSubTab === 'layer1' && (
           <Layer1Optimization requirements={requirements} />
         )}
+        {activeSubTab === 'layer2' && (
+          <Layer2Optimization requirements={requirements} />
+        )}
       </div>
     </div>
   );
 }
+
 

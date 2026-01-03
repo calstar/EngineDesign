@@ -5,6 +5,8 @@ import { PressureCurveChart } from './PressureCurveChart';
 import {
   generateTimeseries,
   generateFromSegments,
+  uploadTimeseriesFromCSV,
+  getConfig,
   type ProfileParams,
   type PressureSegment,
   type TimeSeriesData,
@@ -14,9 +16,10 @@ import {
 
 interface TimeSeriesModeProps {
   config: EngineConfig | null;
+  onConfigLoaded?: (config: EngineConfig) => void;
 }
 
-type InputMode = 'simple' | 'segments';
+type InputMode = 'simple' | 'segments' | 'blowdown' | 'upload';
 
 // Default profile params
 const defaultLoxProfile: ProfileParams = {
@@ -110,16 +113,16 @@ function loadResultsFromSession(): { data: TimeSeriesData; summary: TimeSeriesSu
   }
 }
 
-export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
+export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) {
   // Mode selection
   const [inputMode, setInputMode] = useState<InputMode>('simple');
-  
+
   // Simple profile state
   const [duration, setDuration] = useState(5.0);
   const [nSteps, setNSteps] = useState(101);
   const [loxProfile, setLoxProfile] = useState<ProfileParams>(defaultLoxProfile);
   const [fuelProfile, setFuelProfile] = useState<ProfileParams>(defaultFuelProfile);
-  
+
   // Segment builder state
   const [segmentDuration, setSegmentDuration] = useState(5.0);
   const [nPoints, setNPoints] = useState(200);
@@ -127,7 +130,15 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
   const [nPointsInput, setNPointsInput] = useState('200');
   const [loxSegments, setLoxSegments] = useState<PressureSegment[]>(defaultLoxSegments);
   const [fuelSegments, setFuelSegments] = useState<PressureSegment[]>(defaultFuelSegments);
-  
+
+  // Blowdown mode state
+  const [loxInitialPressure, setLoxInitialPressure] = useState(750);
+  const [fuelInitialPressure, setFuelInitialPressure] = useState(600);
+
+  // Upload state
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
   // Sync local input states
   useEffect(() => {
     setSegmentDurationInput(segmentDuration.toString());
@@ -156,7 +167,7 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
     setNPoints(num);
     setNPointsInput(num.toString());
   };
-  
+
   // Results state - initialize from sessionStorage
   const [results, setResults] = useState<{
     data: TimeSeriesData;
@@ -181,7 +192,7 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
     setIsLoading(false);
 
     if (response.error) {
-      setError(response.error);
+      setError(typeof response.error === 'string' ? response.error : JSON.stringify(response.error));
     } else if (response.data) {
       const newResults = {
         data: response.data.data,
@@ -203,12 +214,13 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
       n_points: nPoints,
       lox_segments: loxSegments,
       fuel_segments: fuelSegments,
+      blowdown_mode: false,
     });
 
     setIsLoading(false);
 
     if (response.error) {
-      setError(response.error);
+      setError(typeof response.error === 'string' ? response.error : JSON.stringify(response.error));
     } else if (response.data) {
       const newResults = {
         data: response.data.data,
@@ -218,6 +230,76 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
       saveResultsToSession(newResults);
     }
   }, [segmentDuration, nPoints, loxSegments, fuelSegments]);
+
+  // Handle blowdown submission
+  const handleBlowdownSubmit = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    setResults(null);
+
+    const response = await generateFromSegments({
+      duration_s: segmentDuration, // Reuse duration
+      n_points: nPoints,           // Reuse points
+      lox_segments: [],            // Ignored in blowdown mode
+      fuel_segments: [],           // Ignored in blowdown mode
+      blowdown_mode: true,
+      lox_initial_pressure_psi: loxInitialPressure,
+      fuel_initial_pressure_psi: fuelInitialPressure,
+    });
+
+    setIsLoading(false);
+
+    if (response.error) {
+      setError(typeof response.error === 'string' ? response.error : JSON.stringify(response.error));
+    } else if (response.data) {
+      const newResults = {
+        data: response.data.data,
+        summary: response.data.summary,
+      };
+      setResults(newResults);
+      saveResultsToSession(newResults);
+    }
+  }, [segmentDuration, nPoints, loxInitialPressure, fuelInitialPressure]);
+
+
+  // Handle CSV upload submission
+  const handleUploadSubmit = useCallback(async () => {
+    if (!uploadedFile) {
+      setUploadError('Please select a file');
+      return;
+    }
+
+    setIsLoading(true);
+    setError(null);
+    setUploadError(null);
+    setResults(null);
+
+    const response = await uploadTimeseriesFromCSV(uploadedFile);
+
+    setIsLoading(false);
+
+    if (response.error) {
+      const errorMsg = typeof response.error === 'string' ? response.error : JSON.stringify(response.error);
+      setError(errorMsg);
+      setUploadError(errorMsg);
+    } else if (response.data) {
+      const newResults = {
+        data: response.data.data,
+        summary: response.data.summary,
+      };
+      setResults(newResults);
+      saveResultsToSession(newResults);
+
+      // If it was a YAML config file, fetch and update the config
+      const isConfigFile = uploadedFile.name.endsWith('.yaml') || uploadedFile.name.endsWith('.yml');
+      if (isConfigFile && onConfigLoaded) {
+        const configResponse = await getConfig();
+        if (configResponse.data) {
+          onConfigLoaded(configResponse.data.config);
+        }
+      }
+    }
+  }, [uploadedFile, onConfigLoaded]);
 
   if (!config) {
     return (
@@ -255,23 +337,39 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
         <div className="flex gap-2 p-1 bg-[var(--color-bg-primary)] rounded-lg w-fit">
           <button
             onClick={() => setInputMode('simple')}
-            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-              inputMode === 'simple'
-                ? 'bg-blue-600 text-white'
-                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-            }`}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${inputMode === 'simple'
+              ? 'bg-blue-600 text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+              }`}
           >
             Simple Profile
           </button>
           <button
             onClick={() => setInputMode('segments')}
-            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-              inputMode === 'segments'
-                ? 'bg-blue-600 text-white'
-                : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
-            }`}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${inputMode === 'segments'
+              ? 'bg-blue-600 text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+              }`}
           >
             Segment Builder
+          </button>
+          <button
+            onClick={() => setInputMode('blowdown')}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${inputMode === 'blowdown'
+              ? 'bg-blue-600 text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+              }`}
+          >
+            Pure Blowdown
+          </button>
+          <button
+            onClick={() => setInputMode('upload')}
+            className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${inputMode === 'upload'
+              ? 'bg-blue-600 text-white'
+              : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+              }`}
+          >
+            Upload
           </button>
         </div>
       </div>
@@ -296,17 +394,17 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
               isLoading={isLoading}
             />
           </>
-        ) : (
+        ) : inputMode === 'segments' ? (
           <>
             <h3 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
               Interactive Segment Builder
             </h3>
-            <p className="text-xs text-[var(--color-text-secondary)] mb-4">
-              Build custom pressure curves by defining segments. Each segment uses a blowdown 
-              profile: P(t) = P_end + (P_start - P_end) × e^(-k×t). Drag endpoints to adjust 
+            <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+              Build custom pressure curves by defining segments. Each segment uses a blowdown
+              profile: P(t) = P_end + (P_start - P_end) × e^(-k×t). Drag endpoints to adjust
               pressures, drag boundaries to adjust timing.
             </p>
-            
+
             {/* Duration and Points */}
             <div className="grid grid-cols-2 gap-4 mb-4">
               <div>
@@ -404,6 +502,188 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
               )}
             </button>
           </>
+        ) : inputMode === 'blowdown' ? (
+          <>
+            <h3 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
+              Pure Blowdown Simulation
+            </h3>
+            <p className="text-sm text-[var(--color-text-secondary)] mb-6">
+              Simulate tank blowdown without COPV regulation or active pressure control.
+              Tanks start at the specified initial pressure and naturally decay as propellant is consumed
+              according to physics-based polytropic expansion with real gas effects.
+            </p>
+
+            <div className="max-w-xl">
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div>
+                  <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-2">
+                    LOX Initial Pressure (psi)
+                  </label>
+                  <input
+                    type="number"
+                    value={loxInitialPressure}
+                    onChange={(e) => setLoxInitialPressure(parseFloat(e.target.value) || 0)}
+                    min={100}
+                    max={2000}
+                    step={10}
+                    className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-[var(--color-text-secondary)] mb-2">
+                    Fuel Initial Pressure (psi)
+                  </label>
+                  <input
+                    type="number"
+                    value={fuelInitialPressure}
+                    onChange={(e) => setFuelInitialPressure(parseFloat(e.target.value) || 0)}
+                    min={100}
+                    max={2000}
+                    step={10}
+                    className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              {/* Duration and Points */}
+              <h4 className="text-xs font-medium text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Simulation Settings</h4>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div>
+                  <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
+                    Duration
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={segmentDurationInput}
+                      onChange={(e) => setSegmentDurationInput(e.target.value)}
+                      onBlur={(e) => commitSegmentDuration(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.currentTarget.blur();
+                        }
+                      }}
+                      className="w-full px-4 py-3 pr-8 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500"
+                    />
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-sm text-[var(--color-text-secondary)]">s</span>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
+                    Points
+                  </label>
+                  <input
+                    type="text"
+                    value={nPointsInput}
+                    onChange={(e) => setNPointsInput(e.target.value)}
+                    onBlur={(e) => commitNPoints(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    className="w-full px-4 py-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+              </div>
+
+              {/* Run Button */}
+              <button
+                onClick={handleBlowdownSubmit}
+                disabled={isLoading}
+                className="w-full px-6 py-3 rounded-lg bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-600 hover:to-emerald-700 text-white font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+              >
+                {isLoading ? (
+                  <>
+                    <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Simulating...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Run Blowdown Simulation
+                  </>
+                )}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h3 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
+              Upload CSV or Config File
+            </h3>
+            <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+              Upload a <strong>CSV file</strong> with columns <strong>T</strong> (time in seconds), <strong>P_O</strong> (LOX tank pressure in psi),
+              and <strong>P_F</strong> (Fuel tank pressure in psi). The time column is optional - if missing,
+              uniform spacing will be assumed.
+            </p>
+            <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+              Alternatively, upload a <strong>YAML config file</strong> with a <code className="text-xs bg-[var(--color-bg-primary)] px-1 py-0.5 rounded">pressure_curves</code> section.
+              The config will be set as the active session config, and time-series analysis will run using the pressure curves from the segments.
+            </p>
+
+            {/* File Upload */}
+            <div className="mb-4">
+              <label className="block text-sm text-[var(--color-text-secondary)] mb-2">
+                Select CSV or YAML File
+              </label>
+              <div className="relative">
+                <input
+                  type="file"
+                  accept=".csv,.yaml,.yml"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      setUploadedFile(file);
+                      setUploadError(null);
+                    }
+                  }}
+                  className="w-full px-4 py-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                />
+              </div>
+              {uploadedFile && (
+                <div className="mt-2 text-sm text-[var(--color-text-secondary)]">
+                  Selected: <span className="text-[var(--color-text-primary)] font-medium">{uploadedFile.name}</span>
+                  <span className="ml-2 text-xs">({(uploadedFile.size / 1024).toFixed(1)} KB)</span>
+                  {uploadedFile.name.endsWith('.yaml') || uploadedFile.name.endsWith('.yml') ? (
+                    <span className="ml-2 text-xs text-blue-400">(Config file)</span>
+                  ) : (
+                    <span className="ml-2 text-xs text-blue-400">(CSV file)</span>
+                  )}
+                </div>
+              )}
+              {uploadError && (
+                <div className="mt-2 text-sm text-red-400">
+                  {uploadError}
+                </div>
+              )}
+            </div>
+
+            {/* Run Button */}
+            <button
+              onClick={handleUploadSubmit}
+              disabled={isLoading || !uploadedFile}
+              className="w-full px-6 py-3 rounded-lg bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+            >
+              {isLoading ? (
+                <>
+                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Running Time-Series...
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+                  </svg>
+                  {uploadedFile && (uploadedFile.name.endsWith('.yaml') || uploadedFile.name.endsWith('.yml'))
+                    ? 'Run Time-Series from Config'
+                    : 'Run Time-Series from CSV'}
+                </>
+              )}
+            </button>
+          </>
         )}
 
         {/* Error Message */}
@@ -440,10 +720,10 @@ export function TimeSeriesMode({ config }: TimeSeriesModeProps) {
               </p>
             </div>
           </div>
-          
-          <PressureCurveChart 
-            data={results.data} 
-            summary={results.summary} 
+
+          <PressureCurveChart
+            data={results.data}
+            summary={results.summary}
           />
         </div>
       )}

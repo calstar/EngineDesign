@@ -373,7 +373,7 @@ class ChamberSolver:
                             "Ac": geometry_test["area_cross"],
                             "At": cg.A_throat,
                             "chamber_length": geometry_test["length"],
-                            "Dinj": self.injector_diameter,
+                            "Dinj": self._infer_injector_diameter(),
                             "m_dot_total": mdot_supply_test,
                             "spray_diagnostics": diag_test,
                             "turbulence_intensity": diag_test.get("turbulence_intensity_mix", DEFAULT_TURBULENCE_INTENSITY_ND),
@@ -382,7 +382,7 @@ class ChamberSolver:
                         
                         # Calculate efficiency
                         eta_test = eta_cstar(
-                            self.Lstar,
+                            calculate_Lstar(cg.volume, cg.A_throat, Lstar_override=cg.Lstar),
                             self.config.combustion.efficiency,
                             diag_test.get("cooling_efficiency", 1.0),
                             advanced_params_test,

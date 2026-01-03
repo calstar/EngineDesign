@@ -282,13 +282,15 @@ class TimeVaryingCoupledSolver:
         # as geometry evolves. This was missing before!
         from engine.core.chamber_profiles import calculate_chamber_intrinsics
         chamber_intrinsics = calculate_chamber_intrinsics(
-            V_chamber=V_chamber,
-            A_throat=A_throat,
-            mdot_total=mdot_total,
+            Pc=Pc,
             Tc=Tc,
+            mdot_total=mdot_total,
             gamma=gamma_chamber,
             R=R_chamber,
+            V_chamber=V_chamber,
+            A_throat=A_throat,
             Lstar=Lstar,
+            MR=MR,
         )
         mach_number = chamber_intrinsics["mach_number"]  # Now calculated dynamically, not hardcoded
         
@@ -757,6 +759,10 @@ class TimeVaryingCoupledSolver:
             from engine.pipeline.stability.analysis import comprehensive_stability_analysis
             
             # Create diagnostics dict for comprehensive analysis
+            # Calculate component mass flows
+            mdot_O = mdot_total * MR / (1.0 + MR)
+            mdot_F = mdot_total / (1.0 + MR)
+            
             diagnostics = {
                 "mdot_O": mdot_O,
                 "mdot_F": mdot_F,

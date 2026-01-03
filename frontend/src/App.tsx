@@ -187,7 +187,7 @@ function App() {
                 <ConfigUpload onConfigLoaded={handleConfigLoaded} />
               </div>
             )}
-            <TimeSeriesMode config={config} />
+            <TimeSeriesMode config={config} onConfigLoaded={handleConfigLoaded} />
           </div>
         )}
 

@@ -783,6 +783,10 @@ class PintleEngineRunner:
             "recession_exit": np.full(n, 0.0),
             "throat_recession_multiplier": np.full(n, np.nan),
             "diagnostics": [],
+            # Stability arrays (comprehensive analysis for all 3 types)
+            "chugging_stability_margin": np.full(n, np.nan),
+            "stability_score": np.full(n, np.nan),
+            "stability_state": np.full(n, "unstable", dtype=object),
         }
         
         # Ensure chamber_geometry exists
@@ -873,7 +877,12 @@ class PintleEngineRunner:
                     results[key][i] = point_results[key]
                 
                 # Store current geometry
-                results["Lstar"][i] = solver_temp.Lstar
+                if track_ablative_geometry:
+                    # If geometry is evolving, calculate the instantaneous L*
+                    results["Lstar"][i] = cg.volume / cg.A_throat if cg.A_throat > 0 else (cg.Lstar or 0)
+                else:
+                    # Otherwise use the nominal value from config
+                    results["Lstar"][i] = cg.Lstar if cg.Lstar is not None else (cg.volume / cg.A_throat if cg.A_throat > 0 else 0)
                 results["V_chamber"][i] = cg.volume
                 results["A_throat"][i] = cg.A_throat
                 results["A_exit"][i] = cg.A_exit
@@ -884,6 +893,39 @@ class PintleEngineRunner:
                 
                 # Store diagnostics
                 results["diagnostics"].append(point_results["diagnostics"])
+                
+                # Calculate comprehensive stability analysis (accounts for chugging, acoustic, and feed system)
+                try:
+                    from engine.pipeline.stability.analysis import comprehensive_stability_analysis
+                    
+                    # Build diagnostics dict for comprehensive analysis
+                    stability_diagnostics = {
+                        "mdot_O": diagnostics["mdot_O"],
+                        "mdot_F": diagnostics["mdot_F"],
+                        "P_tank_O": float(P_tank_O[i]),
+                        "P_tank_F": float(P_tank_F[i]),
+                    }
+                    
+                    stability_results = comprehensive_stability_analysis(
+                        config=config_copy,
+                        Pc=Pc,
+                        MR=diagnostics["MR"],
+                        mdot_total=diagnostics["mdot_total"],
+                        cstar=diagnostics["cstar_actual"],
+                        gamma=diagnostics["gamma"],
+                        R=diagnostics["R"],
+                        Tc=diagnostics["Tc"],
+                        diagnostics=stability_diagnostics,
+                    )
+                    
+                    # Extract stability metrics
+                    results["chugging_stability_margin"][i] = stability_results.get("chugging", {}).get("stability_margin", np.nan)
+                    results["stability_score"][i] = stability_results.get("stability_score", np.nan)
+                    results["stability_state"][i] = stability_results.get("stability_state", "unstable")
+                except Exception as e:
+                    import warnings
+                    warnings.warn(f"Stability analysis failed at time step {i}: {e}")
+                    # Leave as NaN/unstable (already initialized)
                 
                 # Update geometry for next time step (if ablative tracking enabled)
                 if track_ablative_geometry and dt > 0 and i < n - 1:
@@ -1031,10 +1073,7 @@ class PintleEngineRunner:
                 
             except Exception as e:
                 # If solve fails, leave NaN values
-                logger = logging.getLogger("evaluate")
-                logger.warning(f"Time step {i} (t={times[i]:.3f}s) failed: {e}")
-                import traceback
-                traceback.print_exc()
+                # Suppress warnings/prints for performance - errors still stored in diagnostics
                 results["diagnostics"].append({"error": str(e)})
                 continue
         

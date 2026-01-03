@@ -22,12 +22,19 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
+import pandas as pd
 import matplotlib
 matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 
-from engine.pipeline.config_schemas import PintleEngineConfig
+from engine.pipeline.config_schemas import PintleEngineConfig, PressureCurvesConfig, PressureSegmentConfig
 from engine.core.runner import PintleEngineRunner
+from copv.copv_solve_both import size_or_check_copv_for_polytropic_N2
+
+# Path to N2 compressibility lookup table for COPV solver
+# Use absolute path from the project root
+# layer2_pressure.py -> layers/ -> optimizer/ -> engine/ -> project_root/
+N2_Z_LOOKUP_CSV = Path(__file__).resolve().parent.parent.parent.parent / "copv" / "n2_Z_lookup.csv"
 
 
 def generate_pressure_curve_from_segments(
@@ -283,7 +290,7 @@ def calculate_required_impulse_from_mass(
 #   - Fuel end pressures are derived from LOX end pressures and a bounded
 #     LOX/Fuel pressure-ratio factor per segment, keeping segment-end
 #     pressure ratios within ±25% of the initial ratio.
-N_SEGMENTS = 4
+N_SEGMENTS = 8
 VARS_PER_SEGMENT = 5  # length_ratio, lox_end_pressure_ratio, lox_k, fuel_ratio_factor, fuel_k
 
 
@@ -549,6 +556,7 @@ def run_layer2_pressure(
     min_lox_pressure_floor_pa: Optional[float] = None,
     min_fuel_pressure_floor_pa: Optional[float] = None,
     objective_callback: Optional[Callable[[int, float, float], None]] = None,  # Optional hook for streaming objective history
+    pressure_curve_callback: Optional[Callable[[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]], None]] = None,  # Optional hook for streaming best pressure curves (time, P_lox, P_fuel, copv_pressure, copv_time)
 ) -> Tuple[PintleEngineConfig, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], bool]:
     """
     Run Layer 2: Pressure Curve Optimization.
@@ -583,7 +591,7 @@ def run_layer2_pressure(
     layer2_logger = logging.getLogger('layer2_pressure')
     layer2_logger.setLevel(logging.INFO)
     
-    # Remove existing handlers to avoid duplicates
+
     layer2_logger.handlers.clear()
     
     # File handler
@@ -688,6 +696,30 @@ def run_layer2_pressure(
     # Create a single PintleEngineRunner instance for this layer and reuse it
     runner_layer2 = PintleEngineRunner(config_layer2)
     
+    # Calculate initial chamber pressure to establish stability floor
+    try:
+        res_init = runner_layer2.evaluate(
+             initial_lox_pressure_pa, 
+             initial_fuel_pressure_pa, 
+             silent=True
+        )
+        Pc_initial_ref = res_init.get("Pc", 0.0)
+    except Exception:
+        Pc_initial_ref = 0.0
+        
+    # Enforce stability constraint (75% of initial Pc) on pressure generation
+    safe_pressure_floor = 0.75 * Pc_initial_ref
+    
+    # Update floors if the stability requirement is stricter (higher) than the default
+    local_min_lox_floor = max(min_lox_pressure_floor_pa, safe_pressure_floor)
+    local_min_fuel_floor = max(min_fuel_pressure_floor_pa, safe_pressure_floor)
+    
+    layer2_logger.info(f"Stability Constraint: Pc_initial={Pc_initial_ref/1e6:.2f} MPa, Min Safe Pressure={safe_pressure_floor/1e6:.2f} MPa")
+    if local_min_lox_floor > min_lox_pressure_floor_pa:
+         layer2_logger.info(f"  -> Adjusted LOX floor to {local_min_lox_floor/1e6:.2f} MPa")
+    if local_min_fuel_floor > min_fuel_pressure_floor_pa:
+         layer2_logger.info(f"  -> Adjusted Fuel floor to {local_min_fuel_floor/1e6:.2f} MPa")
+    
     # Optimization variables:
     # Shared-segment parameterization with fixed N_SEGMENTS segments:
     #   - Shared length ratios across LOX and fuel
@@ -720,10 +752,22 @@ def run_layer2_pressure(
     x0 = build_x0_compact()
 
     # Bounds for compact vector (per segment)
+    # Bounds for compact vector (per segment)
     bounds: list[tuple[float, float]] = []
+    
+    # Calculate minimum LOX pressure ratio to respect stability constraint
+    # We want P_lox_end >= safe_pressure_floor
+    # implies ratio >= safe_pressure_floor / initial_lox
+    min_lox_ratio_bound = 0.1
+    if initial_lox_pressure_pa > 0:
+        min_lox_ratio_bound = max(0.1, safe_pressure_floor / initial_lox_pressure_pa)
+    
+    # Clamp to ensure it doesn't exceed 1.0 (though that would mean impossible constraint)
+    min_lox_ratio_bound = min(min_lox_ratio_bound, 0.99)
+
     for _ in range(N_SEGMENTS):
         bounds.append((0.01, 1.0))   # length_ratio (shared LOX/Fuel)
-        bounds.append((0.1, 1.0))    # lox_end_pressure_ratio (relative to initial LOX)
+        bounds.append((min_lox_ratio_bound, 1.0))    # lox_end_pressure_ratio (constrained)
         bounds.append((0.1, 2.0))    # lox_k
         bounds.append((0.75, 1.25))  # fuel_ratio_factor (keeps segment-end ratios within ±25%)
         bounds.append((0.1, 2.0))    # fuel_k
@@ -741,6 +785,9 @@ def run_layer2_pressure(
         "converged": False,  # Track if we've effectively converged
         "no_improvement_count": 0,  # Count iterations without significant improvement
         "small_change_count": 0,  # Count iterations with very small rate of change
+        "identical_obj_count": 0,  # Count consecutive evaluations with identical objective
+        "last_identical_obj": None,  # Track the objective value that's repeating
+        "de_candidates": [],  # Store candidates found during DE for re-scoring
     }
     
     def layer2_callback(xk):
@@ -755,6 +802,33 @@ def run_layer2_pressure(
             current_obj = layer2_state["last_obj"]
             prev_obj = layer2_state["prev_obj"]
             
+            # Check for EXACT identical values (common when stuck in flat region)
+            if abs(current_obj - prev_obj) < 1e-10:
+                # Exact match or extremely close (within numerical precision)
+                if layer2_state["last_identical_obj"] is not None:
+                    if abs(current_obj - layer2_state["last_identical_obj"]) < 1e-10:
+                        layer2_state["identical_obj_count"] += 1
+                    else:
+                        # Different identical value - reset counter
+                        layer2_state["identical_obj_count"] = 1
+                        layer2_state["last_identical_obj"] = current_obj
+                else:
+                    layer2_state["identical_obj_count"] = 1
+                    layer2_state["last_identical_obj"] = current_obj
+                
+                # If we've had 5+ consecutive identical evaluations, we're stuck
+                if layer2_state["identical_obj_count"] >= 5:
+                    layer2_state["converged"] = True
+                    layer2_logger.info(
+                        f"✓ Early convergence detected: objective is identical across "
+                        f"{layer2_state['identical_obj_count']} consecutive evaluations "
+                        f"(obj={current_obj:.6f}). Optimizer appears stuck in flat region."
+                    )
+            else:
+                # Not identical - reset identical counter
+                layer2_state["identical_obj_count"] = 0
+                layer2_state["last_identical_obj"] = None
+            
             # Relative change: |current - previous| / max(|current|, |previous|, small_epsilon)
             abs_change = abs(current_obj - prev_obj)
             max_magnitude = max(abs(current_obj), abs(prev_obj), 1e-9)
@@ -767,7 +841,8 @@ def run_layer2_pressure(
                 layer2_state["small_change_count"] = 0  # Reset if we see meaningful change
             
             # If we've had 3+ consecutive iterations with very small rate of change, we've converged
-            if layer2_state["small_change_count"] >= 3:
+            # Only apply this aggressive check during DE. Local optimizer needs to probe close points.
+            if phase == "DE" and layer2_state["small_change_count"] >= 3 and not layer2_state["converged"]:
                 layer2_state["converged"] = True
                 layer2_logger.info(
                     f"✓ Early convergence detected: objective rate of change is negligible "
@@ -779,7 +854,7 @@ def run_layer2_pressure(
         # Also check for convergence: if objective is very low and hasn't improved much (legacy check)
         if layer2_state["last_obj"] is not None and not layer2_state["converged"]:
             # If objective is already very good (< 0.1), check if we've converged
-            if layer2_state["best_obj"] < 0.1:
+            if layer2_state["best_obj"] < 2.0:
                 # Check if improvement in last iteration was negligible
                 if layer2_state["last_obj"] is not None and layer2_state["best_obj"] is not None:
                     improvement = layer2_state["best_obj"] - layer2_state["last_obj"]
@@ -789,7 +864,7 @@ def run_layer2_pressure(
                         layer2_state["no_improvement_count"] = 0
                     
                     # If we've had 3+ iterations with no significant improvement and objective is already very low
-                    if layer2_state["no_improvement_count"] >= 3 and layer2_state["best_obj"] < 0.1:
+                    if layer2_state["no_improvement_count"] >= 3 and layer2_state["best_obj"] < 2.0:
                         layer2_state["converged"] = True
                         layer2_logger.info(
                             f"✓ Early convergence detected: objective {layer2_state['best_obj']:.6f} "
@@ -936,6 +1011,136 @@ def run_layer2_pressure(
         layer2_state["eval_count"] += 1
         eval_num = layer2_state["eval_count"]
 
+        def finish_evaluation(final_obj: float) -> float:
+            """Helper to finalize evaluation: update state, call callbacks, and return value."""
+            # Save previous values before updating
+            prev_obj = layer2_state.get("prev_obj")
+            last_obj = layer2_state.get("last_obj")
+            
+            # Update best objective if this is an improvement
+            # (Note: failed evaluations with 1e6 usually won't be improvements, but we check anyway)
+            improvement = None
+            if final_obj < layer2_state["best_obj"]:
+                improvement = layer2_state["best_obj"] - final_obj
+                layer2_state["best_obj"] = final_obj
+                # Save the X vector if it's an improvement (and finite)
+                # Note: x_layer2 comes from the outer scope
+                if np.all(np.isfinite(np.asarray(x_layer2, dtype=float))):
+                    layer2_state["best_x"] = np.array(x_layer2, copy=True)
+                
+                # Reset convergence counters if we made significant progress
+                if improvement > 1e-5:
+                    layer2_state["no_improvement_count"] = 0
+                    layer2_state["small_change_count"] = 0
+                    layer2_state["identical_obj_count"] = 0
+                    layer2_state["last_identical_obj"] = None
+            
+            # Update last objective for logging/progress tracking
+            layer2_state["prev_obj"] = last_obj
+            layer2_state["last_obj"] = final_obj
+            
+            # Check for convergence (works for both DE and local phases)
+            # This check happens after updating state so we can compare current vs previous
+            if not layer2_state.get("converged", False) and last_obj is not None:
+                current_obj = final_obj
+                
+                # Check for EXACT identical values (common when stuck in flat region)
+                if abs(current_obj - last_obj) < 1e-10:
+                    if layer2_state["last_identical_obj"] is not None:
+                        if abs(current_obj - layer2_state["last_identical_obj"]) < 1e-10:
+                            layer2_state["identical_obj_count"] += 1
+                        else:
+                            layer2_state["identical_obj_count"] = 1
+                            layer2_state["last_identical_obj"] = current_obj
+                    else:
+                        layer2_state["identical_obj_count"] = 1
+                        layer2_state["last_identical_obj"] = current_obj
+                    
+                    # If we've had 5+ consecutive identical evaluations, we're stuck
+                    if layer2_state["identical_obj_count"] >= 5:
+                        layer2_state["converged"] = True
+                        layer2_logger.info(
+                            f"✓ Early convergence detected [{phase}]: objective is identical across "
+                            f"{layer2_state['identical_obj_count']} consecutive evaluations "
+                            f"(obj={current_obj:.6f}). Optimizer appears stuck in flat region."
+                        )
+                        for handler in layer2_logger.handlers:
+                            handler.flush()
+                else:
+                    # Not identical - reset identical counter
+                    layer2_state["identical_obj_count"] = 0
+                    layer2_state["last_identical_obj"] = None
+                
+                # Relative change: |current - previous| / max(|current|, |previous|, small_epsilon)
+                abs_change = abs(current_obj - last_obj)
+                max_magnitude = max(abs(current_obj), abs(last_obj), 1e-9)
+                relative_change = abs_change / max_magnitude
+                
+                # If relative change is very small (< 0.1% or < 1e-4 absolute), count it
+                if relative_change < 1e-3 or abs_change < 1e-4:
+                    layer2_state["small_change_count"] += 1
+                else:
+                    layer2_state["small_change_count"] = 0  # Reset if we see meaningful change
+                
+                # If we've had 3+ consecutive iterations with very small rate of change, we've converged
+                if layer2_state["small_change_count"] >= 3:
+                    layer2_state["converged"] = True
+                    layer2_logger.info(
+                        f"✓ Early convergence detected [{phase}]: objective rate of change is negligible "
+                        f"(relative change < 0.1% for {layer2_state['small_change_count']} iterations). "
+                        f"Best objective: {layer2_state['best_obj']:.6f}, "
+                        f"Current: {current_obj:.6f}, Change: {abs_change:.2e} ({relative_change*100:.4f}%)"
+                    )
+                    for handler in layer2_logger.handlers:
+                        handler.flush()
+                
+                # Also check for convergence: if objective is very low and hasn't improved much
+                # Only apply this aggressive check during DE (Global Search).
+                # Local optimization (L-BFGS-B) needs to probe worse points for gradient estimation,
+                # so we shouldn't kill it just because it hasn't improved in 3 evaluations.
+                if phase == "DE" and layer2_state["best_obj"] < 2.0:
+                    # Check if best hasn't improved relative to previous best
+                    if improvement is None or improvement < 1e-5:  # Very small or no improvement
+                        layer2_state["no_improvement_count"] += 1
+                    else:
+                        layer2_state["no_improvement_count"] = 0
+                    
+                    # If we've had 3+ iterations with no significant improvement and objective is already very low
+                    if layer2_state["no_improvement_count"] >= 3:
+                        layer2_state["converged"] = True
+                        layer2_logger.info(
+                            f"✓ Early convergence detected [{phase}]: objective {layer2_state['best_obj']:.6f} "
+                            f"has not improved significantly in {layer2_state['no_improvement_count']} iterations"
+                        )
+                        for handler in layer2_logger.handlers:
+                            handler.flush()
+            
+            # Check if we've already converged (from callback or objective function) - log if this happens
+            if layer2_state.get("converged", False):
+                # This evaluation happened after convergence was detected
+                # The optimizer should stop soon, but we'll let it finish this evaluation
+                pass
+            
+            # Capture candidates during Global Search (DE) phase for Top-K re-scoring
+            if phase == "DE" and np.isfinite(final_obj) and final_obj < 1e5:
+                # Store copy of x to avoid mutation issues
+                if np.all(np.isfinite(np.asarray(x_layer2, dtype=float))):
+                    layer2_state.setdefault("de_candidates", []).append((float(final_obj), np.array(x_layer2, copy=True)))
+            
+            # Update stream of objective history
+            if objective_callback is not None:
+                try:
+                    objective_callback(
+                        int(layer2_state["eval_count"]),
+                        float(final_obj),
+                        float(layer2_state["best_obj"]),
+                    )
+                except Exception:
+                    # Never let UI/consumer callback break the optimizer loop
+                    pass
+            
+            return float(final_obj)
+
         # Ensure the optimization vector is finite. If any component is NaN or
         # Inf, treat this candidate as invalid and return a large penalty so
         # the optimizer moves away from this region instead of propagating
@@ -948,16 +1153,18 @@ def run_layer2_pressure(
             )
             for handler in layer2_logger.handlers:
                 handler.flush()
-            return 1e6
+            return finish_evaluation(1e6)
         
         # Early return if we've already converged (rate of change is negligible)
         # This helps the optimizer stop faster by returning a constant value
-        if phase == "local" and layer2_state.get("converged", False):
+        # Works for both DE and local phases
+        if layer2_state.get("converged", False):
             best_obj = layer2_state.get("best_obj", 1e6)
             if np.isfinite(best_obj):
                 # Return the best objective we've seen - this constant value will
-                # trigger the tolerance-based stopping in L-BFGS-B
-                return float(best_obj)
+                # trigger the tolerance-based stopping in L-BFGS-B (for local phase)
+                # For DE, returning constant values helps it recognize convergence
+                return finish_evaluation(float(best_obj))
         
         # Select resolution for this objective call
         if n_points is None:
@@ -981,8 +1188,8 @@ def run_layer2_pressure(
                 N_SEGMENTS,
                 initial_lox_pressure_pa,
                 initial_fuel_pressure_pa,
-                min_lox_pressure_floor_pa,
-                min_fuel_pressure_floor_pa,
+                local_min_lox_floor,
+                local_min_fuel_floor,
             )
             
             # Generate pressure curves at the chosen resolution (already floored to minima)
@@ -1000,7 +1207,7 @@ def run_layer2_pressure(
             # infeasible LOX/Fuel pressure relationships while ignoring tail-end
             # artifacts when both tanks are clamped near min_pressure_pa.
             initial_pressure_ratio = initial_lox_pressure_pa / max(initial_fuel_pressure_pa, 1e-9)
-            active_min_floor = min(min_lox_pressure_floor_pa, min_fuel_pressure_floor_pa)
+            active_min_floor = min(local_min_lox_floor, local_min_fuel_floor)
             active_mask = (P_tank_O_array > 1.1 * active_min_floor) & (P_tank_F_array > 1.1 * active_min_floor)
             if np.any(active_mask):
                 pressure_ratio_array = P_tank_O_array[active_mask] / np.maximum(P_tank_F_array[active_mask], 1e-9)
@@ -1019,7 +1226,7 @@ def run_layer2_pressure(
                     )
                     for handler in layer2_logger.handlers:
                         handler.flush()
-                    return hard_ratio_penalty
+                    return finish_evaluation(hard_ratio_penalty)
             
             # Save plot if requested (before running expensive solver)
             if save_evaluation_plots:
@@ -1057,7 +1264,7 @@ def run_layer2_pressure(
                 layer2_logger.warning(f"    No valid time points in results for eval #{eval_num}; returning large penalty.")
                 for handler in layer2_logger.handlers:
                     handler.flush()
-                return 1e6
+                return finish_evaluation(1e6)
             
             thrust_hist = thrust_hist[:available_n]
             time_hist = time_eval[:available_n]
@@ -1077,7 +1284,7 @@ def run_layer2_pressure(
                 )
                 for handler in layer2_logger.handlers:
                     handler.flush()
-                return 1e6
+                return finish_evaluation(1e6)
             
             # Check if critical metrics (thrust, OF) are valid
             # If average thrust is NaN or zero, reject
@@ -1088,7 +1295,7 @@ def run_layer2_pressure(
                 )
                 for handler in layer2_logger.handlers:
                     handler.flush()
-                return 1e6
+                return finish_evaluation(1e6)
             
             avg_thrust = float(np.mean(valid_thrust_values))
             if not np.isfinite(avg_thrust) or avg_thrust <= 0:
@@ -1097,7 +1304,7 @@ def run_layer2_pressure(
                 )
                 for handler in layer2_logger.handlers:
                     handler.flush()
-                return 1e6
+                return finish_evaluation(1e6)
             
             # Check OF ratio validity
             MR_hist = np.atleast_1d(results_layer2.get("MR", np.full(available_n, optimal_of_ratio if optimal_of_ratio else 2.3)))
@@ -1114,7 +1321,7 @@ def run_layer2_pressure(
                 )
                 for handler in layer2_logger.handlers:
                     handler.flush()
-                return 1e6
+                return finish_evaluation(1e6)
             
             # Now safely replace NaN values with defaults for remaining calculations
             # (but we've already validated that we have enough valid data)
@@ -1237,18 +1444,129 @@ def run_layer2_pressure(
                 # Use only valid MR values for calculation
                 valid_MR_values = MR_hist[finite_MR_mask]
                 if len(valid_MR_values) > 0:
-                    avg_MR = float(np.mean(valid_MR_values))
-                    if np.isfinite(avg_MR) and avg_MR > 0:
-                        MR_error = abs(avg_MR - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
-                        # Allow 20% O/F error before penalty
-                        if MR_error > 0.20:
-                            of_penalty = (MR_error - 0.20) * 20.0
-                    else:
-                        # Invalid average MR - add penalty
-                        of_penalty = 50.0
+                    # Calculate pointwise relative deviation
+                    # We want to check O/F along the curve, not just average
+                    deviations = np.abs(valid_MR_values - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
+                    
+                    # 5% Deadband logic
+                    # Inside deadband (<= 0.05): small penalty
+                    # Outside deadband (> 0.05): steeper penalty
+                    deadband = 0.05
+                    
+                    # Calculate per-point penalty
+                    # If dev <= deadband: penalty = dev * 1.0 (light guidance)
+                    # If dev > deadband: penalty = deadband * 1.0 + (dev - deadband) * 20.0 (strong enforcement)
+                    penalties = np.where(
+                        deviations <= deadband,
+                        deviations * 1.0,
+                        deadband * 1.0 + (deviations - deadband) * 20.0
+                    )
+                    
+                    # Average the penalty over time points to keep magnitude consistent
+                    mean_penalty = np.mean(penalties)
+                    
+                    # Scale factor to match other objective terms magnitude
+                    of_penalty = mean_penalty * 50.0 
                 else:
                     # No valid MR values - large penalty
                     of_penalty = 100.0
+            
+            # Check 5: Chamber Pressure Stability
+            # We want to ensure Pc doesn't drift more than 25% from initial value
+            pc_penalty = 0.0
+            if "Pc" in results_layer2:
+                Pc_hist = np.atleast_1d(results_layer2["Pc"])
+                Pc_hist = Pc_hist[:available_n]
+                # Filter for valid Pc values
+                valid_Pc_mask = np.isfinite(Pc_hist) & (Pc_hist > 0)
+                valid_Pc = Pc_hist[valid_Pc_mask]
+                
+                if len(valid_Pc) > 0:
+                    # Use the first valid point as the initial/reference pressure
+                    # (Layer 1 fixes the initial state, so t=0 should be correct)
+                    Pc_initial = valid_Pc[0]
+                    
+                    if Pc_initial > 0:
+                        # Calculate relative deviation
+                        deviations = np.abs(valid_Pc - Pc_initial) / Pc_initial
+                        
+                        # Threshold is 25% (0.25)
+                        # We only penalize points that exceed this threshold
+                        excess_deviations = np.maximum(0.0, deviations - 0.25)
+                        
+                        if np.any(excess_deviations > 0):
+                            # Strong penalty for violations
+                            # Scaling: 10% excess drift -> 0.1 * 1000 = 100 penalty points
+                            # This is significant but allows for smooth gradient
+                            pc_penalty = float(np.mean(excess_deviations)) * 1000.0
+                else:
+                    # No valid Pc values - should be caught by thrust check, but just in case
+                    pc_penalty = 100.0
+            
+            # Check 6: COPV Initial Pressure Optimization
+            # Run COPV solver to determine minimum required initial pressure (P0_Pa)
+            # Lower P0 is better (lighter tank, lower cost), so we add a penalty term
+            copv_penalty = 0.0
+            copv_results = None
+            try:
+                # Create DataFrame for COPV solver
+                # Convert pressures from Pa to psi for COPV solver
+                P_tank_O_psi = P_tank_O_array / 6894.76
+                P_tank_F_psi = P_tank_F_array / 6894.76
+                
+                df_copv = pd.DataFrame({
+                    "time": time_eval,
+                    "mdot_O (kg/s)": mdot_O_hist,
+                    "mdot_F (kg/s)": mdot_F_hist,
+                    "P_tank_O (psi)": P_tank_O_psi,
+                    "P_tank_F (psi)": P_tank_F_psi,
+                })
+                
+                
+                # Extract COPV volume from config
+                # The COPV solver needs the volume in m³
+                copv_volume_m3 = None
+                if hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "free_volume_L"):
+                    # Convert from liters to m³
+                    copv_volume_m3 = float(config_layer2.press_tank.free_volume_L) / 1000.0
+                elif hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "press_volume"):
+                    copv_volume_m3 = float(config_layer2.press_tank.press_volume)
+                elif hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "volume_m3"):
+                    copv_volume_m3 = float(config_layer2.press_tank.volume_m3)
+                
+                if copv_volume_m3 is None or copv_volume_m3 <= 0:
+                    # No valid COPV volume - skip COPV penalty
+                    copv_penalty = 0.0
+                    layer2_logger.warning(f"    COPV volume not found in config, skipping COPV penalty")
+                else:
+                    # Call COPV solver with explicit volume to find required P0
+                    copv_results = size_or_check_copv_for_polytropic_N2(
+                        df_copv,
+                        config_layer2,
+                        copv_volume_m3=copv_volume_m3,  # Pass volume explicitly
+                        copv_P0_Pa=None,  # Solve for P0
+                        n2_Z_csv=str(N2_Z_LOOKUP_CSV),  # Absolute path to lookup table
+                    )
+                    
+                    # Extract initial pressure requirement
+                    P0_Pa = copv_results.get("P0_Pa", 30e6)  # Default to 30 MPa if missing
+                    
+                    # Penalty: normalize by reference pressure (30 MPa) and apply weight
+                    # This encourages lower COPV pressures while balancing other objectives
+                    reference_pressure = 30e6  # 30 MPa reference
+                    copv_penalty = (P0_Pa / reference_pressure) * 10.0
+                    
+                    layer2_logger.info(f"    COPV: P0={P0_Pa/1e6:.2f} MPa ({P0_Pa/6894.76:.0f} psi), penalty={copv_penalty:.2f}")
+                
+            except Exception as e:
+                # COPV solver failed - apply large penalty to discourage this solution
+                copv_penalty = 1000.0
+                layer2_logger.warning(f"    COPV solver failed for eval #{eval_num}: {type(e).__name__}: {str(e)}")
+                # Log full traceback for FileNotFoundError to see what file is missing
+                if isinstance(e, FileNotFoundError):
+                    import traceback
+                    layer2_logger.warning(f"    Full traceback:\n{traceback.format_exc()}")
+                layer2_logger.warning(f"    Applying large COPV penalty: {copv_penalty:.2f}")
             
             # Objective: minimize penalties (no initial thrust penalty - it's fixed from Layer 1)
             components = [
@@ -1257,6 +1575,8 @@ def run_layer2_pressure(
                 capacity_penalty,
                 stability_penalty,
                 of_penalty,
+                pc_penalty,
+                copv_penalty,
             ]
             if not all(np.isfinite(c) for c in components):
                 # If any penalty component is non-finite, treat this evaluation
@@ -1268,7 +1588,7 @@ def run_layer2_pressure(
                 )
                 for handler in layer2_logger.handlers:
                     handler.flush()
-                return 1e6
+                return finish_evaluation(1e6)
 
             obj = sum(components)
             
@@ -1289,12 +1609,11 @@ def run_layer2_pressure(
             
             # Update best objective and corresponding X vector
             prev_best = layer2_state["best_obj"]
+            # Note: finish_evaluation will update best_obj/best_x if strictly better
+            # But we need to handle specific logging and resetting counters here first
+            
             if obj < layer2_state["best_obj"]:
                 improvement = prev_best - obj
-                layer2_state["best_obj"] = obj
-                # CRITICAL: Save the X vector that produced this best objective
-                # Make a copy to avoid reference issues
-                layer2_state["best_x"] = np.array(x_layer2, copy=True)
                 # Reset counters if we made significant progress
                 if improvement > 1e-5:
                     layer2_state["no_improvement_count"] = 0
@@ -1303,36 +1622,50 @@ def run_layer2_pressure(
                     f"    ✓ New best objective: {obj:.6f} "
                     f"(penalties: impulse={impulse_penalty:.2f}, burn_time={burn_time_penalty:.2f}, "
                     f"capacity={capacity_penalty:.2f}, stability={stability_penalty:.2f}, "
-                    f"O/F={of_penalty:.2f}) "
+                    f"O/F={of_penalty:.2f}, Pc_stab={pc_penalty:.2f}, COPV={copv_penalty:.2f}) "
                     f"- Evaluation took {eval_time:.2f}s"
                 )
+                
+                # Store COPV results for the best solution
+                if copv_results is not None:
+                    layer2_state["best_copv_results"] = copv_results
+                
+                # Stream best pressure curves to UI if callback provided
+                if pressure_curve_callback is not None:
+                    try:
+                        # Extract COPV data from current evaluation's copv_results
+                        copv_pressure_trace = None
+                        copv_time_trace = None
+                        if copv_results is not None:
+                            copv_pressure_trace = copv_results.get("PH_trace_Pa", None)
+                            copv_time_trace = copv_results.get("time_s", None)
+                            if copv_pressure_trace is not None:
+                                copv_pressure_trace = np.asarray(copv_pressure_trace).copy()
+                            if copv_time_trace is not None:
+                                copv_time_trace = np.asarray(copv_time_trace).copy()
+                        
+                        pressure_curve_callback(
+                            time_eval.copy(),
+                            P_tank_O_array.copy(),
+                            P_tank_F_array.copy(),
+                            copv_pressure_trace,
+                            copv_time_trace,
+                        )
+                    except Exception:
+                        # Never let UI callback break the optimizer
+                        pass
+
             else:
                 layer2_logger.info(
                     f"    Objective: {obj:.6f} (best: {layer2_state['best_obj']:.6f}) - "
                     f"Evaluation took {eval_time:.2f}s"
                 )
             
-            # Update previous objective before setting new one (for rate of change tracking)
-            layer2_state["prev_obj"] = layer2_state["last_obj"]
-            layer2_state["last_obj"] = obj
-
-            # Stream objective history to external callback (e.g., UI plot) if provided
-            if objective_callback is not None:
-                try:
-                    objective_callback(
-                        int(layer2_state.get("eval_count", eval_num)),
-                        float(obj),
-                        float(layer2_state.get("best_obj", obj)),
-                    )
-                except Exception:
-                    # Never let UI/consumer callback break the optimizer loop
-                    pass
-            
             # Flush log
             for handler in layer2_logger.handlers:
                 handler.flush()
             
-            return obj
+            return finish_evaluation(obj)
         except Exception as e:
             eval_time = time.time() - eval_start_time
             error_msg = f"Exception in objective evaluation #{eval_num} (took {eval_time:.2f}s): {repr(e)}"
@@ -1343,7 +1676,7 @@ def run_layer2_pressure(
                 handler.flush()
             if log_status:
                 log_status("Layer 2 Pressure Error", error_msg)
-            return 1e6
+            return finish_evaluation(1e6)
     
     # Wrapper for coarse global-search objective (DE) using fewer time points
     def layer2_objective_de(x_layer2: np.ndarray) -> float:
@@ -1369,6 +1702,8 @@ def run_layer2_pressure(
     P_tank_F_optimized = None
     summary = {}
     n_segments_used = N_SEGMENTS  # Fixed number of segments per tank
+    lox_segments = None  # Track segments for saving to config
+    fuel_segments = None
     
     layer2_logger.info("Starting optimization...")
     layer2_logger.info(f"Using fixed {N_SEGMENTS} segments per tank for LOX and fuel")
@@ -1377,40 +1712,124 @@ def run_layer2_pressure(
     
     try:
         # Global search with differential evolution (coarse time grid, n_time_points_de)
-        # We only want to explore a *handful* of overall pressure-curve shapes
-        # and then let the local optimizer do the heavy lifting, so we keep
-        # DE very small and fast.
+        # Increased parameters for better global search capability
+        layer2_logger.info("Running Global Search (DE) with popsize=5, maxiter=10...")
+        
+        # Callback for DE to detect convergence
+        def de_callback(intermediate_result):
+            """Callback for differential_evolution to detect and log convergence."""
+            if layer2_state.get("converged", False):
+                # Convergence detected in objective function - stop DE
+                if not layer2_state.get("de_convergence_logged", False):
+                    layer2_logger.info(
+                        f"✓ DE stopping early: convergence detected (best_obj={layer2_state['best_obj']:.6f})."
+                    )
+                    layer2_state["de_convergence_logged"] = True
+                    for handler in layer2_logger.handlers:
+                        handler.flush()
+                return True
+            return False
+        
         de_result = differential_evolution(
             layer2_objective_de,
             bounds,
-            maxiter=3,     # very few generations
-            popsize=1,     # minimal population → small number of shapes explored
+            maxiter=10,    # Increased from 3
+            popsize=5,     # Increased from 1
             polish=False,
-            tol=0.2,
+            tol=0.01,       # Tighter tolerance to help DE stop earlier when converged
+            callback=de_callback,
         )
         layer2_logger.info(
             "Global search (differential_evolution) finished with objective %.6f",
             de_result.fun,
         )
+        if layer2_state.get("converged", False):
+            layer2_logger.info(
+                "✓ DE converged early, but proceeding to local optimization (L-BFGS-B) "
+                "for fine-grid polish regardless."
+            )
         for handler in layer2_logger.handlers:
             handler.flush()
 
-        # CRITICAL FIX: Use the best X vector found during DE phase (which may be better than de_result.x)
-        # The layer2_state["best_obj"] tracks the best objective across ALL evaluations,
-        # and layer2_state["best_x"] contains the corresponding X vector
-        if layer2_state["best_x"] is not None and layer2_state["best_obj"] < de_result.fun:
-            # We found a better solution during DE than what DE returned
-            local_start_x = layer2_state["best_x"]
-            layer2_logger.info(
-                f"Using best solution from DE phase (obj={layer2_state['best_obj']:.6f}) "
-                f"instead of DE result (obj={de_result.fun:.6f}) as starting point for local optimization"
-            )
+        # Re-scoring Top K candidates
+        # 1. Collect all valid candidates found during DE
+        candidates = layer2_state.get("de_candidates", [])
+        
+        # 2. Add the final DE result if not already included
+        if hasattr(de_result, "x"):
+             candidates.append((de_result.fun, de_result.x))
+        
+        # 3. Sort by objective (ascending)
+        # Filter out duplicates (simple check based on obj)
+        candidates.sort(key=lambda x: x[0])
+        
+        # 4. Take top K unique-ish candidates
+        top_k_count = 5
+        top_candidates = []
+        seen_objs = set()
+        for obj, x in candidates:
+             if len(top_candidates) >= top_k_count:
+                 break
+             # Rounded obj for duplicate detection
+             obj_key = round(obj, 6)
+             if obj_key not in seen_objs and obj < 1e5:
+                 seen_objs.add(obj_key)
+                 top_candidates.append((obj, x))
+        
+        if not top_candidates and layer2_state["best_x"] is not None:
+             top_candidates.append((layer2_state["best_obj"], layer2_state["best_x"]))
+        
+        # Reset convergence flag so that re-scoring evaluations are actually performed
+        # (otherwise layer2_objective returns constant best_obj immediately)
+        layer2_state["converged"] = False
+        
+        layer2_logger.info(f"Re-scoring top {len(top_candidates)} candidates on fine grid...")
+        
+        best_rescored_obj = float("inf")
+        best_rescored_x = None
+        
+        for i, (old_obj, cand_x) in enumerate(top_candidates):
+            # Evaluate on fine grid (local)
+            # This implicitly updates layer2_state["best_obj"] if it finds a new global best
+            new_obj = layer2_objective_local(cand_x)
+            layer2_logger.info(f"  Candidate #{i+1}: DE_obj={old_obj:.6f} -> Fine_obj={new_obj:.6f}")
+            
+            if new_obj < best_rescored_obj:
+                best_rescored_obj = new_obj
+                best_rescored_x = cand_x
+        
+        if best_rescored_x is not None:
+            local_start_x = best_rescored_x
+            layer2_logger.info(f"Selected best re-scored candidate (obj={best_rescored_obj:.6f}) as starting point for local optimization")
+        elif layer2_state["best_x"] is not None:
+             local_start_x = layer2_state["best_x"]
+             layer2_logger.info("Re-scoring failed to find valid candidates, using overall best x")
         else:
-            # Use DE's result as starting point
-            local_start_x = de_result.x
-            layer2_logger.info(
-                f"Using DE result (obj={de_result.fun:.6f}) as starting point for local optimization"
-            )
+             local_start_x = de_result.x # Fallback
+        
+        for handler in layer2_logger.handlers:
+            handler.flush()
+
+        # Re-evaluate the chosen start point on the FINE grid to establish a valid baseline.
+        # This prevents comparing "apples to oranges" (coarse DE vs fine local).
+        layer2_logger.info("Re-evaluating best DE solution on fine grid to establish baseline...")
+        baseline_obj = layer2_objective_local(local_start_x)
+
+        # Force reset internal state to this fine-grid baseline
+        layer2_state["best_obj"] = baseline_obj
+        layer2_state["best_x"] = np.array(local_start_x, copy=True)
+        layer2_state["last_obj"] = baseline_obj
+        layer2_state["prev_obj"] = None
+        # Reset convergence tracking for local optimization phase
+        # (Even if DE converged early, we still run local optimization for fine-grid polish)
+        layer2_state["converged"] = False
+        layer2_state["no_improvement_count"] = 0
+        layer2_state["small_change_count"] = 0
+        layer2_state["identical_obj_count"] = 0
+        layer2_state["last_identical_obj"] = None
+
+        layer2_logger.info(f"Fine-grid baseline objective: {baseline_obj:.6f}")
+        layer2_logger.info("Proceeding to local optimization (L-BFGS-B) for fine-grid polish...")
         for handler in layer2_logger.handlers:
             handler.flush()
 
@@ -1418,11 +1837,10 @@ def run_layer2_pressure(
         # Use tighter tolerances to stop earlier when converged
         # Also reduce max iterations if DE already found a good solution
         effective_max_iter = max_iterations
-        best_obj_so_far = min(layer2_state["best_obj"], de_result.fun)
-        if best_obj_so_far < 1.0:  # If we found a good solution
+        if baseline_obj < 1.0:  # If we have a good solution (on the fine grid)
             effective_max_iter = min(max_iterations, 15)  # Use fewer iterations
             layer2_logger.info(
-                f"Best solution so far (obj={best_obj_so_far:.6f}), "
+                f"Baseline is good (obj={baseline_obj:.6f}), "
                 f"limiting local search to {effective_max_iter} iterations"
             )
         
@@ -1433,8 +1851,9 @@ def run_layer2_pressure(
             bounds=bounds,
             options={
                 "maxiter": effective_max_iter,
-                "ftol": 1e-5,  # Tighter tolerance for earlier stopping
+                "ftol": 1e-6,  # Function tolerance - stop when function change is small
                 "gtol": 1e-5,  # Gradient tolerance - stop when gradient is small
+                "maxfun": effective_max_iter * 3,  # Limit function evaluations to prevent infinite loops
             },
             callback=layer2_callback,
         )
@@ -1454,8 +1873,24 @@ def run_layer2_pressure(
             # Extract optimized segments
             layer2_logger.info(f"Optimized solution uses {N_SEGMENTS} LOX segments and {N_SEGMENTS} fuel segments")
             
+            # CRITICAL FIX: Use the best X vector found across all optimization phases
+            # (DE + local), not just the local optimizer's final X vector.
+            # The local optimizer may not improve upon its starting point, so
+            # result_layer2.x could be worse than the best found during DE.
+            best_x_overall = layer2_state['best_x'] if layer2_state['best_x'] is not None else result_layer2.x
+            best_obj_overall = layer2_state['best_obj']
+            
+            # Log which solution we're using for final results
+            if layer2_state['best_x'] is not None and best_obj_overall < result_layer2.fun:
+                layer2_logger.info(
+                    f"Using best solution found during optimization (obj={best_obj_overall:.6f}) "
+                    f"instead of local optimizer's final solution (obj={result_layer2.fun:.6f})"
+                )
+            else:
+                layer2_logger.info(f"Using local optimizer's final solution (obj={result_layer2.fun:.6f})")
+            
             lox_segments, fuel_segments = decode_segments_from_x(
-                result_layer2.x,
+                best_x_overall,  # Use best X found during entire optimization
                 N_SEGMENTS,
                 initial_lox_pressure_pa,
                 initial_fuel_pressure_pa,
@@ -1510,10 +1945,34 @@ def run_layer2_pressure(
         P_tank_O_optimized = np.linspace(initial_lox_pressure_pa, initial_lox_pressure_pa * 0.7, n_time_points)
         P_tank_F_optimized = np.linspace(initial_fuel_pressure_pa, initial_fuel_pressure_pa * 0.7, n_time_points)
         layer2_logger.warning("Using fallback linear pressure decay")
+        # Create fallback segments for config
+        lox_segments = [{
+            "length_ratio": 1.0,
+            "type": "linear",
+            "start_pressure": initial_lox_pressure_pa,
+            "end_pressure": initial_lox_pressure_pa * 0.7,
+            "k": None,
+        }]
+        fuel_segments = [{
+            "length_ratio": 1.0,
+            "type": "linear",
+            "start_pressure": initial_fuel_pressure_pa,
+            "end_pressure": initial_fuel_pressure_pa * 0.7,
+            "k": None,
+        }]
     
     # Build summary
     layer2_logger.info("")
     layer2_logger.info("Calculating final results...")
+    results_final = None  # Initialize to ensure it's in scope
+    thrust_final = None  # Initialize for thrust curve data
+    # Initialize variables for summary (in case calculation fails)
+    total_impulse_actual = 0.0
+    initial_thrust_actual = 0.0
+    total_lox_mass_final = 0.0
+    total_fuel_mass_final = 0.0
+    total_propellant_mass = 0.0
+    required_impulse_final = 0.0
     if P_tank_O_optimized is not None and P_tank_F_optimized is not None:
         # Calculate final total impulse and propellant consumption for summary
         try:
@@ -1568,6 +2027,187 @@ def run_layer2_pressure(
             total_propellant_mass = 0.0
             required_impulse_final = 0.0
         
+        # Calculate average O/F ratio and min stability from final results
+        avg_of_ratio = None
+        min_stability_margin_val = None
+        if results_final is not None:  # Only calculate if results_final was successfully computed
+            try:
+                MR_hist = np.atleast_1d(results_final.get("MR", []))
+                if len(MR_hist) > 0:
+                    valid_MR = MR_hist[np.isfinite(MR_hist)]
+                    if len(valid_MR) > 0:
+                        avg_of_ratio = float(np.mean(valid_MR))
+                
+                # Extract chugging_stability_margin from results
+                # evaluate_arrays_with_time now includes comprehensive stability analysis (all 3 types)
+                chugging_margins = results_final.get("chugging_stability_margin", None)
+                if chugging_margins is not None:
+                    chugging_margins = np.atleast_1d(chugging_margins)
+                    valid_margins = chugging_margins[np.isfinite(chugging_margins)]
+                    if len(valid_margins) > 0:
+                        min_stability_margin_val = float(np.min(valid_margins))
+                        layer2_logger.info(f"Extracted min stability margin (comprehensive): {min_stability_margin_val:.3f} from {len(valid_margins)} time points")
+                        layer2_logger.info(f"  (Accounts for chugging, acoustic, and feed system stability)")
+                    else:
+                        layer2_logger.warning("Stability margins found but all values are invalid (NaN/Inf)")
+                else:
+                    layer2_logger.warning("chugging_stability_margin not found in results - stability analysis may have failed")
+            except Exception as e:
+                layer2_logger.warning(f"Error extracting stability/O/F from final results: {repr(e)}")
+                pass  # Use None if calculation fails
+        
+        # Calculate COPV requirements for final optimized pressure curves
+        copv_P0_Pa = None
+        copv_pressure_trace_Pa = None
+        copv_time_s = None
+        if results_final is not None and mdot_O_final is not None and mdot_F_final is not None:
+            try:
+                # Create DataFrame for COPV solver with final results
+                P_tank_O_psi_final = P_tank_O_optimized / 6894.76
+                P_tank_F_psi_final = P_tank_F_optimized / 6894.76
+                
+                df_copv_final = pd.DataFrame({
+                    "time": time_array,
+                    "mdot_O (kg/s)": mdot_O_final,
+                    "mdot_F (kg/s)": mdot_F_final,
+                    "P_tank_O (psi)": P_tank_O_psi_final,
+                    "P_tank_F (psi)": P_tank_F_psi_final,
+                })
+                
+                
+                # Extract COPV volume from config
+                copv_volume_m3_final = None
+                if hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "free_volume_L"):
+                    # Convert from liters to m³
+                    copv_volume_m3_final = float(config_layer2.press_tank.free_volume_L) / 1000.0
+                elif hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "press_volume"):
+                    copv_volume_m3_final = float(config_layer2.press_tank.press_volume)
+                elif hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "volume_m3"):
+                    copv_volume_m3_final = float(config_layer2.press_tank.volume_m3)
+                
+                if copv_volume_m3_final is None or copv_volume_m3_final <= 0:
+                    layer2_logger.warning("COPV volume not found in config, skipping final COPV calculation")
+                    copv_P0_Pa = None
+                    copv_pressure_trace_Pa = None
+                    copv_time_s = None
+                else:
+                    # Call COPV solver to get final pressure requirements
+                    copv_results_final = size_or_check_copv_for_polytropic_N2(
+                        df_copv_final,
+                        config_layer2,
+                        copv_volume_m3=copv_volume_m3_final,  # Pass volume explicitly
+                        copv_P0_Pa=None,  # Solve for P0
+                        n2_Z_csv=str(N2_Z_LOOKUP_CSV),  # Absolute path to lookup table
+                    )
+                    
+                    # Extract COPV results
+                    copv_P0_Pa = float(copv_results_final.get("P0_Pa", 0.0))
+                    copv_pressure_trace_Pa = copv_results_final.get("PH_trace_Pa", np.array([]))
+                    copv_time_s = copv_results_final.get("time_s", np.array([]))
+                    
+                    # Log COPV results
+                    layer2_logger.info("")
+                    layer2_logger.info("COPV Pressurization Requirements:")
+                    layer2_logger.info(f"  Initial pressure (P0): {copv_P0_Pa/1e6:.2f} MPa ({copv_P0_Pa/6894.76:.0f} psi)")
+                    if len(copv_pressure_trace_Pa) > 0:
+                        copv_final_pressure = copv_pressure_trace_Pa[-1]
+                        layer2_logger.info(f"  Final pressure: {copv_final_pressure/1e6:.2f} MPa ({copv_final_pressure/6894.76:.0f} psi)")
+                        layer2_logger.info(f"  Pressure drop: {(copv_P0_Pa - copv_final_pressure)/1e6:.2f} MPa")
+                
+            except Exception as e:
+                layer2_logger.warning(f"Error calculating COPV requirements for final results: {repr(e)}")
+                copv_P0_Pa = None
+                copv_pressure_trace_Pa = None
+                copv_time_s = None
+        
+        # Prepare thrust curve data for frontend (time series without ablation/oxidation)
+        thrust_curve_time = None
+        thrust_curve_values = None
+        of_curve_values = None
+        delta_p_inj_O_values = None
+        delta_p_inj_F_values = None
+        if results_final is not None and thrust_final is not None and len(thrust_final) > 0:
+            # Use the time array and thrust data from final evaluation
+            # Ensure arrays are converted to lists for JSON serialization
+            thrust_curve_time = time_array[:len(thrust_final)].tolist() if hasattr(time_array, 'tolist') else list(time_array[:len(thrust_final)])
+            thrust_curve_values = thrust_final.tolist() if hasattr(thrust_final, 'tolist') else list(thrust_final)
+            
+            # Extract O/F ratio (MR - mixture ratio) data
+            MR_final = np.atleast_1d(results_final.get("MR", np.zeros(len(thrust_final))))
+            if len(MR_final) > 0:
+                of_curve_values = MR_final.tolist() if hasattr(MR_final, 'tolist') else list(MR_final)
+            
+            # Extract injector pressure drops from diagnostics
+            diagnostics_list = results_final.get("diagnostics", [])
+            layer2_logger.info(f"Extracting injector pressure drops: diagnostics_list length={len(diagnostics_list)}, thrust_final length={len(thrust_final)}")
+            if len(diagnostics_list) > 0:
+                # Debug: log first diagnostic structure
+                if len(diagnostics_list) > 0 and isinstance(diagnostics_list[0], dict):
+                    first_diag = diagnostics_list[0]
+                    layer2_logger.info(f"First diagnostic keys: {list(first_diag.keys())[:10]}...")  # Log first 10 keys
+                    if "injector_pressure" in first_diag:
+                        layer2_logger.info(f"injector_pressure keys: {list(first_diag['injector_pressure'].keys()) if isinstance(first_diag['injector_pressure'], dict) else 'not a dict'}")
+                    if "delta_p_injector_O" in first_diag:
+                        layer2_logger.info(f"Found delta_p_injector_O directly: {first_diag['delta_p_injector_O']}")
+                delta_p_inj_O_list = []
+                delta_p_inj_F_list = []
+                # Convert from Pa to PSI (1 PSI = 6894.76 Pa)
+                PSI_TO_PA = 6894.76
+                
+                # Ensure we process the same number of points as thrust data
+                n_points = len(thrust_final)
+                for i in range(n_points):
+                    if i < len(diagnostics_list):
+                        diag = diagnostics_list[i]
+                        if isinstance(diag, dict):
+                            # Try nested injector_pressure structure first
+                            injector_pressure = diag.get("injector_pressure")
+                            if isinstance(injector_pressure, dict) and "delta_p_injector_O" in injector_pressure:
+                                delta_p_O = injector_pressure.get("delta_p_injector_O")
+                                delta_p_F = injector_pressure.get("delta_p_injector_F")
+                            else:
+                                # Fallback to direct access in diagnostics dict
+                                delta_p_O = diag.get("delta_p_injector_O")
+                                delta_p_F = diag.get("delta_p_injector_F")
+                            
+                            # Convert from Pa to PSI
+                            if delta_p_O is not None and np.isfinite(delta_p_O):
+                                delta_p_inj_O_list.append(float(delta_p_O / PSI_TO_PA))
+                            else:
+                                delta_p_inj_O_list.append(0.0)
+                            
+                            if delta_p_F is not None and np.isfinite(delta_p_F):
+                                delta_p_inj_F_list.append(float(delta_p_F / PSI_TO_PA))
+                            else:
+                                delta_p_inj_F_list.append(0.0)
+                        else:
+                            delta_p_inj_O_list.append(0.0)
+                            delta_p_inj_F_list.append(0.0)
+                    else:
+                        # Pad with zeros if diagnostics list is shorter
+                        delta_p_inj_O_list.append(0.0)
+                        delta_p_inj_F_list.append(0.0)
+                
+                if len(delta_p_inj_O_list) > 0:
+                    # Check if we actually got non-zero values
+                    non_zero_O = sum(1 for v in delta_p_inj_O_list if abs(v) > 1e-6)
+                    non_zero_F = sum(1 for v in delta_p_inj_F_list if abs(v) > 1e-6)
+                    layer2_logger.info(f"Injector pressure drops extracted: {non_zero_O}/{len(delta_p_inj_O_list)} non-zero LOX values, {non_zero_F}/{len(delta_p_inj_F_list)} non-zero Fuel values")
+                    
+                    if non_zero_O > 0 or non_zero_F > 0:
+                        delta_p_inj_O_values = delta_p_inj_O_list
+                        delta_p_inj_F_values = delta_p_inj_F_list
+                        
+                        # Log sample values for debugging
+                        sample_idx = min(5, len(delta_p_inj_O_list) - 1)
+                        layer2_logger.info(f"Sample injector pressure drops: LOX={delta_p_inj_O_list[sample_idx]:.2f} psi, Fuel={delta_p_inj_F_list[sample_idx]:.2f} psi (at index {sample_idx})")
+                    else:
+                        layer2_logger.warning("All injector pressure drops are zero - diagnostics may not contain injector data")
+                        delta_p_inj_O_values = None
+                        delta_p_inj_F_values = None
+            else:
+                layer2_logger.warning("No diagnostics found in results_final - cannot extract injector pressure drops")
+        
         summary = {
             "lox_segments": n_segments_used,
             "fuel_segments": n_segments_used,
@@ -1581,6 +2221,24 @@ def run_layer2_pressure(
             "n_time_points": n_time_points,
             "peak_thrust": peak_thrust,
             "initial_thrust_actual": initial_thrust_actual,
+            # Frontend-compatible field names
+            "total_impulse_Ns": total_impulse_actual,  # Frontend expects this name
+            "required_impulse_Ns": required_impulse_final,  # Frontend expects this name
+            "lox_mass_kg": total_lox_mass_final,  # Frontend expects this name
+            "fuel_mass_kg": total_fuel_mass_final,  # Frontend expects this name
+            "burn_time_s": target_burn_time,  # Frontend expects this
+            "avg_of_ratio": avg_of_ratio,  # Frontend expects this
+            "min_stability_margin": min_stability_margin_val,  # Frontend expects this
+            "is_success": success,  # Frontend expects this
+            # Thrust curve data for frontend plotting (time series without ablation/oxidation)
+            "thrust_curve_time": thrust_curve_time,
+            "thrust_curve_values": thrust_curve_values,
+            # O/F ratio (mixture ratio) curve data for frontend plotting
+            "of_curve_values": of_curve_values,
+            # Injector pressure drops (LOX and Fuel) for frontend plotting
+            "delta_p_inj_O_psi": delta_p_inj_O_values,
+            "delta_p_inj_F_psi": delta_p_inj_F_values,
+            # Keep original names for backward compatibility
             "total_lox_mass_kg": total_lox_mass_final,
             "total_fuel_mass_kg": total_fuel_mass_final,
             "total_propellant_mass_kg": total_propellant_mass,
@@ -1591,10 +2249,58 @@ def run_layer2_pressure(
             "required_impulse": required_impulse_final,
             "total_impulse_actual": total_impulse_actual,
             "impulse_ratio": total_impulse_actual / max(required_impulse_final, 1e-9),
+            # COPV pressurization data
+            "copv_P0_Pa": float(copv_P0_Pa) if copv_P0_Pa is not None else None,
+            "copv_pressure_trace_Pa": copv_pressure_trace_Pa.tolist() if copv_pressure_trace_Pa is not None and hasattr(copv_pressure_trace_Pa, 'tolist') else None,
+            "copv_time_s": copv_time_s.tolist() if copv_time_s is not None and hasattr(copv_time_s, 'tolist') else None,
         }
     
     layer2_logger.info("")
     layer2_logger.info(f"Layer 2 optimization complete. Log saved to: {log_file_path}")
+    
+    # Save optimized pressure curve segments to config
+    if lox_segments is not None and fuel_segments is not None:
+        try:
+            # Convert segment dicts to PressureSegmentConfig objects
+            lox_segment_configs = [
+                PressureSegmentConfig(
+                    length_ratio=float(seg["length_ratio"]),
+                    type=seg["type"],
+                    start_pressure_pa=float(seg["start_pressure"]),
+                    end_pressure_pa=float(seg["end_pressure"]),
+                    k=float(seg.get("k")) if seg.get("k") is not None else None,
+                )
+                for seg in lox_segments
+            ]
+            fuel_segment_configs = [
+                PressureSegmentConfig(
+                    length_ratio=float(seg["length_ratio"]),
+                    type=seg["type"],
+                    start_pressure_pa=float(seg["start_pressure"]),
+                    end_pressure_pa=float(seg["end_pressure"]),
+                    k=float(seg.get("k")) if seg.get("k") is not None else None,
+                )
+                for seg in fuel_segments
+            ]
+            
+            # Create PressureCurvesConfig and assign to optimized_config
+            pressure_curves_config = PressureCurvesConfig(
+                n_points=n_time_points,
+                target_burn_time_s=target_burn_time,
+                initial_lox_pressure_pa=initial_lox_pressure_pa,
+                initial_fuel_pressure_pa=initial_fuel_pressure_pa,
+                lox_segments=lox_segment_configs,
+                fuel_segments=fuel_segment_configs,
+            )
+            
+            # Update the config with pressure curves
+            # Direct assignment works with Pydantic v2 models
+            optimized_config.pressure_curves = pressure_curves_config
+            
+            layer2_logger.info(f"Saved {len(lox_segment_configs)} LOX segments and {len(fuel_segment_configs)} fuel segments to config")
+        except Exception as e:
+            layer2_logger.warning(f"Failed to save pressure curves to config: {repr(e)}")
+            # Don't fail the entire optimization if config saving fails
     
     # Clean up handler to prevent file handle issues
     layer2_logger.handlers.clear()
