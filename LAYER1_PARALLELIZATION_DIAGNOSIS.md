@@ -372,3 +372,5 @@ for _ in range(n_random):  # n_random = 5-20
 - Early feasibility checks are already good (lines 684-886)
 - The expensive operation is `runner.evaluate()` which involves physics solvers - this is CPU-bound and perfect for parallelization
 
+
+

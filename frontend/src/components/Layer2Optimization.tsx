@@ -92,6 +92,7 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
     });
 
     const [isRunning, setIsRunning] = useState(false);
+    const [isStopping, setIsStopping] = useState(false);
     const [progress, setProgress] = useState(0);
     const [stage, setStage] = useState('');
     const [message, setMessage] = useState('');
@@ -197,6 +198,7 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
 
     const handleRun = () => {
         setIsRunning(true);
+        setIsStopping(false);
         setProgress(0);
         setStage('Initializing');
         setMessage('Starting Layer 2 optimization...');
@@ -243,9 +245,14 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
 
                 } else if (event.type === 'complete') {
                     setIsRunning(false);
+                    setIsStopping(false);
                     setProgress(1.0);
-                    setStage('Complete');
-                    setMessage('Layer 2 optimization complete');
+                    // Check if this was a user-initiated stop
+                    const stoppedByUser = (event as any).stopped_by_user === true;
+                    setStage(stoppedByUser ? 'Stopped' : 'Complete');
+                    setMessage(stoppedByUser
+                        ? 'Optimization stopped by user - using best solution found'
+                        : 'Layer 2 optimization complete');
                     if (event.results) {
                         setResults(event.results);
                         if (event.results.time_array && event.results.lox_pressure) {
@@ -262,7 +269,15 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
                     setEventSourceRef(null);
                 } else if (event.type === 'error') {
                     setIsRunning(false);
-                    setError(event.error || 'Optimization failed');
+                    setIsStopping(false);
+                    // Check if this is a stop message - don't treat as error
+                    if (event.error && event.error.toLowerCase().includes('stopped')) {
+                        setError(null);
+                        setMessage('Optimization stopped by user');
+                        setStage('Stopped');
+                    } else {
+                        setError(event.error || 'Optimization failed');
+                    }
                     setEventSourceRef(null);
                 }
             },
@@ -276,14 +291,24 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
     };
 
     const handleStop = async () => {
-        if (eventSourceRef) {
-            eventSourceRef.close();
-            setEventSourceRef(null);
+        // Don't close the EventSource - let the backend return results gracefully
+        // The backend will return a 'complete' event with stopped_by_user: true
+        setIsStopping(true);
+        setMessage('Stopping optimization...');
+        try {
+            await stopLayer2Optimization();
+        } catch (err) {
+            // If stop API fails, force close
+            console.error('Failed to stop optimization:', err);
+            if (eventSourceRef) {
+                eventSourceRef.close();
+                setEventSourceRef(null);
+            }
+            setIsRunning(false);
+            setIsStopping(false);
+            setStage('Stopped');
+            setMessage('Optimization stopped');
         }
-        await stopLayer2Optimization();
-        setIsRunning(false);
-        setStage('Stopped');
-        setMessage('Optimization stopped by user');
     };
 
     const downloadConfig = () => {
@@ -362,9 +387,13 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
                         {isRunning && (
                             <button
                                 onClick={handleStop}
-                                className="px-6 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg font-bold transition-all"
+                                disabled={isStopping}
+                                className={`px-6 py-2 text-white rounded-lg font-bold transition-all ${isStopping
+                                        ? 'bg-yellow-600 cursor-wait'
+                                        : 'bg-red-600 hover:bg-red-700'
+                                    }`}
                             >
-                                ⏹ Stop
+                                {isStopping ? '⏳ Stopping...' : '⏹ Stop'}
                             </button>
                         )}
                     </div>

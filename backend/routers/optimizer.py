@@ -614,6 +614,9 @@ async def run_layer2(
             
             import concurrent.futures
             
+            # Capture the current stop event explicitly to avoid any global lookup ambiguity
+            current_stop_event = _stop_event
+            
             def run_opt():
                 return run_layer2_pressure(
                     optimized_config=app_state.config,
@@ -631,6 +634,7 @@ async def run_layer2(
                     pressure_curve_callback=pressure_curve_callback,
                     max_iterations=max_iterations,
                     save_evaluation_plots=save_plots,
+                    stop_event=current_stop_event,  # Use captured event
                 )
             
             # Wait, I need to check the design requirements for tank capacities
@@ -671,14 +675,13 @@ async def run_layer2(
                 
                 optimized_config, time_array, P_lox, P_fuel, summary, success = future.result()
                 
-                # Check if stopped
+                # Check if stopped - if so, still return results (with best solution found)
+                stopped_by_user = False
                 with _stop_event_lock:
                     if _stop_event and _stop_event.is_set():
-                        _layer2_status["running"] = False
-                        yield f"data: {safe_json_dumps({'type': 'error', 'error': 'Stopped by user'})}\n\n"
-                        return
+                        stopped_by_user = True
                 
-                # Update app state
+                # Update app state (even if stopped - we want to save the best solution)
                 app_state.config = optimized_config
                 
                 results_dict = convert_numpy({
@@ -695,18 +698,23 @@ async def run_layer2(
                 _layer2_status.update({
                     "results": results_dict,
                     "progress": 1.0,
-                    "stage": "Complete",
-                    "message": "Layer 2 optimization complete",
+                    "stage": "Complete" if not stopped_by_user else "Stopped",
+                    "message": "Layer 2 optimization complete" if not stopped_by_user else "Stopped by user - using best solution found",
                 })
                 
-                yield f"data: {safe_json_dumps({'type': 'complete', 'results': results_dict})}\n\n"
+                yield f"data: {safe_json_dumps({'type': 'complete', 'results': results_dict, 'stopped_by_user': stopped_by_user})}\n\n"
                 
         except Exception as e:
             _layer2_status["error"] = str(e)
             yield f"data: {safe_json_dumps({'type': 'error', 'error': str(e), 'traceback': traceback.format_exc()})}\n\n"
         finally:
             _layer2_status["running"] = False
+            
+            # Safety measure: if connection drops or something fails, ensure we signal stop
+            # to any running optimizer thread so it doesn't become a zombie.
             with _stop_event_lock:
+                if _stop_event is not None:
+                    _stop_event.set()
                 _stop_event = None
 
     return StreamingResponse(

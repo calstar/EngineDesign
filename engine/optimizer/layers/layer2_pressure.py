@@ -555,8 +555,11 @@ def run_layer2_pressure(
     save_evaluation_plots: bool = False,  # Save PNG plots of each evaluation's pressure curves
     min_lox_pressure_floor_pa: Optional[float] = None,
     min_fuel_pressure_floor_pa: Optional[float] = None,
+    min_pressure_slope_psi_per_sec: float = -25.0,  # Minimum pressure decrease rate [psi/s] (negative = decreasing)
     objective_callback: Optional[Callable[[int, float, float], None]] = None,  # Optional hook for streaming objective history
     pressure_curve_callback: Optional[Callable[[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]], None]] = None,  # Optional hook for streaming best pressure curves (time, P_lox, P_fuel, copv_pressure, copv_time)
+    stop_event: Optional[Any] = None,  # threading.Event for stop signal
+
 ) -> Tuple[PintleEngineConfig, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], bool]:
     """
     Run Layer 2: Pressure Curve Optimization.
@@ -615,6 +618,7 @@ def run_layer2_pressure(
     layer2_logger.info(f"Rocket dry mass: {rocket_dry_mass_kg:.2f} kg")
     layer2_logger.info(f"Target burn time: {target_burn_time:.2f} s")
     layer2_logger.info(f"Time points: {n_time_points}")
+    layer2_logger.info(f"Minimum pressure slope: {min_pressure_slope_psi_per_sec:.1f} psi/s")
     if optimal_of_ratio is not None:
         layer2_logger.info(f"Target O/F ratio: {optimal_of_ratio:.2f}")
     if min_stability_margin is not None:
@@ -791,6 +795,17 @@ def run_layer2_pressure(
     }
     
     def layer2_callback(xk):
+        # Check if stop was requested
+        if stop_event is not None and stop_event.is_set():
+            layer2_state["converged"] = True
+            layer2_state["stopped_by_user"] = True
+            if not layer2_state.get("stop_logged", False):
+                layer2_logger.info("⚠ Stop requested by user during local optimization")
+                layer2_state["stop_logged"] = True
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+            return True  # Signal optimizer to stop
+        
         layer2_state["iter"] += 1
         frac = min(layer2_state["iter"] / max(layer2_state["max_iter"], 1), 1.0)
         progress_pct = int(frac * 100)
@@ -952,10 +967,28 @@ def run_layer2_pressure(
             
             length_ratio = length_ratios[i] if i < len(length_ratios) else 1.0 / n_segments
             
+            # Calculate segment time duration for slope enforcement
+            segment_time_duration = length_ratio * target_burn_time  # seconds
+            
             # LOX end pressure ratio and k
             lox_end_ratio_raw = float(np.clip(x_layer2[base + 1], 0.1, 1.0))
             start_ratio_lox = prev_lox_end / max(initial_lox_p, 1e-9)
-            lox_end_ratio = min(lox_end_ratio_raw, start_ratio_lox * 0.99)
+            
+            # Enforce minimum slope constraint (time-based)
+            # Calculate minimum pressure drop based on time and slope requirement
+            # min_pressure_slope_psi_per_sec is negative (pressure decreasing), so we use abs()
+            min_pressure_drop_pa = abs(min_pressure_slope_psi_per_sec) * 6894.76 * segment_time_duration
+            
+            # Calculate maximum allowed end pressure (start - minimum drop)
+            max_allowed_end_pressure_lox = prev_lox_end - min_pressure_drop_pa
+            
+            # Convert to ratio relative to initial pressure
+            max_allowed_end_ratio_lox = max_allowed_end_pressure_lox / max(initial_lox_p, 1e-9)
+            
+            # Enforce both the optimizer's choice and the minimum slope
+            # Also keep the old 0.99 constraint as an upper bound (less restrictive fallback)
+            lox_end_ratio = min(lox_end_ratio_raw, start_ratio_lox * 0.99, max_allowed_end_ratio_lox)
+            
             lox_end_p = initial_lox_p * lox_end_ratio
             # Ensure monotonic decrease and enforce LOX minimum floor.
             lox_end_p = max(min_lox_p, min(lox_end_p, prev_lox_end))
@@ -965,9 +998,16 @@ def run_layer2_pressure(
             fuel_ratio_factor = float(np.clip(x_layer2[base + 3], 0.75, 1.25))
             seg_ratio = initial_ratio * fuel_ratio_factor
             fuel_end_p = lox_end_p / max(seg_ratio, 1e-9)
+            
+            # Apply same minimum slope constraint to fuel
+            max_allowed_end_pressure_fuel = prev_fuel_end - min_pressure_drop_pa
+            # Ensure fuel end pressure respects both the ratio-based calculation and minimum slope
+            fuel_end_p = min(fuel_end_p, max_allowed_end_pressure_fuel)
+            
             # Ensure monotonic decrease and enforce fuel minimum floor.
             fuel_end_p = max(min_fuel_p, min(fuel_end_p, prev_fuel_end))
             fuel_k = float(np.clip(x_layer2[base + 4], 0.1, 2.0))
+
             
             seg_lox = {
                 "length_ratio": length_ratio,
@@ -1007,6 +1047,19 @@ def run_layer2_pressure(
                 `n_time_points` defined above.
             phase: Short label for logging (e.g., "DE" or "local").
         """
+        # Check if stop was requested before starting evaluation
+        if stop_event is not None and stop_event.is_set():
+            # User requested stop - return best objective found so far to signal convergence
+            best_obj = layer2_state.get("best_obj", 1e6)
+            layer2_state["converged"] = True
+            layer2_state["stopped_by_user"] = True
+            if not layer2_state.get("stop_logged", False):
+                layer2_logger.info("⚠ Stop requested by user - halting optimization")
+                layer2_state["stop_logged"] = True
+                for handler in layer2_logger.handlers:
+                    handler.flush()
+            return float(best_obj) if np.isfinite(best_obj) else 1e6
+        
         eval_start_time = time.time()
         layer2_state["eval_count"] += 1
         eval_num = layer2_state["eval_count"]
@@ -1543,9 +1596,18 @@ def run_layer2_pressure(
                     copv_results = size_or_check_copv_for_polytropic_N2(
                         df_copv,
                         config_layer2,
-                        copv_volume_m3=copv_volume_m3,  # Pass volume explicitly
+                        n=1.2,  # polytropic exponent
+                        T0_K=300.0,  # initial COPV temperature
+                        Tp_K=293.0,  # default propellant gas temp
+                        use_real_gas=True,  # use Z lookup table
+                        n2_Z_csv=str(N2_Z_LOOKUP_CSV),
+                        pressurant_R=296.8,  # gas constant for N2
+                        branch_temperatures_K={
+                            "oxidizer": 250.0,  # oxidizer gas temp
+                            "fuel": 293.0,      # fuel gas temp
+                        },
+                        copv_volume_m3=copv_volume_m3,
                         copv_P0_Pa=None,  # Solve for P0
-                        n2_Z_csv=str(N2_Z_LOOKUP_CSV),  # Absolute path to lookup table
                     )
                     
                     # Extract initial pressure requirement
@@ -1718,6 +1780,43 @@ def run_layer2_pressure(
         # Callback for DE to detect convergence
         def de_callback(intermediate_result):
             """Callback for differential_evolution to detect and log convergence."""
+            # Check if stop was requested
+            if stop_event is not None and stop_event.is_set():
+                layer2_state["converged"] = True
+                layer2_state["stopped_by_user"] = True
+                if not layer2_state.get("stop_logged", False):
+                    layer2_logger.info("⚠ Stop requested by user during DE optimization")
+                    layer2_state["stop_logged"] = True
+                    for handler in layer2_logger.handlers:
+                        handler.flush()
+                return True
+            
+            # Track improvement for early stopping
+            current_obj = layer2_state.get("best_obj", float("inf"))
+            prev_best = layer2_state.get("de_prev_best", float("inf"))
+            
+            # Calculate improvement from previous generation
+            improvement = prev_best - current_obj
+            layer2_state["de_prev_best"] = current_obj
+            
+            # Count no-improvement generations
+            if improvement < 1.0:  # Less than 1.0 improvement
+                layer2_state["de_no_improve_count"] = layer2_state.get("de_no_improve_count", 0) + 1
+            else:
+                layer2_state["de_no_improve_count"] = 0
+            
+            # Early stop if 5 consecutive generations with < 1.0 improvement
+            if layer2_state.get("de_no_improve_count", 0) >= 5:
+                if not layer2_state.get("de_convergence_logged", False):
+                    layer2_logger.info(
+                        f"✓ DE converged early: 5 generations with < 1.0 improvement. "
+                        f"Best objective: {current_obj:.6f}"
+                    )
+                    layer2_state["de_convergence_logged"] = True
+                    for handler in layer2_logger.handlers:
+                        handler.flush()
+                return True  # Stop DE
+            
             if layer2_state.get("converged", False):
                 # Convergence detected in objective function - stop DE
                 if not layer2_state.get("de_convergence_logged", False):
@@ -1736,7 +1835,8 @@ def run_layer2_pressure(
             maxiter=10,    # Increased from 3
             popsize=5,     # Increased from 1
             polish=False,
-            tol=0.01,       # Tighter tolerance to help DE stop earlier when converged
+            tol=0.01,       # Population convergence tolerance
+            atol=0.5,       # Absolute tolerance for objective improvement (early stopping)
             callback=de_callback,
         )
         layer2_logger.info(
@@ -2095,9 +2195,18 @@ def run_layer2_pressure(
                     copv_results_final = size_or_check_copv_for_polytropic_N2(
                         df_copv_final,
                         config_layer2,
-                        copv_volume_m3=copv_volume_m3_final,  # Pass volume explicitly
+                        n=1.2,  # polytropic exponent
+                        T0_K=300.0,  # initial COPV temperature
+                        Tp_K=293.0,  # default propellant gas temp
+                        use_real_gas=True,  # use Z lookup table
+                        n2_Z_csv=str(N2_Z_LOOKUP_CSV),
+                        pressurant_R=296.8,  # gas constant for N2
+                        branch_temperatures_K={
+                            "oxidizer": 250.0,  # oxidizer gas temp
+                            "fuel": 293.0,      # fuel gas temp
+                        },
+                        copv_volume_m3=copv_volume_m3_final,
                         copv_P0_Pa=None,  # Solve for P0
-                        n2_Z_csv=str(N2_Z_LOOKUP_CSV),  # Absolute path to lookup table
                     )
                     
                     # Extract COPV results

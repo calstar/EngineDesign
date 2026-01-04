@@ -285,29 +285,39 @@ def simulate_coupled_blowdown(
         return rho, V, m
     
     # Helper to calculate approximate injector discharge area
-    def get_injector_area(fluid_type: str) -> float:
+    # NOTE: For gas venting after propellant depletion, we use a LARGER effective area
+    # because: (1) gas flows much faster than liquid, (2) real systems have relief valves
+    GAS_VENTING_AREA_MULTIPLIER = 10.0  # Gas venting uses 10x larger effective area
+    
+    def get_injector_area(fluid_type: str, for_gas_venting: bool = False) -> float:
         try:
             inj = config.injector
             geom = inj.geometry
             if inj.type == 'pintle':
                 if fluid_type == 'oxidizer':
                     # LOX flow: n_orifices * A_entry
-                    return float(geom.lox.n_orifices * geom.lox.A_entry)
+                    liquid_area = float(geom.lox.n_orifices * geom.lox.A_entry)
                 else:
                     # Fuel flow: Gap area is likely the choke point
                     # A_gap = pi * d_tip * h_gap
-                    return float(np.pi * geom.fuel.d_pintle_tip * geom.fuel.h_gap)
+                    liquid_area = float(np.pi * geom.fuel.d_pintle_tip * geom.fuel.h_gap)
             elif inj.type == 'coaxial':
                  if fluid_type == 'oxidizer':
                      # Core flow: n_elements * A_port
-                     return float(geom.core.n_ports * np.pi * (geom.core.d_port/2)**2)
+                     liquid_area = float(geom.core.n_ports * np.pi * (geom.core.d_port/2)**2)
                  else:
                      # Annulus flow
-                     return float(geom.core.n_ports * np.pi * ((geom.annulus.inner_diameter + 2*geom.annulus.gap_thickness)/2)**2 - np.pi*(geom.annulus.inner_diameter/2)**2)
-            # Add other types if needed, return small safe default if unsure
-            return 1e-4 
+                     liquid_area = float(geom.core.n_ports * np.pi * ((geom.annulus.inner_diameter + 2*geom.annulus.gap_thickness)/2)**2 - np.pi*(geom.annulus.inner_diameter/2)**2)
+            else:
+                # Default fallback
+                liquid_area = 1e-4
+            
+            # For gas venting, use larger effective area for rapid pressure drop
+            if for_gas_venting:
+                return max(liquid_area * GAS_VENTING_AREA_MULTIPLIER, 1e-3)  # Min 10 cm² for gas venting
+            return max(liquid_area, 1e-5)
         except Exception:
-            return 1e-4
+            return 1e-3 if for_gas_venting else 1e-4
 
     rho_lox, V_lox, m_lox = get_tank_params('oxidizer', 'lox_tank', 'lox_h', 'lox_radius')
     rho_fuel, V_fuel, m_fuel = get_tank_params('fuel', 'fuel_tank', 'rp1_h', 'rp1_radius')
@@ -325,6 +335,9 @@ def simulate_coupled_blowdown(
         'lox': {k: np.zeros(N) for k in ['P_Pa', 'T_K', 'V_ullage_m3', 'mdot_kg_s', 'm_prop_kg']},
         'fuel': {k: np.zeros(N) for k in ['P_Pa', 'T_K', 'V_ullage_m3', 'mdot_kg_s', 'm_prop_kg']}
     }
+    # Add depletion flags for flameout masking
+    history['lox']['is_depleted'] = np.zeros(N, dtype=bool)
+    history['fuel']['is_depleted'] = np.zeros(N, dtype=bool)
     
     # Initial Conditions (t=0)
     # We need initial mdot based on initial Pressure
@@ -356,21 +369,27 @@ def simulate_coupled_blowdown(
         mdot_fuel_liquid_prev = history['fuel']['mdot_kg_s'][i-1]
         
         # Determine if we are in gas venting phase for either tank
-        # LOX
-        if lox_tank.m_prop <= 1e-4: # effectively empty
+        # LOX - track depletion state
+        lox_depleted = lox_tank.m_prop <= 1e-4  # effectively empty
+        if lox_depleted:
              mdot_lox_liquid = 0.0
+             # Use LARGER venting area for rapid pressure drop
+             A_vent_lox = get_injector_area('oxidizer', for_gas_venting=True)
              mdot_lox_gas = calculate_compressible_gas_flow(
-                 lox_tank.P_gas, P_amb, lox_tank.T_gas, A_inj_lox, gamma_gas, R_pressurant
+                 lox_tank.P_gas, P_amb, lox_tank.T_gas, A_vent_lox, gamma_gas, R_pressurant
              )
         else:
              mdot_lox_liquid = mdot_lox_liquid_prev
              mdot_lox_gas = 0.0
              
-        # Fuel
-        if fuel_tank.m_prop <= 1e-4:
+        # Fuel - track depletion state
+        fuel_depleted = fuel_tank.m_prop <= 1e-4
+        if fuel_depleted:
              mdot_fuel_liquid = 0.0
+             # Use LARGER venting area for rapid pressure drop
+             A_vent_fuel = get_injector_area('fuel', for_gas_venting=True)
              mdot_fuel_gas = calculate_compressible_gas_flow(
-                 fuel_tank.P_gas, P_amb, fuel_tank.T_gas, A_inj_fuel, gamma_gas, R_pressurant
+                 fuel_tank.P_gas, P_amb, fuel_tank.T_gas, A_vent_fuel, gamma_gas, R_pressurant
              )
         else:
              mdot_fuel_liquid = mdot_fuel_liquid_prev
@@ -381,25 +400,17 @@ def simulate_coupled_blowdown(
         P_fuel_new = fuel_tank.step(mdot_fuel_liquid, dt, mdot_fuel_gas)
         
         # Evaluate Engine with NEW pressures to get NEW LIQUID mdot
-        # Only meaningful if we have liquid
-        # If empty, the engine eval might give garbage or we just ignore it for that tank
-        if lox_tank.m_prop > 0 and fuel_tank.m_prop > 0:
+        # CRITICAL: If EITHER tank is depleted, engine flame-out occurs -> zero flow
+        if lox_depleted or fuel_depleted:
+            # Flameout condition: no combustion without both propellants
+            mdot_lox_new = 0.0
+            mdot_fuel_new = 0.0
+        elif lox_tank.m_prop > 0 and fuel_tank.m_prop > 0:
             mdot_lox_new, mdot_fuel_new = evaluate_engine_fn(P_lox_new, P_fuel_new)
         else:
-            # If one is empty, we likely lose combustion pressure
-            # But the other might still flow... 
-            # For simplicity, if one is empty, we assume engine is effectively out
-            # and just check what the remaining one would do if it could flow?
-            # Or simplified: if empty, flow is 0.
-            # We call evaluate only if we think we can burn, or just for the other tank?
-            # Safe bet: Try evaluate, but override if empty.
-            try:
-                mdot_lox_raw, mdot_fuel_raw = evaluate_engine_fn(P_lox_new, P_fuel_new)
-            except:
-                mdot_lox_raw, mdot_fuel_raw = 0.0, 0.0
-            
-            mdot_lox_new = mdot_lox_raw if lox_tank.m_prop > 1e-4 else 0.0
-            mdot_fuel_new = mdot_fuel_raw if fuel_tank.m_prop > 1e-4 else 0.0
+            # Safety fallback
+            mdot_lox_new = 0.0
+            mdot_fuel_new = 0.0
         
         # Store History
         history['lox']['P_Pa'][i] = P_lox_new
@@ -407,11 +418,13 @@ def simulate_coupled_blowdown(
         history['lox']['V_ullage_m3'][i] = lox_tank.V_ullage
         history['lox']['mdot_kg_s'][i] = mdot_lox_new # This tracks LIQUID flow for engine coupling
         history['lox']['m_prop_kg'][i] = lox_tank.m_prop
+        history['lox']['is_depleted'][i] = lox_depleted
         
         history['fuel']['P_Pa'][i] = P_fuel_new
         history['fuel']['T_K'][i] = fuel_tank.T_gas
         history['fuel']['V_ullage_m3'][i] = fuel_tank.V_ullage
         history['fuel']['mdot_kg_s'][i] = mdot_fuel_new
         history['fuel']['m_prop_kg'][i] = fuel_tank.m_prop
+        history['fuel']['is_depleted'][i] = fuel_depleted
         
     return history

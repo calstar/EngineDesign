@@ -89,3 +89,5 @@ For a rocket nozzle:
 The stagnation pressure Pc is constant throughout isentropic flow, so it's the correct reference for all calculations.
 
 
+
+
