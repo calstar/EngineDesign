@@ -43,7 +43,15 @@ def run_layer3_thermal_protection(
     Returns:
         Tuple of (optimized_config, updated_time_results, thermal_results)
     """
-    from scipy.optimize import minimize as scipy_minimize, differential_evolution
+    from scipy.optimize import minimize as scipy_minimize
+    
+    # Try to import CMA-ES, fall back to DE if not available
+    try:
+        import cma
+        use_cma = True
+    except ImportError:
+        use_cma = False
+        from scipy.optimize import differential_evolution
 
     # ------------------------------------------------------------------
     # Set up Layer 3 logging (mirrors Layer 2 style)
@@ -90,7 +98,7 @@ def run_layer3_thermal_protection(
         # Generic ablative bounds: 3–20 mm. Layer 3 will determine the actual
         # required thickness based solely on its own time-series recession
         # results, independent of any Layer 1 / Layer 2 guesses.
-        bounds_abl = (0.003, 0.020)
+        bounds_abl = (0.003, 0.025)
         layer3_bounds.append(bounds_abl)
         # Start from the midpoint of the search interval (independent of prior layers).
         ablative_x0 = 0.5 * (bounds_abl[0] + bounds_abl[1])
@@ -104,7 +112,7 @@ def run_layer3_thermal_protection(
 
     if graphite_cfg and graphite_cfg.enabled:
         # Generic graphite bounds: 3–15 mm.
-        bounds_gra = (0.003, 0.015)
+        bounds_gra = (0.003, 0.025)
         layer3_bounds.append(bounds_gra)
         graphite_x0 = 0.5 * (bounds_gra[0] + bounds_gra[1])
         layer3_x0.append(graphite_x0)
@@ -172,7 +180,16 @@ def run_layer3_thermal_protection(
         # 0.1 mm, many optimizer proposals map to the same physical design.
         _objective_cache: Dict[Tuple[float, ...], float] = {}
 
-        def layer3_objective(x_layer3: np.ndarray) -> float:
+        def downsample_array(arr: np.ndarray, n_coarse: int) -> np.ndarray:
+            """Downsample array from fine grid to coarse grid using linear interpolation."""
+            n_fine = len(arr)
+            if n_coarse >= n_fine:
+                return arr.copy()
+            # Use evenly spaced indices for downsampling
+            indices = np.linspace(0, n_fine - 1, n_coarse)
+            return np.interp(indices, np.arange(n_fine), arr)
+
+        def layer3_objective(x_layer3: np.ndarray, n_eval_points: Optional[int] = None) -> float:
             """Optimize thermal protection to minimize mass while meeting recession requirements."""
             eval_start = time.time()
             layer3_state["eval_index"] += 1
@@ -240,14 +257,15 @@ def run_layer3_thermal_protection(
                         )
 
                 # Check cache before running the expensive time solver.
-                cache_key = tuple(chosen_thicknesses)
+                cache_key = (tuple(chosen_thicknesses), n_eval_points)
                 if cache_key in _objective_cache:
                     obj_cached = float(_objective_cache[cache_key])
                     eval_time = time.time() - eval_start
                     layer3_logger.info(
-                        "Eval %03d (cached): thicknesses=%s mm, obj=%.3f, dt=%.2fs",
+                        "Eval %03d (cached): thicknesses=%s mm, n_pts=%s, obj=%.3f, dt=%.2fs",
                         eval_idx,
                         [t * 1000.0 for t in chosen_thicknesses],
+                        n_eval_points,
                         obj_cached,
                         eval_time,
                     )
@@ -277,12 +295,25 @@ def run_layer3_thermal_protection(
                             chosen_thicknesses[gra_idx],
                             runner_gra_thick,
                         )
+                
+                # Downsample arrays if using coarse grid for faster evaluation
+                # Downsample arrays if using coarse grid for faster evaluation
+                if n_eval_points is not None and n_eval_points < n_time_points:
+                    eval_time_array = downsample_array(time_array, n_eval_points)
+                    eval_P_tank_O = downsample_array(P_tank_O_array, n_eval_points)
+                    eval_P_tank_F = downsample_array(P_tank_F_array, n_eval_points)
+                else:
+                    # Use full resolution arrays
+                    eval_time_array = time_array
+                    eval_P_tank_O = P_tank_O_array
+                    eval_P_tank_F = P_tank_F_array
+                
                 # CRITICAL: Use same solver settings as ui_app.py for consistency
                 # During optimization, we use fully-coupled solver to match final results
                 results_layer3 = runner_layer3.evaluate_arrays_with_time(
-                    time_array,
-                    P_tank_O_array,
-                    P_tank_F_array,
+                    eval_time_array,
+                    eval_P_tank_O,
+                    eval_P_tank_F,
                     track_ablative_geometry=True,  # Enable ablative geometry tracking
                     use_coupled_solver=True,  # Use fully-coupled solver (matches ui_app.py and final analysis)
                 )
@@ -293,23 +324,27 @@ def run_layer3_thermal_protection(
                 # ------------------------------------------------------------------
                 # Re-check key Layer 2 burn metrics for this candidate
                 # ------------------------------------------------------------------
-                # Total impulse
-                thrust_hist = np.atleast_1d(results_layer3.get("F", np.zeros_like(time_array)))
-                if thrust_hist.size > n_time_points:
-                    thrust_hist = thrust_hist[:n_time_points]
+                # Total impulse (use eval_time_array for integration)
+                thrust_hist = np.atleast_1d(results_layer3.get("F", np.zeros_like(eval_time_array)))
+                n_eval = len(eval_time_array)
+                if thrust_hist.size > n_eval:
+                    thrust_hist = thrust_hist[:n_eval]
                 thrust_hist = np.nan_to_num(
                     thrust_hist,
                     nan=0.0,
                     posinf=0.0,
                     neginf=0.0,
                 )
-                total_impulse = float(np.trapezoid(thrust_hist, time_array[: thrust_hist.size]))
+                total_impulse = float(np.trapezoid(thrust_hist, eval_time_array[: thrust_hist.size]))
+
 
                 impulse_penalty = 0.0
                 if baseline_impulse > 0.0 and total_impulse < baseline_impulse:
                     # Penalize fractional loss of impulse relative to baseline.
+                    # Increased scale from 1e3 to 1e4 to make impulse preservation competitive
+                    # with recession penalties while still prioritizing safety.
                     frac_loss = (baseline_impulse - total_impulse) / baseline_impulse
-                    impulse_penalty = max(0.0, frac_loss) * 1e3
+                    impulse_penalty = max(0.0, frac_loss) * 1e4
 
                 # Stability penalty (discourage worse-than-baseline stability)
                 stability_penalty = 0.0
@@ -335,8 +370,10 @@ def run_layer3_thermal_protection(
 
                     if baseline_min_stability is not None and min_stability is not None:
                         # Penalize any drop below the baseline minimum stability.
+                        # Increased scale from 5e2 to 5e3 to make stability preservation competitive
+                        # with recession penalties while still prioritizing safety.
                         if min_stability < baseline_min_stability:
-                            stability_penalty = (baseline_min_stability - min_stability) * 5e2
+                            stability_penalty = (baseline_min_stability - min_stability) * 5e3
                 except Exception:
                     # If stability cannot be evaluated, don't add a penalty but
                     # also don't crash the objective.
@@ -348,7 +385,9 @@ def run_layer3_thermal_protection(
                 idx_param = 0
                 recession_penalty = 0.0
                 margin_factor = 1.25  # 25% thickness margin over max recession
-                penalty_scale = 1e5   # Strongly discourage unsafe solutions
+                # Reduced from 1e5 to 5e4 to balance with impulse/stability penalties.
+                # Recession safety is still prioritized but not completely dominant.
+                penalty_scale = 5e4   # Strongly discourage unsafe solutions
 
                 if ablative_cfg and ablative_cfg.enabled:
                     thickness = x_layer3[idx_param]
@@ -418,79 +457,224 @@ def run_layer3_thermal_protection(
                 layer3_logger.error(traceback.format_exc())
                 return 1e6
 
-        # Optimize Layer 3: small global search (DE) followed by local polish
+        # Optimize Layer 3: Use CMA-ES if available (better exploration), fall back to DE+L-BFGS-B
         try:
-            # ------------------------------------------------------------------
-            # 1) Coarse global exploration with differential_evolution
-            # ------------------------------------------------------------------
-            layer3_logger.info(
-                "Starting Layer 3 global search (differential_evolution) with %d dims...",
-                len(layer3_x0),
-            )
-            de_result = differential_evolution(
-                layer3_objective,
-                layer3_bounds,
-                maxiter=3,      # small global search (keep runtime low)
-                popsize=2,      # tiny population (dim is only 1–2)
-                polish=False,
-                tol=0.3,
-            )
-            layer3_logger.info(
-                "Global search finished: de_obj=%.6f, nfev=%s",
-                float(de_result.fun) if np.isfinite(de_result.fun) else float("nan"),
-                getattr(de_result, "nfev", "N/A"),
-            )
+            if use_cma:
+                # ------------------------------------------------------------------
+                # CMA-ES optimization (preferred: better exploration for small dimensions)
+                # ------------------------------------------------------------------
+                layer3_logger.info(
+                    "Starting Layer 3 optimization using CMA-ES with %d dims...",
+                    len(layer3_x0),
+                )
+                
+                # Calculate initial step size: ~15% of the range for good exploration
+                span = np.array([hi - lo for lo, hi in layer3_bounds])
+                sigma0 = float(np.mean(span) * 0.15)  # 15% of average range
+                if not np.isfinite(sigma0) or sigma0 <= 0:
+                    sigma0 = 0.002  # Default: 2mm
+                
+                # Population size: CMA-ES default is 4+floor(3*ln(n)), but for 1-2D we want more exploration
+                # Use popsize ~8-12 for better exploration in small dimensions
+                n_dims = len(layer3_x0)
+                cma_popsize = max(8, 4 + int(3 * np.log(n_dims)))
+                
+                # Budget: ~60-80 evaluations (reasonable for 3-4s per eval)
+                # This gives CMA-ES ~8-10 generations to explore and converge
+                cma_budget = min(80, cma_popsize * 10)
+                
+                # Per-dimension scaling (larger ranges get larger step sizes)
+                cma_stds = span / np.mean(span) if np.mean(span) > 0 else np.ones(n_dims)
+                
+                # Prepare bounds for CMA
+                lower_bounds = np.array([b[0] for b in layer3_bounds])
+                upper_bounds = np.array([b[1] for b in layer3_bounds])
+                
+                # CMA-ES options
+                opts = {
+                    "bounds": [lower_bounds.tolist(), upper_bounds.tolist()],
+                    "popsize": cma_popsize,
+                    "maxiter": 1000,  # High limit, we'll stop based on budget
+                    "verb_disp": 0,
+                    "verb_log": 0,
+                    "tolx": 1e-6,
+                    "tolfun": 1e-4,
+                    "tolstagnation": 20,
+                    "ftarget": -np.inf,
+                    "seed": 42,  # Deterministic
+                }
+                if n_dims > 1:
+                    opts["CMA_stds"] = cma_stds.tolist()
+                
+                # Initialize CMA-ES
+                x0_clamped = np.clip(layer3_x0, lower_bounds, upper_bounds)
+                es = cma.CMAEvolutionStrategy(x0_clamped.tolist(), sigma0, opts)
+                
+                # CMA-ES uses coarse 25-point grid for fast global search
+                n_coarse_points = 25
+                layer3_logger.info(
+                    "CMA-ES will use coarse %d-point grid (vs full %d-point grid) for ~8x speedup",
+                    n_coarse_points,
+                    n_time_points,
+                )
+                
+                best_x_cma = x0_clamped.copy()
+                best_f_cma = float(layer3_objective(best_x_cma, n_eval_points=n_coarse_points))
+                evals_used = 1
+                
+                # Run CMA-ES iterations
+                while not es.stop() and evals_used < cma_budget:
+                    candidates = es.ask()
+                    fitnesses = []
+                    
+                    # Limit candidates if we're close to budget
+                    remaining_budget = cma_budget - evals_used
+                    if remaining_budget < len(candidates):
+                        candidates = candidates[:remaining_budget]
+                    
+                    for candidate in candidates:
+                        x_candidate = np.asarray(candidate, dtype=float)
+                        # Ensure within bounds (CMA handles this, but double-check)
+                        x_candidate = np.clip(x_candidate, lower_bounds, upper_bounds)
+                        obj_val = float(layer3_objective(x_candidate, n_eval_points=n_coarse_points))
+                        fitnesses.append(obj_val)
+                        evals_used += 1
+                        
+                        # Track best
+                        if obj_val < best_f_cma:
+                            best_f_cma = obj_val
+                            best_x_cma = x_candidate.copy()
+                    
+                    # Tell CMA-ES about all evaluated candidates
+                    es.tell(candidates, fitnesses)
+                    
+                    # Log progress every few generations
+                    if evals_used % (cma_popsize * 2) == 0:
+                        layer3_logger.info(
+                            "CMA-ES progress: evals=%d/%d, best_obj=%.6f, sigma=%.6f",
+                            evals_used,
+                            cma_budget,
+                            best_f_cma,
+                            es.sigma,
+                        )
+                
+                layer3_logger.info(
+                    "CMA-ES finished: final_obj=%.6f, evals=%d, sigma=%.6f",
+                    best_f_cma,
+                    evals_used,
+                    es.sigma,
+                )
+                
+                # Final local polish with L-BFGS-B on full 200-point grid
+                layer3_logger.info(
+                    "Starting final local polish with L-BFGS-B on full %d-point grid...",
+                    n_time_points,
+                )
+                
+                # Create wrapper that uses full resolution
+                def layer3_objective_full_res(x):
+                    return layer3_objective(x, n_eval_points=None)
+                
+                result_layer3 = scipy_minimize(
+                    layer3_objective_full_res,
+                    best_x_cma,
+                    method="L-BFGS-B",
+                    bounds=layer3_bounds,
+                    options={
+                        "maxiter": 10,
+                        "maxfun": 15,
+                        "ftol": 1e-4,
+                    },
+                )
+                
+                # Use the better of CMA-ES best or L-BFGS-B result
+                if result_layer3.success and np.isfinite(result_layer3.fun):
+                    if result_layer3.fun < best_f_cma:
+                        best_x_cma = np.asarray(result_layer3.x, dtype=float)
+                        best_f_cma = float(result_layer3.fun)
+                        layer3_logger.info(
+                            "L-BFGS-B polish improved: final_obj=%.6f",
+                            best_f_cma,
+                        )
+                    else:
+                        layer3_logger.info(
+                            "L-BFGS-B polish did not improve (CMA-ES best was better)"
+                        )
+                
+                # Create result object compatible with rest of code
+                class CMA_Result:
+                    def __init__(self, x, fun):
+                        self.x = x
+                        self.fun = fun
+                        self.success = True
+                
+                result_layer3 = CMA_Result(best_x_cma, best_f_cma)
+                
+            else:
+                # ------------------------------------------------------------------
+                # Fallback: DE + grid search + L-BFGS-B (original approach)
+                # ------------------------------------------------------------------
+                layer3_logger.info(
+                    "CMA-ES not available, using differential_evolution with %d dims...",
+                    len(layer3_x0),
+                )
+                de_result = differential_evolution(
+                    layer3_objective,
+                    layer3_bounds,
+                    maxiter=3,
+                    popsize=2,
+                    polish=False,
+                    tol=0.3,
+                )
+                layer3_logger.info(
+                    "Global search finished: de_obj=%.6f, nfev=%s",
+                    float(de_result.fun) if np.isfinite(de_result.fun) else float("nan"),
+                    getattr(de_result, "nfev", "N/A"),
+                )
 
-            # ------------------------------------------------------------------
-            # 2) Coarse local sweep around DE best to find a good basin
-            # ------------------------------------------------------------------
-            best_local_x = np.asarray(de_result.x, dtype=float)
-            best_local_obj = float(de_result.fun) if np.isfinite(de_result.fun) else float("inf")
+                best_local_x = np.asarray(de_result.x, dtype=float)
+                best_local_obj = float(de_result.fun) if np.isfinite(de_result.fun) else float("inf")
 
-            # Coarse step ~0.2 mm in thickness, search +/- 0.4 mm around DE best.
-            coarse_step_m = 0.0002  # 0.2 mm
-            offsets = [-2, -1, 0, 1, 2]
+                # Coarse local sweep
+                coarse_step_m = 0.0002  # 0.2 mm
+                offsets = [-2, -1, 0, 1, 2]
 
-            for delta_indices in itertools.product(offsets, repeat=len(layer3_bounds)):
-                delta_vec = np.asarray(delta_indices, dtype=float) * coarse_step_m
-                candidate_x = best_local_x + delta_vec
-                # Respect bounds
-                for i, (lo, hi) in enumerate(layer3_bounds):
-                    candidate_x[i] = float(np.clip(candidate_x[i], lo, hi))
+                for delta_indices in itertools.product(offsets, repeat=len(layer3_bounds)):
+                    delta_vec = np.asarray(delta_indices, dtype=float) * coarse_step_m
+                    candidate_x = best_local_x + delta_vec
+                    for i, (lo, hi) in enumerate(layer3_bounds):
+                        candidate_x[i] = float(np.clip(candidate_x[i], lo, hi))
 
-                obj_val = float(layer3_objective(candidate_x))
-                if obj_val < best_local_obj:
-                    best_local_obj = obj_val
-                    best_local_x = candidate_x
+                    obj_val = float(layer3_objective(candidate_x))
+                    if obj_val < best_local_obj:
+                        best_local_obj = obj_val
+                        best_local_x = candidate_x
 
-            layer3_logger.info(
-                "Coarse local sweep finished: best_obj=%.6f at x=%s mm",
-                best_local_obj,
-                [float(v) * 1000.0 for v in np.atleast_1d(best_local_x)],
-            )
+                layer3_logger.info(
+                    "Coarse local sweep finished: best_obj=%.6f at x=%s mm",
+                    best_local_obj,
+                    [float(v) * 1000.0 for v in np.atleast_1d(best_local_x)],
+                )
 
-            # ------------------------------------------------------------------
-            # 3) Fine local polish with L-BFGS-B starting from best coarse point
-            # ------------------------------------------------------------------
-            layer3_logger.info("Starting Layer 3 local optimization using L-BFGS-B...")
-            result_layer3 = scipy_minimize(
-                layer3_objective,
-                best_local_x,
-                method="L-BFGS-B",
-                bounds=layer3_bounds,
-                options={
-                    "maxiter": 12,   # keep local polish lightweight
-                    "maxfun": 25,    # hard cap on objective evaluations
-                    "ftol": 1e-3,    # stop once objective changes are small
-                },
-            )
-            layer3_logger.info(
-                "Local optimization finished: success=%s, final_obj=%.6f, nit=%s, nfev=%s",
-                result_layer3.success,
-                float(result_layer3.fun) if np.isfinite(result_layer3.fun) else float("nan"),
-                getattr(result_layer3, "nit", "N/A"),
-                getattr(result_layer3, "nfev", "N/A"),
-            )
+                layer3_logger.info("Starting Layer 3 local optimization using L-BFGS-B...")
+                result_layer3 = scipy_minimize(
+                    layer3_objective,
+                    best_local_x,
+                    method="L-BFGS-B",
+                    bounds=layer3_bounds,
+                    options={
+                        "maxiter": 12,
+                        "maxfun": 25,
+                        "ftol": 1e-3,
+                    },
+                )
+                layer3_logger.info(
+                    "Local optimization finished: success=%s, final_obj=%.6f, nit=%s, nfev=%s",
+                    result_layer3.success,
+                    float(result_layer3.fun) if np.isfinite(result_layer3.fun) else float("nan"),
+                    getattr(result_layer3, "nit", "N/A"),
+                    getattr(result_layer3, "nfev", "N/A"),
+                )
 
             # Update config with optimized thicknesses
             idx_param = 0

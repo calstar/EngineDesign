@@ -278,12 +278,26 @@ export function CustomPlotter() {
   }
 
   const xInfo = getFieldInfo(xAxis);
+  
+  // Helper to format field label with unit
+  const formatFieldLabel = (field: string) => {
+    const info = getFieldInfo(field);
+    return info.unit ? `${info.label} (${info.unit})` : info.label;
+  };
+  
   const primaryLabel = primaryYAxes.length <= 2 
-    ? primaryYAxes.map(f => getFieldInfo(f).label).join(', ')
+    ? primaryYAxes.map(f => formatFieldLabel(f)).join(', ')
     : `${primaryYAxes.length} series`;
   const secondaryLabel = secondaryYAxes.length <= 2 
-    ? secondaryYAxes.map(f => getFieldInfo(f).label).join(', ')
+    ? secondaryYAxes.map(f => formatFieldLabel(f)).join(', ')
     : `${secondaryYAxes.length} series`;
+  
+  // For single axis mode, use the same label format
+  const singleYAxisLabel = yAxes.length === 1 
+    ? formatFieldLabel(yAxes[0])
+    : yAxes.length <= 2
+    ? yAxes.map(f => formatFieldLabel(f)).join(', ')
+    : `${yAxes.length} series`;
 
   return (
     <div className="space-y-6">
@@ -564,7 +578,7 @@ export function CustomPlotter() {
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
                 label={{ 
-                  value: `${xInfo.label} (${xInfo.unit})`, 
+                  value: xInfo.unit ? `${xInfo.label} (${xInfo.unit})` : xInfo.label, 
                   position: 'insideBottom', 
                   offset: -5, 
                   fill: 'var(--color-text-secondary)' 
@@ -578,12 +592,12 @@ export function CustomPlotter() {
                 domain={yScale === 'log' || yAutoRange ? ['auto', 'auto'] : [0, 'auto']}
                 stroke={useSecondaryAxis ? '#3b82f6' : 'var(--color-text-secondary)'}
                 tick={{ fill: useSecondaryAxis ? '#3b82f6' : 'var(--color-text-secondary)', fontSize: 11 }}
-                label={useSecondaryAxis ? { 
-                  value: primaryLabel, 
+                label={{ 
+                  value: useSecondaryAxis ? primaryLabel : singleYAxisLabel, 
                   angle: -90, 
                   position: 'insideLeft', 
-                  fill: '#3b82f6' 
-                } : undefined}
+                  fill: useSecondaryAxis ? '#3b82f6' : 'var(--color-text-secondary)'
+                }}
               />
               
               {/* Secondary Y-Axis */}

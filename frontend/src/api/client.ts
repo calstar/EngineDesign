@@ -963,3 +963,152 @@ export function runLayer2Optimization(
 
   return eventSource;
 }
+
+// ============================================================================
+// Layer 3 Thermal Protection Optimizer Types and API
+// ============================================================================
+
+export interface Layer3Settings {
+  max_iterations?: number;
+  save_plots?: boolean;
+}
+
+export interface Layer3Results {
+  performance: Record<string, any>;
+  summary: {
+    optimized_ablative_thickness?: number;  // meters
+    optimized_graphite_thickness?: number;   // meters
+    max_recession_chamber?: number;          // meters
+    max_recession_throat?: number;           // meters
+    thermal_protection_valid?: boolean;
+    ablative_adequate?: boolean;
+    graphite_adequate?: boolean;
+    total_impulse_Ns?: number;
+    burn_time_s?: number;
+    min_stability_margin?: number;
+    [key: string]: any;
+  };
+  objective_history: Array<{
+    iteration: number;
+    objective: number;
+    best_objective: number;
+  }>;
+  time_array: number[];
+  lox_pressure: number[];
+  fuel_pressure: number[];
+  config?: EngineConfig;
+  config_yaml?: string;
+}
+
+export interface Layer3ProgressEvent {
+  type: 'status' | 'progress' | 'objective' | 'pressure_curves' | 'complete' | 'error';
+  progress?: number;
+  stage?: string;
+  message?: string;
+  objective_history?: Array<{
+    iteration: number;
+    objective: number;
+    best_objective: number;
+  }>;
+  total_count?: number;
+  time_array?: number[];
+  lox_pressure?: number[];
+  fuel_pressure?: number[];
+  copv_pressure?: number[];
+  copv_time?: number[];
+  results?: Layer3Results;
+  stopped_by_user?: boolean;
+  error?: string;
+  traceback?: string;
+}
+
+export interface Layer3StatusResponse {
+  running: boolean;
+  progress: number;
+  stage: string;
+  message: string;
+  has_results: boolean;
+  error: string | null;
+}
+
+export interface Layer3ResultsResponse {
+  status: string;
+  results: Layer3Results;
+}
+
+export async function getLayer3Status(): Promise<ApiResponse<Layer3StatusResponse>> {
+  return request<Layer3StatusResponse>('/optimizer/layer3/status');
+}
+
+export async function getLayer3Results(): Promise<ApiResponse<Layer3ResultsResponse>> {
+  return request<Layer3ResultsResponse>('/optimizer/layer3/results');
+}
+
+export async function stopLayer3Optimization(): Promise<ApiResponse<{ status: string; message: string }>> {
+  return request<{ status: string; message: string }>('/optimizer/layer3/stop', {
+    method: 'POST',
+  });
+}
+
+export async function uploadLayer3Config(file: File): Promise<ApiResponse<UploadResponse>> {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const response = await fetch(`${API_BASE}/optimizer/layer3/upload-config`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      return { error: errorData.detail || `HTTP ${response.status}` };
+    }
+
+    const data = await response.json();
+    return { data };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'Upload failed' };
+  }
+}
+
+/**
+ * Run Layer 3 thermal protection optimization with Server-Sent Events for real-time progress updates.
+ */
+export function runLayer3Optimization(
+  settings: Layer3Settings,
+  onProgress: (event: Layer3ProgressEvent) => void,
+  onError: (error: string) => void
+): EventSource {
+  const params = new URLSearchParams({
+    max_iterations: (settings.max_iterations || 20).toString(),
+    save_plots: (settings.save_plots || false).toString(),
+  });
+
+  const url = `${API_BASE}/optimizer/layer3?${params.toString()}`;
+
+  const eventSource = new EventSource(url);
+
+  eventSource.onmessage = (event) => {
+    try {
+      const data: Layer3ProgressEvent = JSON.parse(event.data);
+      onProgress(data);
+
+      if (data.type === 'complete' || data.type === 'error') {
+        eventSource.close();
+      }
+    } catch (err) {
+      console.error('Error parsing SSE event:', err);
+      onError(err instanceof Error ? err.message : 'Failed to parse progress event');
+      eventSource.close();
+    }
+  };
+
+  eventSource.onerror = (err) => {
+    console.error('SSE connection error:', err);
+    onError('Connection to server lost');
+    eventSource.close();
+  };
+
+  return eventSource;
+}
