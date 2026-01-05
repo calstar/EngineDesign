@@ -444,11 +444,13 @@ def run_layer2a_minimum_pressures(
         if optimal_of_ratio is not None:
             MR_hist = np.atleast_1d(results.get("MR", np.full_like(time_hist, optimal_of_ratio)))
             MR_hist = MR_hist[: time_hist.shape[0]]
-            avg_MR = float(np.mean(MR_hist))
-            MR_error = abs(avg_MR - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
-            passes_of = MR_error <= 0.20
+            # Pointwise relative error
+            MR_errors = np.abs(MR_hist - optimal_of_ratio) / max(optimal_of_ratio, 1e-9)
+            # Check maximum deviation (must be within 20% at all points)
+            max_MR_error = float(np.max(MR_errors))
+            passes_of = max_MR_error <= 0.20
         else:
-            passes_of = True
+            raise ValueError("optimal_of_ratio must be provided")
 
         passes = passes_impulse and passes_lox_capacity and passes_fuel_capacity and passes_stability and passes_of
 
@@ -559,6 +561,9 @@ def run_layer2_pressure(
     objective_callback: Optional[Callable[[int, float, float], None]] = None,  # Optional hook for streaming objective history
     pressure_curve_callback: Optional[Callable[[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]], None]] = None,  # Optional hook for streaming best pressure curves (time, P_lox, P_fuel, copv_pressure, copv_time)
     stop_event: Optional[Any] = None,  # threading.Event for stop signal
+    de_maxiter: int = 5,  # Reduced from 10 for faster execution
+    de_popsize: int = 2,  # Reduced from 5 for faster execution
+    de_n_time_points: int = 25,  # Reduced from 50 for faster execution
 
 ) -> Tuple[PintleEngineConfig, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], bool]:
     """
@@ -618,6 +623,7 @@ def run_layer2_pressure(
     layer2_logger.info(f"Rocket dry mass: {rocket_dry_mass_kg:.2f} kg")
     layer2_logger.info(f"Target burn time: {target_burn_time:.2f} s")
     layer2_logger.info(f"Time points: {n_time_points}")
+    layer2_logger.info(f"DE parameters: maxiter={de_maxiter}, popsize={de_popsize}, n_time_points={de_n_time_points}")
     layer2_logger.info(f"Minimum pressure slope: {min_pressure_slope_psi_per_sec:.1f} psi/s")
     if optimal_of_ratio is not None:
         layer2_logger.info(f"Target O/F ratio: {optimal_of_ratio:.2f}")
@@ -635,7 +641,7 @@ def run_layer2_pressure(
     # - Full-resolution array for local optimization and final evaluation
     # - Coarser array for the global DE search to speed up evaluations
     time_array = np.linspace(0.0, target_burn_time, n_time_points)
-    n_time_points_de = min(50, n_time_points)
+    n_time_points_de = min(de_n_time_points, n_time_points)
     time_array_de = np.linspace(0.0, target_burn_time, n_time_points_de)
     
     def save_evaluation_plot(
@@ -1509,17 +1515,22 @@ def run_layer2_pressure(
                     # Calculate per-point penalty
                     # If dev <= deadband: penalty = dev * 1.0 (light guidance)
                     # If dev > deadband: penalty = deadband * 1.0 + (dev - deadband) * 20.0 (strong enforcement)
-                    penalties = np.where(
+                    pointwise_penalties = np.where(
                         deviations <= deadband,
                         deviations * 1.0,
                         deadband * 1.0 + (deviations - deadband) * 20.0
                     )
                     
-                    # Average the penalty over time points to keep magnitude consistent
-                    mean_penalty = np.mean(penalties)
+                    # Compute mean and max penalties
+                    mean_penalty = np.mean(pointwise_penalties)
+                    max_penalty = np.max(pointwise_penalties)
+                    
+                    # Weighted combination: 40% mean, 60% max
+                    # This balance ensures overall stability while penalizing spikes
+                    combined_penalty = 0.4 * mean_penalty + 0.6 * max_penalty
                     
                     # Scale factor to match other objective terms magnitude
-                    of_penalty = mean_penalty * 50.0 
+                    of_penalty = combined_penalty * 50.0 
                 else:
                     # No valid MR values - large penalty
                     of_penalty = 100.0
@@ -1832,8 +1843,8 @@ def run_layer2_pressure(
         de_result = differential_evolution(
             layer2_objective_de,
             bounds,
-            maxiter=10,    # Increased from 3
-            popsize=5,     # Increased from 1
+            maxiter=de_maxiter,
+            popsize=de_popsize,
             polish=False,
             tol=0.01,       # Population convergence tolerance
             atol=0.5,       # Absolute tolerance for objective improvement (early stopping)

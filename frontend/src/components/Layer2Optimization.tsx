@@ -86,10 +86,14 @@ function ResultCard({
 }
 
 export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
-    const [settings] = useState<Layer2Settings>({
+    const [settings, setSettings] = useState<Layer2Settings>({
         max_iterations: 20,
         save_plots: false,
+        de_maxiter: 5,
+        de_popsize: 2,
+        de_n_time_points: 25,
     });
+    const [showAdvanced, setShowAdvanced] = useState(false);
 
     const [isRunning, setIsRunning] = useState(false);
     const [isStopping, setIsStopping] = useState(false);
@@ -352,52 +356,122 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
             </div>
 
             {/* Controls */}
-            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6 flex flex-wrap items-center gap-4">
-                <div className="flex-1 min-w-[200px]">
-                    <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Start Here</h3>
-                    <div className="flex gap-2">
-                        <label className="flex-1">
-                            <span className="sr-only">Upload Config</span>
-                            <div className="relative group">
-                                <input
-                                    type="file"
-                                    accept=".yaml,.yml"
-                                    onChange={handleConfigUpload}
-                                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                                    disabled={isRunning}
-                                />
-                                <div className="px-4 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] text-sm font-medium hover:border-blue-500 transition-colors flex items-center justify-center gap-2">
-                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M16 8l-4-4m0 0L8 8m4-4v12" />
-                                    </svg>
-                                    Upload Start Config
+            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                <div className="flex flex-wrap items-center gap-4">
+                    <div className="flex-1 min-w-[200px]">
+                        <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Start Here</h3>
+                        <div className="flex gap-2">
+                            <label className="flex-1">
+                                <span className="sr-only">Upload Config</span>
+                                <div className="relative group">
+                                    <input
+                                        type="file"
+                                        accept=".yaml,.yml"
+                                        onChange={handleConfigUpload}
+                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                        disabled={isRunning}
+                                    />
+                                    <div className="px-4 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] text-sm font-medium hover:border-blue-500 transition-colors flex items-center justify-center gap-2">
+                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M16 8l-4-4m0 0L8 8m4-4v12" />
+                                        </svg>
+                                        Upload Start Config
+                                    </div>
                                 </div>
-                            </div>
-                        </label>
-                        <button
-                            onClick={handleRun}
-                            disabled={isRunning || (!requirements && !configLoaded)}
-                            className={`px-6 py-2 rounded-lg font-bold text-white transition-all ${isRunning || (!requirements && !configLoaded)
-                                ? 'bg-gray-500 cursor-not-allowed'
-                                : 'bg-purple-600 hover:bg-purple-700 shadow-lg shadow-purple-500/20'
-                                }`}
-                        >
-                            {isRunning ? '🔄 Optimizing...' : '🚀 Run Layer 2'}
-                        </button>
-                        {isRunning && (
+                            </label>
                             <button
-                                onClick={handleStop}
-                                disabled={isStopping}
-                                className={`px-6 py-2 text-white rounded-lg font-bold transition-all ${isStopping
-                                        ? 'bg-yellow-600 cursor-wait'
-                                        : 'bg-red-600 hover:bg-red-700'
+                                onClick={handleRun}
+                                disabled={isRunning || (!requirements && !configLoaded)}
+                                className={`px-6 py-2 rounded-lg font-bold text-white transition-all ${isRunning || (!requirements && !configLoaded)
+                                    ? 'bg-gray-500 cursor-not-allowed'
+                                    : 'bg-purple-600 hover:bg-purple-700 shadow-lg shadow-purple-500/20'
                                     }`}
                             >
-                                {isStopping ? '⏳ Stopping...' : '⏹ Stop'}
+                                {isRunning ? '🔄 Optimizing...' : '🚀 Run Layer 2'}
                             </button>
-                        )}
+                            {isRunning && (
+                                <button
+                                    onClick={handleStop}
+                                    disabled={isStopping}
+                                    className={`px-6 py-2 text-white rounded-lg font-bold transition-all ${isStopping
+                                        ? 'bg-yellow-600 cursor-wait'
+                                        : 'bg-red-600 hover:bg-red-700'
+                                        }`}
+                                >
+                                    {isStopping ? '⏳ Stopping...' : '⏹ Stop'}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                    <div>
+                        <button
+                            onClick={() => setShowAdvanced(!showAdvanced)}
+                            className="text-xs text-blue-400 hover:text-blue-300 font-medium"
+                        >
+                            {showAdvanced ? 'Hide Advanced Settings' : 'Advanced Settings'}
+                        </button>
                     </div>
                 </div>
+
+                {showAdvanced && (
+                    <div className="mt-6 pt-6 border-t border-[var(--color-border)] grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                        <div>
+                            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Local Max Iter</label>
+                            <input
+                                type="number"
+                                value={settings.max_iterations}
+                                onChange={(e) => setSettings({ ...settings, max_iterations: parseInt(e.target.value) })}
+                                className="w-full bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded p-2 text-sm text-white"
+                                min="1"
+                                max="100"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">DE Max Iter</label>
+                            <input
+                                type="number"
+                                value={settings.de_maxiter}
+                                onChange={(e) => setSettings({ ...settings, de_maxiter: parseInt(e.target.value) })}
+                                className="w-full bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded p-2 text-sm text-white"
+                                min="1"
+                                max="100"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">DE Pop Size</label>
+                            <input
+                                type="number"
+                                value={settings.de_popsize}
+                                onChange={(e) => setSettings({ ...settings, de_popsize: parseInt(e.target.value) })}
+                                className="w-full bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded p-2 text-sm text-white"
+                                min="1"
+                                max="20"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">DE Time Points</label>
+                            <input
+                                type="number"
+                                value={settings.de_n_time_points}
+                                onChange={(e) => setSettings({ ...settings, de_n_time_points: parseInt(e.target.value) })}
+                                className="w-full bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded p-2 text-sm text-white"
+                                min="5"
+                                max="200"
+                            />
+                        </div>
+                        <div className="flex items-end pb-2">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={settings.save_plots}
+                                    onChange={(e) => setSettings({ ...settings, save_plots: e.target.checked })}
+                                    className="rounded border-[var(--color-border)] bg-[var(--color-bg-primary)]"
+                                />
+                                <span className="text-xs text-[var(--color-text-secondary)]">Save PNG Plots</span>
+                            </label>
+                        </div>
+                    </div>
+                )}
             </div>
 
             {/* Progress & Status */}

@@ -15,6 +15,10 @@ class FluidConfig(BaseModel):
     specific_heat: float = Field(default=2200.0, gt=0, description="Specific heat at constant pressure [J/(kg·K)]")
     thermal_conductivity: float = Field(default=0.15, gt=0, description="Thermal conductivity [W/(m·K)]")
     temperature: float = Field(default=293.15, gt=0, description="Bulk fluid temperature [K]")
+    # Fuel-specific properties for combustion physics
+    latent_heat: Optional[float] = Field(default=None, gt=0, description="Latent heat of vaporization [J/kg] (fuel only)")
+    boiling_point: Optional[float] = Field(default=None, gt=0, description="Boiling point at 1 atm [K] (fuel only)")
+    molecular_weight: Optional[float] = Field(default=None, gt=0, description="Molecular weight [g/mol] (fuel only)")
 
 
 class PintleLOXConfig(BaseModel):
@@ -432,6 +436,52 @@ class CombustionEfficiencyConfig(BaseModel):
         gt=0,
         description="Effective fuel interface temperature cap for gasification model [K]. Represents wet-bulb/pyrolysis onset scale, NOT gas temperature tracking. Default 1000K for RP-1."
     )
+    # Arrhenius kinetics parameters (fuel-specific, can be overridden per fuel type)
+    A0_hydrocarbon: float = Field(
+        default=1e7,
+        gt=0,
+        description="Pre-exponential factor for hydrocarbon fuels (RP-1, Kerosene) [1/s]. Default 1e7."
+    )
+    Ea_hydrocarbon: float = Field(
+        default=80000.0,
+        gt=0,
+        description="Activation energy for hydrocarbon fuels (RP-1, Kerosene) [J/mol]. Default 80 kJ/mol."
+    )
+    n_pre_hydrocarbon: float = Field(
+        default=0.3,
+        ge=0,
+        description="Pre-exponential pressure exponent for hydrocarbons. Default 0.3."
+    )
+    A0_ethanol: float = Field(
+        default=5e7,
+        gt=0,
+        description="Pre-exponential factor for ethanol [1/s]. Default 5e7 (faster than RP-1)."
+    )
+    Ea_ethanol: float = Field(
+        default=140000.0,
+        gt=0,
+        description="Activation energy for ethanol [J/mol]. Default 140 kJ/mol (higher than RP-1)."
+    )
+    n_pre_ethanol: float = Field(
+        default=0.25,
+        ge=0,
+        description="Pre-exponential pressure exponent for ethanol. Default 0.25."
+    )
+    A0_hydrogen: float = Field(
+        default=1e9,
+        gt=0,
+        description="Pre-exponential factor for hydrogen [1/s]. Default 1e9 (much faster than hydrocarbons)."
+    )
+    Ea_hydrogen: float = Field(
+        default=40000.0,
+        gt=0,
+        description="Activation energy for hydrogen [J/mol]. Default 40 kJ/mol (lower than hydrocarbons)."
+    )
+    n_pre_hydrogen: float = Field(
+        default=0.2,
+        ge=0,
+        description="Pre-exponential pressure exponent for hydrogen. Default 0.2."
+    )
 
 
 class CombustionConfig(BaseModel):
@@ -538,6 +588,7 @@ class LOXTankConfig(BaseModel):
     ox_tank_pos: float = Field(description="LOX tank center position relative to nozzle exit (positive = above nozzle) [m]")
     mass: Optional[float] = Field(default=None, gt=0, description="Initial LOX PROPELLANT mass [kg] (liquid only, not tank structure). Depletes during burn.")
     initial_pressure_psi: Optional[float] = Field(default=None, gt=0, description="Initial LOX tank pressure [psi]")
+    tank_volume_m3: Optional[float] = Field(default=None, gt=0, description="LOX tank volume [m³]. If not provided, will be calculated from lox_h and lox_radius using π×r²×h")
 
 
 class FuelTankConfig(BaseModel):
@@ -547,6 +598,7 @@ class FuelTankConfig(BaseModel):
     fuel_tank_pos: float = Field(description="Fuel tank center position relative to nozzle exit (positive = above, negative = below nozzle) [m]")
     mass: Optional[float] = Field(default=None, gt=0, description="Initial RP-1 PROPELLANT mass [kg] (liquid only, not tank structure). Depletes during burn.")
     initial_pressure_psi: Optional[float] = Field(default=None, gt=0, description="Initial fuel tank pressure [psi]")
+    tank_volume_m3: Optional[float] = Field(default=None, gt=0, description="RP-1 tank volume [m³]. If not provided, will be calculated from rp1_h and rp1_radius using π×r²×h")
 
 
 class PressTankConfig(BaseModel):

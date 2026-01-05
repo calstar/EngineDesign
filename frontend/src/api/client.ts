@@ -821,6 +821,9 @@ export function runLayer1Optimization(
 export interface Layer2Settings {
   max_iterations: number;
   save_plots?: boolean;
+  de_maxiter?: number;
+  de_popsize?: number;
+  de_n_time_points?: number;
 }
 
 export interface Layer2Results {
@@ -922,6 +925,16 @@ export function runLayer2Optimization(
     max_iterations: settings.max_iterations.toString(),
     save_plots: (settings.save_plots || false).toString(),
   });
+
+  if (settings.de_maxiter !== undefined) {
+    params.append('de_maxiter', settings.de_maxiter.toString());
+  }
+  if (settings.de_popsize !== undefined) {
+    params.append('de_popsize', settings.de_popsize.toString());
+  }
+  if (settings.de_n_time_points !== undefined) {
+    params.append('de_n_time_points', settings.de_n_time_points.toString());
+  }
 
   const url = `${API_BASE}/optimizer/layer2?${params.toString()}`;
 

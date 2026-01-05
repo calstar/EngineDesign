@@ -5820,7 +5820,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         lox_tank.setdefault("lox_h", 1.14)
         lox_tank.setdefault("lox_radius", 0.0762)
         lox_tank.setdefault("ox_tank_pos", 0.6)
-        colL1, colL2, colL3 = st.columns(3)
+        colL1, colL2, colL3, colL4 = st.columns(4)
         with colL1:
             lox_tank["lox_h"] = float(st.number_input("Height [m]", value=float(lox_tank["lox_h"]), key="flight_lox_h",
                 help="Internal cylindrical height (excluding domes/caps). Volume = π×r²×h. RocketPy tracks liquid level and CM as propellant depletes."))
@@ -5830,9 +5830,20 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         with colL3:
             lox_tank["ox_tank_pos"] = float(st.number_input("Position [m]", value=float(lox_tank["ox_tank_pos"]), key="flight_lox_pos",
                 help="Tank center relative to nozzle exit. Example: 0.6m = tank center is 60cm above nozzle."))
+        with colL4:
+            # Get volume from config or calculate from geometry
+            if "tank_volume_m3" not in lox_tank or lox_tank["tank_volume_m3"] is None:
+                calculated_volume = np.pi * lox_tank["lox_radius"]**2 * lox_tank["lox_h"]
+            else:
+                calculated_volume = lox_tank["tank_volume_m3"]
+            lox_tank["tank_volume_m3"] = float(st.number_input("Volume [m³]", value=calculated_volume, key="flight_lox_volume",
+                help="Tank volume. If not set, will be calculated from height and radius."))
         
-        # Calculate LOX tank capacity and validate
-        lox_volume = np.pi * lox_tank["lox_radius"]**2 * lox_tank["lox_h"]  # m³
+        # Get LOX tank volume from config or calculate from geometry
+        if lox_tank.get("tank_volume_m3") is not None:
+            lox_volume = float(lox_tank["tank_volume_m3"])
+        else:
+            lox_volume = np.pi * lox_tank["lox_radius"]**2 * lox_tank["lox_h"]  # m³
         lox_capacity = lox_volume * rho_lox  # kg
         lox_mass_input = float(lox_tank.get("mass", m_lox))  # from form input
         lox_fill_pct = (lox_mass_input / lox_capacity * 100) if lox_capacity > 0 else 0
@@ -5844,7 +5855,7 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         fuel_tank.setdefault("rp1_h", 0.609)
         fuel_tank.setdefault("rp1_radius", 0.0762)
         fuel_tank.setdefault("fuel_tank_pos", -0.2)
-        colFu1, colFu2, colFu3 = st.columns(3)
+        colFu1, colFu2, colFu3, colFu4 = st.columns(4)
         with colFu1:
             fuel_tank["rp1_h"] = float(st.number_input("Height [m]", value=float(fuel_tank["rp1_h"]), key="flight_rp1_h",
                 help="Internal cylindrical height (excluding domes/caps). Volume = π×r²×h."))
@@ -5854,9 +5865,20 @@ def flight_sim_view(runner: PintleEngineRunner, config_obj: PintleEngineConfig, 
         with colFu3:
             fuel_tank["fuel_tank_pos"] = float(st.number_input("Position [m]", value=float(fuel_tank["fuel_tank_pos"]), key="flight_rp1_pos",
                 help="Tank center relative to nozzle exit. Negative = below nozzle. Example: -0.2m = tank center is 20cm below nozzle."))
+        with colFu4:
+            # Get volume from config or calculate from geometry
+            if "tank_volume_m3" not in fuel_tank or fuel_tank["tank_volume_m3"] is None:
+                calculated_volume = np.pi * fuel_tank["rp1_radius"]**2 * fuel_tank["rp1_h"]
+            else:
+                calculated_volume = fuel_tank["tank_volume_m3"]
+            fuel_tank["tank_volume_m3"] = float(st.number_input("Volume [m³]", value=calculated_volume, key="flight_rp1_volume",
+                help="Tank volume. If not set, will be calculated from height and radius."))
         
-        # Calculate Fuel tank capacity and validate
-        fuel_volume = np.pi * fuel_tank["rp1_radius"]**2 * fuel_tank["rp1_h"]  # m³
+        # Get Fuel tank volume from config or calculate from geometry
+        if fuel_tank.get("tank_volume_m3") is not None:
+            fuel_volume = float(fuel_tank["tank_volume_m3"])
+        else:
+            fuel_volume = np.pi * fuel_tank["rp1_radius"]**2 * fuel_tank["rp1_h"]  # m³
         fuel_capacity = fuel_volume * rho_fuel  # kg
         fuel_mass_input = float(fuel_tank.get("mass", m_fuel))  # from form input
         fuel_fill_pct = (fuel_mass_input / fuel_capacity * 100) if fuel_capacity > 0 else 0

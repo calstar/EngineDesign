@@ -91,3 +91,4 @@ The stagnation pressure Pc is constant throughout isentropic flow, so it's the c
 
 
 
+

@@ -496,7 +496,10 @@ async def run_layer1(
 @router.get("/layer2")
 async def run_layer2(
     max_iterations: int = 20,
-    save_plots: bool = False
+    save_plots: bool = False,
+    de_maxiter: int = 5,
+    de_popsize: int = 2,
+    de_n_time_points: int = 25
 ):
     """Run Layer 2 optimization with Server-Sent Events for progress updates."""
     if not app_state.has_config():
@@ -635,6 +638,9 @@ async def run_layer2(
                     max_iterations=max_iterations,
                     save_evaluation_plots=save_plots,
                     stop_event=current_stop_event,  # Use captured event
+                    de_maxiter=de_maxiter,
+                    de_popsize=de_popsize,
+                    de_n_time_points=de_n_time_points,
                 )
             
             # Wait, I need to check the design requirements for tank capacities

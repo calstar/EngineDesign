@@ -72,6 +72,7 @@ class TankConfig(BaseModel):
     height: float = Field(default=1.0, gt=0, description="Tank height [m]")
     radius: float = Field(default=0.0762, gt=0, description="Tank radius [m]")
     position: float = Field(default=0.6, description="Tank position relative to motor [m]")
+    volume_m3: Optional[float] = Field(default=None, gt=0, description="Tank volume [m³]. If not provided, will be calculated from height and radius using π×r²×h")
 
 
 class FlightSimRequest(BaseModel):
@@ -212,6 +213,8 @@ def build_flight_config(base_config, request: FlightSimRequest):
         config_dict["lox_tank"]["lox_h"] = request.lox_tank.height
         config_dict["lox_tank"]["lox_radius"] = request.lox_tank.radius
         config_dict["lox_tank"]["ox_tank_pos"] = request.lox_tank.position
+        if request.lox_tank.volume_m3 is not None:
+            config_dict["lox_tank"]["tank_volume_m3"] = request.lox_tank.volume_m3
     
     # Update fuel tank
     if config_dict.get("fuel_tank") is None:
@@ -219,9 +222,11 @@ def build_flight_config(base_config, request: FlightSimRequest):
     config_dict["fuel_tank"]["mass"] = request.fuel_mass_kg
     
     if request.fuel_tank:
-        config_dict["fuel_tank"]["fuel_h"] = request.fuel_tank.height
-        config_dict["fuel_tank"]["fuel_radius"] = request.fuel_tank.radius
+        config_dict["fuel_tank"]["rp1_h"] = request.fuel_tank.height
+        config_dict["fuel_tank"]["rp1_radius"] = request.fuel_tank.radius
         config_dict["fuel_tank"]["fuel_tank_pos"] = request.fuel_tank.position
+        if request.fuel_tank.volume_m3 is not None:
+            config_dict["fuel_tank"]["tank_volume_m3"] = request.fuel_tank.volume_m3
     
     # Update environment
     if request.environment:

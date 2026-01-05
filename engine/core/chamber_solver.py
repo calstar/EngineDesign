@@ -1209,11 +1209,11 @@ class ChamberSolver:
             if fuel_cfg is None:
                 return None
             
-            # Extract as dict with fallbacks to RP-1 defaults
+            # Extract from FluidConfig with fallbacks to RP-1 defaults only if not specified
             props = {
-                "boiling_point": getattr(fuel_cfg, "boiling_point", 489.0),
-                "latent_heat": getattr(fuel_cfg, "latent_heat", 300e3),
-                "molecular_weight": getattr(fuel_cfg, "molecular_weight", 170.0),
+                "boiling_point": fuel_cfg.boiling_point if fuel_cfg.boiling_point is not None else 489.0,
+                "latent_heat": fuel_cfg.latent_heat if fuel_cfg.latent_heat is not None else 300e3,
+                "molecular_weight": fuel_cfg.molecular_weight if fuel_cfg.molecular_weight is not None else 170.0,
                 "Pc_ref": getattr(fuel_cfg, "Pc_ref", 2.5e6),
             }
             

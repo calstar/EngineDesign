@@ -263,9 +263,9 @@ def simulate_coupled_blowdown(
     def get_tank_params(fluid_key, tank_attr, h_attr, r_attr):
         rho = float(config.fluids[fluid_key].density)
         
-        # Volume
+        # Volume - prioritize tank_volume_m3 from config, fallback to geometry calculation
         tank = getattr(config, tank_attr, None)
-        if tank and hasattr(tank, 'tank_volume_m3'):
+        if tank and hasattr(tank, 'tank_volume_m3') and tank.tank_volume_m3 is not None:
             V = float(tank.tank_volume_m3)
         elif tank and hasattr(tank, h_attr) and hasattr(tank, r_attr):
             V = float(np.pi * getattr(tank, r_attr)**2 * getattr(tank, h_attr))

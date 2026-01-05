@@ -333,7 +333,11 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         fluids = working.get("fluids") if working.get("fluids") is not None else {}
         ox_fluid = fluids.get("oxidizer") if fluids.get("oxidizer") is not None else {}
         rho_lox = float(ox_fluid.get("density") or 1140.0)
-        lox_volume = np.pi * lox_tank["lox_radius"]**2 * lox_tank["lox_h"]
+        # Get volume from config or calculate from geometry
+        if lox_tank.get("tank_volume_m3") is not None:
+            lox_volume = float(lox_tank["tank_volume_m3"])
+        else:
+            lox_volume = np.pi * lox_tank["lox_radius"]**2 * lox_tank["lox_h"]
         lox_capacity = lox_volume * rho_lox
         st.caption(f"Tank Volume: **{lox_volume*1000:.1f} L** | Max Capacity: **{lox_capacity:.1f} kg** (optimizer will fill as needed)")
         
@@ -356,7 +360,11 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         # Calculate Fuel tank capacity
         fu_fluid = fluids.get("fuel") if fluids.get("fuel") is not None else {}
         rho_fuel = float(fu_fluid.get("density") or 780.0)
-        fuel_volume = np.pi * fuel_tank["rp1_radius"]**2 * fuel_tank["rp1_h"]
+        # Get volume from config or calculate from geometry
+        if fuel_tank.get("tank_volume_m3") is not None:
+            fuel_volume = float(fuel_tank["tank_volume_m3"])
+        else:
+            fuel_volume = np.pi * fuel_tank["rp1_radius"]**2 * fuel_tank["rp1_h"]
         fuel_capacity = fuel_volume * rho_fuel
         st.caption(f"Tank Volume: **{fuel_volume*1000:.1f} L** | Max Capacity: **{fuel_capacity:.1f} kg** (optimizer will fill as needed)")
         

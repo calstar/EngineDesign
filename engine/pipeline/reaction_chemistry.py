@@ -102,6 +102,7 @@ def calculate_reaction_rate_constant(
     Tc: float,
     MR: float,
     fuel_type: str = "RP-1",
+    config: Optional[PintleEngineConfig] = None,
 ) -> float:
     """
     Calculate chemical reaction rate constant using Arrhenius kinetics.
@@ -123,7 +124,9 @@ def calculate_reaction_rate_constant(
     MR : float
         Mixture ratio (O/F)
     fuel_type : str
-        Fuel type ("RP-1", "H2", etc.) - affects activation energy
+        Fuel type ("RP-1", "Ethanol", "H2", etc.) - affects activation energy
+    config : PintleEngineConfig, optional
+        Engine configuration for kinetics parameters. If None, uses built-in defaults.
     
     Returns:
     --------
@@ -143,27 +146,54 @@ def calculate_reaction_rate_constant(
     if not np.isfinite(MR) or MR <= 0:
         raise ValueError(f"Invalid mixture ratio: {MR}")
     
-    # Pre-exponential factor A [1/s] - depends on fuel and pressure units
-    # For hydrocarbon combustion at high pressure: A ~ 10^6 to 10^8 s^-1
-    # Pressure-dependent form: A(P) = A0 × (P / P0)^n_pre
-    if fuel_type.upper() in ["RP-1", "KEROSENE", "JP"]:
-        # Hydrocarbon combustion: more complex, slower
-        A0 = 1e7  # Base pre-exponential [1/s] at reference conditions
-        n_pre = 0.3  # Pre-exponential pressure dependence (weak)
-        Ea = 80000.0  # Activation energy [J/mol] for hydrocarbon oxidation
-        n_pressure = 0.8  # Pressure exponent for overall rate
-    elif fuel_type.upper() in ["H2", "HYDROGEN"]:
-        # Hydrogen combustion: simpler, faster
-        A0 = 1e9  # Higher pre-exponential [1/s]
-        n_pre = 0.2
-        Ea = 40000.0  # Lower activation energy [J/mol]
-        n_pressure = 0.5  # Lower pressure dependence
+    # Get kinetics parameters from config if available, otherwise use built-in defaults
+    if config is not None:
+        eff_cfg = config.combustion.efficiency
+        # Map fuel type to config parameters
+        if fuel_type.upper() in ["RP-1", "KEROSENE", "JP"]:
+            A0 = eff_cfg.A0_hydrocarbon
+            n_pre = eff_cfg.n_pre_hydrocarbon
+            Ea = eff_cfg.Ea_hydrocarbon
+            n_pressure = 0.8
+        elif fuel_type.upper() in ["ETHANOL", "C2H5OH"]:
+            A0 = eff_cfg.A0_ethanol
+            n_pre = eff_cfg.n_pre_ethanol
+            Ea = eff_cfg.Ea_ethanol
+            n_pressure = 0.8
+        elif fuel_type.upper() in ["H2", "HYDROGEN"]:
+            A0 = eff_cfg.A0_hydrogen
+            n_pre = eff_cfg.n_pre_hydrogen
+            Ea = eff_cfg.Ea_hydrogen
+            n_pressure = 0.5
+        else:
+            # Default to hydrocarbon
+            A0 = eff_cfg.A0_hydrocarbon
+            n_pre = eff_cfg.n_pre_hydrocarbon
+            Ea = eff_cfg.Ea_hydrocarbon
+            n_pressure = 0.8
     else:
-        # Default: generic hydrocarbon
-        A0 = 1e7
-        n_pre = 0.3
-        Ea = 80000.0
-        n_pressure = 0.8
+        # Built-in defaults (backward compatibility)
+        if fuel_type.upper() in ["RP-1", "KEROSENE", "JP"]:
+            A0 = 1e7
+            n_pre = 0.3
+            Ea = 80000.0
+            n_pressure = 0.8
+        elif fuel_type.upper() in ["ETHANOL", "C2H5OH"]:
+            A0 = 5e7
+            n_pre = 0.25
+            Ea = 140000.0
+            n_pressure = 0.8
+        elif fuel_type.upper() in ["H2", "HYDROGEN"]:
+            A0 = 1e9
+            n_pre = 0.2
+            Ea = 40000.0
+            n_pressure = 0.5
+        else:
+            # Default: generic hydrocarbon
+            A0 = 1e7
+            n_pre = 0.3
+            Ea = 80000.0
+            n_pressure = 0.8
     
     # Adjust activation energy based on mixture ratio
     # Fuel-rich or oxidizer-rich can have different effective Ea
@@ -217,6 +247,7 @@ def calculate_reaction_time_scale(
     Tc: float,
     MR: float,
     fuel_type: str = "RP-1",
+    config: Optional[PintleEngineConfig] = None,
 ) -> float:
     """
     Calculate chemical reaction time scale from Arrhenius rate constant.
@@ -233,13 +264,15 @@ def calculate_reaction_time_scale(
         Mixture ratio (O/F)
     fuel_type : str
         Fuel type
+    config : PintleEngineConfig, optional
+        Engine configuration for kinetics parameters
     
     Returns:
     --------
     tau : float
         Reaction time scale [s]
     """
-    k = calculate_reaction_rate_constant(Pc, Tc, MR, fuel_type)
+    k = calculate_reaction_rate_constant(Pc, Tc, MR, fuel_type, config=config)
     
     tau = 1.0 / k
     
@@ -455,7 +488,7 @@ def calculate_chamber_reaction_progress(
     fuel_name = config.propellants.fuel.name if hasattr(config, 'propellants') else "RP-1"
     
     # Calculate reaction time scale from Arrhenius kinetics (Actual T_react is conservative: longer time)
-    tau_reaction = calculate_reaction_time_scale(Pc, T_react, MR, fuel_name)
+    tau_reaction = calculate_reaction_time_scale(Pc, T_react, MR, fuel_name, config=config)
     
     # Calculate evaporation time from droplet physics (Actual T_react is conservative: longer time)
     # Use SMD from spray diagnostics if available
