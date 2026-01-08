@@ -971,6 +971,7 @@ export function runLayer2Optimization(
 export interface Layer3Settings {
   max_iterations?: number;
   save_plots?: boolean;
+  optimization_method?: 'gradient' | 'cma' | 'de';  // gradient is fastest (default)
 }
 
 export interface Layer3Results {
@@ -1083,6 +1084,7 @@ export function runLayer3Optimization(
   const params = new URLSearchParams({
     max_iterations: (settings.max_iterations || 20).toString(),
     save_plots: (settings.save_plots || false).toString(),
+    optimization_method: settings.optimization_method || 'gradient',
   });
 
   const url = `${API_BASE}/optimizer/layer3?${params.toString()}`;

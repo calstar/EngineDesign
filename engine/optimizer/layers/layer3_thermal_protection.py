@@ -32,6 +32,7 @@ def run_layer3_thermal_protection(
     update_progress: Callable,
     log_status: Callable,
     objective_callback: Optional[Callable[[int, float, float], None]] = None,
+    optimization_method: str = "gradient",  # "gradient", "cma", or "de"
 ) -> Tuple[PintleEngineConfig, Dict[str, Any], Dict[str, Any]]:
     """
     Run Layer 3: Thermal Protection Optimization.
@@ -39,6 +40,13 @@ def run_layer3_thermal_protection(
     Optimizes final thermal protection thicknesses to meet recession requirements
     with margin while minimizing mass, while preserving the Layer 2 burn
     quality (impulse, stability).
+
+    Args:
+        optimization_method: Optimization algorithm to use:
+            - "gradient": Fast gradient descent (recommended). Exploits monotonic
+              relationship between thickness and recession. ~5-10 evaluations.
+            - "cma": CMA-ES global optimizer. More thorough but slower. ~60-80 evals.
+            - "de": Differential Evolution fallback. Similar to CMA-ES.
 
     Returns:
         Tuple of (optimized_config, updated_time_results, thermal_results)
@@ -111,7 +119,7 @@ def run_layer3_thermal_protection(
         )
 
     if graphite_cfg and graphite_cfg.enabled:
-        # Generic graphite bounds: 3–15 mm.
+        # Generic graphite bounds: 3–25 mm.
         bounds_gra = (0.003, 0.025)
         layer3_bounds.append(bounds_gra)
         graphite_x0 = 0.5 * (bounds_gra[0] + bounds_gra[1])
@@ -457,9 +465,193 @@ def run_layer3_thermal_protection(
                 layer3_logger.error(traceback.format_exc())
                 return 1e6
 
-        # Optimize Layer 3: Use CMA-ES if available (better exploration), fall back to DE+L-BFGS-B
+        # Optimize Layer 3 using the selected method
         try:
-            if use_cma:
+            if optimization_method == "gradient":
+                # ------------------------------------------------------------------
+                # Fast Gradient Descent / Binary Search (exploits monotonicity)
+                # ------------------------------------------------------------------
+                # Key insight: thickness and recession have a monotonic relationship.
+                # More thickness = material lasts longer = less recession ratio.
+                # So we can use a simple bisection/gradient approach to find the
+                # minimum thickness that satisfies the margin constraint.
+                # ------------------------------------------------------------------
+                layer3_logger.info(
+                    "Starting Layer 3 optimization using GRADIENT DESCENT (fast mode) with %d dims...",
+                    len(layer3_x0),
+                )
+                layer3_logger.info(
+                    "This exploits the monotonic relationship: more thickness = less recession ratio."
+                )
+                
+                margin_factor = 1.25  # 25% margin (thickness >= recession * 1.25)
+                
+                def evaluate_thickness_feasibility(thicknesses: np.ndarray) -> Tuple[bool, Dict[str, float]]:
+                    """
+                    Evaluate if given thicknesses meet the margin requirement.
+                    Returns (is_feasible, recession_data).
+                    """
+                    # Create config with these thicknesses
+                    if hasattr(optimized_config, 'model_copy'):
+                        config_test = optimized_config.model_copy(deep=True)
+                    else:
+                        config_test = copy.deepcopy(optimized_config)
+                    
+                    if hasattr(config_test, 'combustion') and hasattr(config_test.combustion, 'efficiency'):
+                        config_test.combustion.efficiency.use_turbulence_coupling = True
+                    
+                    idx = 0
+                    if ablative_cfg and ablative_cfg.enabled:
+                        config_test.ablative_cooling.initial_thickness = float(thicknesses[idx])
+                        idx += 1
+                    if graphite_cfg and graphite_cfg.enabled:
+                        config_test.graphite_insert.initial_thickness = float(thicknesses[idx])
+                    
+                    # Run simulation
+                    runner_test = PintleEngineRunner(config_test)
+                    results_test = runner_test.evaluate_arrays_with_time(
+                        time_array,
+                        P_tank_O_array,
+                        P_tank_F_array,
+                        track_ablative_geometry=True,
+                        use_coupled_solver=True,
+                    )
+                    
+                    recession_chamber = float(np.max(np.atleast_1d(results_test.get("recession_chamber", [0.0]))))
+                    recession_throat = float(np.max(np.atleast_1d(results_test.get("recession_throat", [0.0]))))
+                    
+                    # Check feasibility for each component
+                    feasible = True
+                    recession_data = {
+                        "recession_chamber": recession_chamber,
+                        "recession_throat": recession_throat,
+                    }
+                    
+                    idx = 0
+                    if ablative_cfg and ablative_cfg.enabled:
+                        required_abl = recession_chamber * margin_factor
+                        recession_data["required_ablative"] = required_abl
+                        if thicknesses[idx] < required_abl:
+                            feasible = False
+                        idx += 1
+                    
+                    if graphite_cfg and graphite_cfg.enabled:
+                        required_gra = recession_throat * margin_factor
+                        recession_data["required_graphite"] = required_gra
+                        if thicknesses[idx] < required_gra:
+                            feasible = False
+                    
+                    return feasible, recession_data
+                
+                # Step 1: Evaluate at lower bound to get baseline recession
+                lower_bounds = np.array([b[0] for b in layer3_bounds])
+                upper_bounds = np.array([b[1] for b in layer3_bounds])
+                
+                layer3_logger.info("Step 1: Evaluating recession at lower bounds...")
+                layer3_state["eval_index"] += 1
+                _, recession_at_min = evaluate_thickness_feasibility(lower_bounds)
+                
+                layer3_logger.info(
+                    "Recession at min thickness: chamber=%.3f mm, throat=%.3f mm",
+                    recession_at_min["recession_chamber"] * 1000,
+                    recession_at_min["recession_throat"] * 1000,
+                )
+                
+                # Step 2: Calculate initial estimate based on recession at minimum
+                # Since recession is roughly independent of thickness (it depends on heat flux),
+                # we can estimate: required_thickness ≈ recession * margin_factor
+                initial_estimate = []
+                idx = 0
+                if ablative_cfg and ablative_cfg.enabled:
+                    est_abl = recession_at_min["recession_chamber"] * margin_factor * 1.1  # 10% extra safety
+                    est_abl = float(np.clip(est_abl, lower_bounds[idx], upper_bounds[idx]))
+                    initial_estimate.append(est_abl)
+                    idx += 1
+                if graphite_cfg and graphite_cfg.enabled:
+                    est_gra = recession_at_min["recession_throat"] * margin_factor * 1.1
+                    est_gra = float(np.clip(est_gra, lower_bounds[idx], upper_bounds[idx]))
+                    initial_estimate.append(est_gra)
+                
+                initial_estimate = np.array(initial_estimate)
+                layer3_logger.info(
+                    "Initial thickness estimate: %s mm",
+                    [t * 1000 for t in initial_estimate],
+                )
+                
+                # Step 3: Binary search refinement for each dimension independently
+                # This works because thickness dimensions are largely independent
+                best_thicknesses = initial_estimate.copy()
+                
+                for dim_idx in range(len(layer3_bounds)):
+                    lo = lower_bounds[dim_idx]
+                    hi = upper_bounds[dim_idx]
+                    
+                    dim_name = "ablative" if dim_idx == 0 and ablative_cfg and ablative_cfg.enabled else "graphite"
+                    layer3_logger.info("Binary search for %s thickness...", dim_name)
+                    
+                    # Binary search to find minimum feasible thickness
+                    for iteration in range(6):  # ~6 iterations gives <1% precision
+                        mid = (lo + hi) / 2
+                        test_thicknesses = best_thicknesses.copy()
+                        test_thicknesses[dim_idx] = mid
+                        
+                        layer3_state["eval_index"] += 1
+                        eval_idx = int(layer3_state["eval_index"])
+                        
+                        feasible, recession_data = evaluate_thickness_feasibility(test_thicknesses)
+                        
+                        # Calculate objective for callback
+                        obj = float(np.sum(test_thicknesses)) * 1000  # mm
+                        if not feasible:
+                            obj += 1e4  # Penalty for infeasible
+                        
+                        if objective_callback is not None:
+                            best_obj = float(layer3_state["best_objective"])
+                            if obj < best_obj:
+                                best_obj = obj
+                                layer3_state["best_objective"] = best_obj
+                            objective_callback(eval_idx, obj, best_obj)
+                        
+                        layer3_logger.info(
+                            "Eval %03d: %s=%.3f mm, feasible=%s, recession=%.3f mm",
+                            eval_idx,
+                            dim_name,
+                            mid * 1000,
+                            feasible,
+                            (recession_data.get("recession_chamber", 0) if dim_name == "ablative" 
+                             else recession_data.get("recession_throat", 0)) * 1000,
+                        )
+                        
+                        if feasible:
+                            hi = mid  # Can try thinner
+                            best_thicknesses[dim_idx] = mid
+                        else:
+                            lo = mid  # Need thicker
+                    
+                    # Final value with small safety margin
+                    best_thicknesses[dim_idx] = hi * 1.02  # 2% extra margin
+                    best_thicknesses[dim_idx] = float(np.clip(
+                        best_thicknesses[dim_idx], 
+                        lower_bounds[dim_idx], 
+                        upper_bounds[dim_idx]
+                    ))
+                
+                layer3_logger.info(
+                    "Gradient descent finished: optimal thicknesses = %s mm",
+                    [t * 1000 for t in best_thicknesses],
+                )
+                
+                # Create result object
+                class GradientResult:
+                    def __init__(self, x, fun):
+                        self.x = x
+                        self.fun = fun
+                        self.success = True
+                
+                final_obj = float(np.sum(best_thicknesses)) * 1000
+                result_layer3 = GradientResult(best_thicknesses, final_obj)
+                
+            elif use_cma and optimization_method != "de":
                 # ------------------------------------------------------------------
                 # CMA-ES optimization (preferred: better exploration for small dimensions)
                 # ------------------------------------------------------------------
@@ -613,10 +805,13 @@ def run_layer3_thermal_protection(
             else:
                 # ------------------------------------------------------------------
                 # Fallback: DE + grid search + L-BFGS-B (original approach)
+                # Used when optimization_method="de" or CMA-ES is not available
                 # ------------------------------------------------------------------
                 layer3_logger.info(
-                    "CMA-ES not available, using differential_evolution with %d dims...",
+                    "Using differential_evolution with %d dims (method=%s, cma_available=%s)...",
                     len(layer3_x0),
+                    optimization_method,
+                    use_cma,
                 )
                 de_result = differential_evolution(
                     layer3_objective,

@@ -119,7 +119,15 @@ def generate_nozzle(area_throat, area_exit, steps=200):
     return rao(area_throat, area_exit, method="top", do_plot=False, steps=steps)
 
 
-def chamber_geometry_calc(pc_design, thrust_design, force_coeffcient=force_coeffcient_default, diameter_inner=chamber_diameter_default, diameter_exit=diameter_exit_default, l_star = l_star_default, do_plot=False, color_segments=False, steps=200, export_dxf=None):
+def chamber_geometry_calc(pc_design, 
+    thrust_design, force_coeffcient=force_coeffcient_default, 
+    diameter_inner=chamber_diameter_default, 
+    diameter_exit=diameter_exit_default, 
+    l_star = l_star_default, 
+    do_plot=False, 
+    color_segments=False, 
+    steps=200, 
+    export_dxf=None):
     """
     Calculate the full chamber geometry including cylindrical section, contraction, and nozzle.
     

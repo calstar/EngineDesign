@@ -85,6 +85,7 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
     const [settings, setSettings] = useState<Layer3Settings>({
         max_iterations: 20,
         save_plots: false,
+        optimization_method: 'gradient',
     });
 
     const [isRunning, setIsRunning] = useState(false);
@@ -99,6 +100,12 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
         iteration: number;
         objective: number;
         best_objective: number;
+    }>>([]);
+    const [pressureCurves, setPressureCurves] = useState<Array<{
+        time: number;
+        lox: number;
+        fuel: number;
+        copv?: number;
     }>>([]);
 
     const [eventSourceRef, setEventSourceRef] = useState<EventSource | null>(null);
@@ -193,6 +200,7 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
         setSuccessMessage(null);
         setResults(null);
         setObjectiveHistory([]);
+        setPressureCurves([]);
 
         const eventSource = runLayer3Optimization(
             settings,
@@ -206,6 +214,27 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
                     if (event.objective_history) {
                         setObjectiveHistory(prev => [...prev, ...event.objective_history!]);
                     }
+                } else if (event.type === 'pressure_curves') {
+                    // Real-time pressure curve updates
+                    const PSI_TO_PA = 6894.76;
+                    if (event.time_array && event.lox_pressure && event.fuel_pressure) {
+                        const curves = event.time_array.map((t: number, i: number) => {
+                            let copvPressure: number | undefined = undefined;
+                            if (event.copv_pressure && event.copv_time) {
+                                const copvIdx = event.copv_time.findIndex((ct: number) => Math.abs(ct - t) < 0.01);
+                                if (copvIdx >= 0 && event.copv_pressure[copvIdx] != null) {
+                                    copvPressure = event.copv_pressure[copvIdx] / PSI_TO_PA;
+                                }
+                            }
+                            return {
+                                time: t,
+                                lox: (event.lox_pressure![i] || 0) / PSI_TO_PA,
+                                fuel: (event.fuel_pressure![i] || 0) / PSI_TO_PA,
+                                copv: copvPressure,
+                            };
+                        });
+                        setPressureCurves(curves);
+                    }
                 } else if (event.type === 'complete') {
                     setIsRunning(false);
                     setIsStopping(false);
@@ -213,6 +242,16 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
 
                     if (event.results) {
                         setResults(event.results);
+                        // Also update pressure curves from results for final view
+                        const PSI_TO_PA = 6894.76;
+                        if (event.results.time_array && event.results.lox_pressure) {
+                            const curves = event.results.time_array.map((t: number, i: number) => ({
+                                time: t,
+                                lox: (event.results?.lox_pressure[i] || 0) / PSI_TO_PA,
+                                fuel: (event.results?.fuel_pressure[i] || 0) / PSI_TO_PA,
+                            }));
+                            setPressureCurves(curves);
+                        }
                     }
 
                     if (event.stopped_by_user) {
@@ -306,48 +345,70 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
             <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
                 <div className="flex flex-wrap items-center gap-4">
                     <div className="flex-1 min-w-[200px]">
-                        <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Start Here</h3>
-                        <div className="flex gap-2">
-                            <label className="flex-1">
-                                <span className="sr-only">Upload Config</span>
-                                <div className="relative group">
-                                    <input
-                                        type="file"
-                                        accept=".yaml,.yml"
-                                        onChange={handleConfigUpload}
-                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                                        disabled={isRunning}
-                                    />
-                                    <div className="px-4 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] text-sm font-medium hover:border-orange-500 transition-colors flex items-center justify-center gap-2">
-                                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M16 8l-4-4m0 0L8 8m4-4v12" />
-                                        </svg>
-                                        Upload Start Config
+                        <h3 className="text-sm font-semibold text-[var(--color-text-secondary)] mb-2 uppercase tracking-wider">Optimization Settings</h3>
+                        <div className="flex flex-col gap-3">
+                            {/* Method selector */}
+                            <div className="flex items-center gap-3">
+                                <label className="text-sm text-[var(--color-text-secondary)] min-w-[100px]">Method:</label>
+                                <select
+                                    value={settings.optimization_method || 'gradient'}
+                                    onChange={(e) => setSettings({ ...settings, optimization_method: e.target.value as 'gradient' | 'cma' | 'de' })}
+                                    disabled={isRunning}
+                                    className="px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] text-sm focus:border-orange-500 focus:outline-none"
+                                >
+                                    <option value="gradient">⚡ Gradient (Fast ~30-60s)</option>
+                                    <option value="cma">🔬 CMA-ES (Thorough ~5-10min)</option>
+                                    <option value="de">🔄 Differential Evolution</option>
+                                </select>
+                                <span className="text-xs text-[var(--color-text-secondary)]">
+                                    {settings.optimization_method === 'gradient' && 'Exploits monotonic thickness-recession relationship'}
+                                    {settings.optimization_method === 'cma' && 'Global search, more thorough but slower'}
+                                    {settings.optimization_method === 'de' && 'Fallback global optimizer'}
+                                </span>
+                            </div>
+                            {/* Action buttons */}
+                            <div className="flex gap-2">
+                                <label className="flex-1">
+                                    <span className="sr-only">Upload Config</span>
+                                    <div className="relative group">
+                                        <input
+                                            type="file"
+                                            accept=".yaml,.yml"
+                                            onChange={handleConfigUpload}
+                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                                            disabled={isRunning}
+                                        />
+                                        <div className="px-4 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] text-sm font-medium hover:border-orange-500 transition-colors flex items-center justify-center gap-2">
+                                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a2 2 0 002 2h12a2 2 0 002-2v-1M16 8l-4-4m0 0L8 8m4-4v12" />
+                                            </svg>
+                                            Upload Start Config
+                                        </div>
                                     </div>
-                                </div>
-                            </label>
-                            <button
-                                onClick={handleRun}
-                                disabled={isRunning || (!requirements && !configLoaded)}
-                                className={`px-6 py-2 rounded-lg font-bold text-white transition-all ${isRunning || (!requirements && !configLoaded)
-                                    ? 'bg-gray-500 cursor-not-allowed'
-                                    : 'bg-orange-600 hover:bg-orange-700 shadow-lg shadow-orange-500/20'
-                                    }`}
-                            >
-                                {isRunning ? '🔄 Optimizing...' : '🔥 Run Layer 3'}
-                            </button>
-                            {isRunning && (
+                                </label>
                                 <button
-                                    onClick={handleStop}
-                                    disabled={isStopping}
-                                    className={`px-6 py-2 text-white rounded-lg font-bold transition-all ${isStopping
-                                        ? 'bg-yellow-600 cursor-wait'
-                                        : 'bg-red-600 hover:bg-red-700'
+                                    onClick={handleRun}
+                                    disabled={isRunning || (!requirements && !configLoaded)}
+                                    className={`px-6 py-2 rounded-lg font-bold text-white transition-all ${isRunning || (!requirements && !configLoaded)
+                                        ? 'bg-gray-500 cursor-not-allowed'
+                                        : 'bg-orange-600 hover:bg-orange-700 shadow-lg shadow-orange-500/20'
                                         }`}
                                 >
-                                    {isStopping ? '⏳ Stopping...' : '⏹ Stop'}
+                                    {isRunning ? '🔄 Optimizing...' : '🔥 Run Layer 3'}
                                 </button>
-                            )}
+                                {isRunning && (
+                                    <button
+                                        onClick={handleStop}
+                                        disabled={isStopping}
+                                        className={`px-6 py-2 text-white rounded-lg font-bold transition-all ${isStopping
+                                            ? 'bg-yellow-600 cursor-wait'
+                                            : 'bg-red-600 hover:bg-red-700'
+                                            }`}
+                                    >
+                                        {isStopping ? '⏳ Stopping...' : '⏹ Stop'}
+                                    </button>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -371,37 +432,6 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
                     {successMessage && <p className="text-sm text-green-400 mt-2 font-medium">✅ {successMessage}</p>}
                 </div>
             )}
-
-            {/* Visualizations */}
-            <div className="grid grid-cols-1 gap-6">
-                {/* Convergence History */}
-                <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
-                    <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
-                        <span className="text-orange-400">📈</span> Convergence History
-                    </h3>
-                    <div className="h-[300px] w-full">
-                        {objectiveHistory.length > 0 ? (
-                            <ResponsiveContainer width="100%" height="100%">
-                                <LineChart data={objectiveHistory} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
-                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
-                                    <XAxis dataKey="iteration" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
-                                    <YAxis scale="log" domain={['auto', 'auto']} stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
-                                    <Tooltip
-                                        contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }}
-                                        itemStyle={{ color: '#fff' }}
-                                    />
-                                    <Line type="monotone" dataKey="objective" stroke="#fb923c" strokeWidth={0} dot={renderDot} isAnimationActive={false} />
-                                    <Line type="monotone" dataKey="best_objective" stroke="#f97316" strokeWidth={2} strokeDasharray="5 5" dot={false} isAnimationActive={false} />
-                                </LineChart>
-                            </ResponsiveContainer>
-                        ) : (
-                            <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)] border border-dashed border-[var(--color-border)] rounded-lg">
-                                Waiting for optimization data...
-                            </div>
-                        )}
-                    </div>
-                </div>
-            </div>
 
             {/* Results */}
             {results && (
@@ -482,6 +512,262 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
                     </div>
                 </div>
             )}
+
+            {/* Visualizations */}
+            <div className="grid grid-cols-1 gap-6">
+                {/* Convergence History */}
+                <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                    <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                        <span className="text-orange-400">📈</span> Convergence History
+                    </h3>
+                    <div className="h-[300px] w-full">
+                        {objectiveHistory.length > 0 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={objectiveHistory} margin={{ top: 5, right: 20, left: 10, bottom: 5 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                    <XAxis dataKey="iteration" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                    <YAxis scale="log" domain={['auto', 'auto']} stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                    <Tooltip
+                                        contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }}
+                                        itemStyle={{ color: '#fff' }}
+                                    />
+                                    <Line type="monotone" dataKey="objective" stroke="#fb923c" strokeWidth={0} dot={renderDot} isAnimationActive={false} />
+                                    <Line type="monotone" dataKey="best_objective" stroke="#f97316" strokeWidth={2} strokeDasharray="5 5" dot={false} isAnimationActive={false} />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        ) : (
+                            <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)] border border-dashed border-[var(--color-border)] rounded-lg">
+                                Waiting for optimization data...
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Pressure Curves (Real-time or Final) */}
+                <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                    <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                        <span className="text-blue-400">🌊</span> Pressure Curves {isRunning ? '(Baseline)' : '(Optimized)'}
+                    </h3>
+                    <div className="h-[300px] w-full">
+                        {pressureCurves.length > 0 ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart
+                                    data={pressureCurves}
+                                    margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                >
+                                    <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                    <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                    <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Pressure (PSI)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                    <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                    <Legend />
+                                    <Line type="monotone" dataKey="lox" name="LOX Pressure" stroke="#3b82f6" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                    <Line type="monotone" dataKey="fuel" name="Fuel Pressure" stroke="#ef4444" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        ) : (
+                            <div className="h-full flex items-center justify-center text-[var(--color-text-secondary)] border border-dashed border-[var(--color-border)] rounded-lg">
+                                Waiting for optimization data...
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                {/* Performance Curves (Final Best Only) */}
+                {results && (
+                    <>
+                        {/* Thrust & Pc */}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-green-400">🚀</span> Thrust Curve
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                thrust: (results.performance.F?.[i] || 0),
+                                            }))}
+                                            margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Thrust (N)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Line type="monotone" dataKey="thrust" name="Thrust" stroke="#10b981" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-purple-400">🔥</span> Chamber Pressure
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                pc: (results.performance.Pc?.[i] || 0) / 6894.76,
+                                            }))}
+                                            margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Pc (PSI)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Line type="monotone" dataKey="pc" name="Chamber Pressure" stroke="#a855f7" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Mixture Ratio & Recession */}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-yellow-400">⚗️</span> Mixture Ratio (O/F)
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                mr: (results.performance.MR?.[i] || 0),
+                                            }))}
+                                            margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'O/F Ratio', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Line type="monotone" dataKey="mr" name="Mixture Ratio" stroke="#eab308" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-red-400">🛡️</span> Cumulative Recession
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                chamber: (results.performance.recession_chamber?.[i] || 0) * 1000,
+                                                throat: (results.performance.recession_throat?.[i] || 0) * 1000,
+                                            }))}
+                                            margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Recession (mm)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="chamber" name="Chamber" stroke="#f87171" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line type="monotone" dataKey="throat" name="Throat" stroke="#b91c1c" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Recession Rates & Geometry Evolution */}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-orange-400">⚡</span> Recession Rates
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                chamber: (results.performance.ablative_recession_rate?.[i] || 0) * 1000,
+                                                throat: (results.performance.graphite_recession_rate?.[i] || 0) * 1000,
+                                            }))}
+                                            margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Rate (mm/s)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="chamber" name="Chamber Rate" stroke="#fb923c" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line type="monotone" dataKey="throat" name="Throat Rate" stroke="#ef4444" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-blue-400">📏</span> Diameters & L*
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                d_chamber: (results.performance.D_chamber?.[i] || 0) * 1000,
+                                                d_throat: (results.performance.D_throat?.[i] || 0) * 1000,
+                                                lstar: (results.performance.Lstar?.[i] || 0) * 1000,
+                                            }))}
+                                            margin={{ top: 5, right: 60, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis yAxisId="left" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Diameter (mm)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <YAxis yAxisId="right" orientation="right" stroke="#a855f7" tick={{ fontSize: 12 }} label={{ value: 'L* (mm)', angle: 90, position: 'insideRight', fill: '#a855f7' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line yAxisId="left" type="monotone" dataKey="d_chamber" name="D_chamber" stroke="#3b82f6" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line yAxisId="left" type="monotone" dataKey="d_throat" name="D_throat" stroke="#60a5fa" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line yAxisId="right" type="monotone" dataKey="lstar" name="L*" stroke="#a855f7" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Areas & Contraction Ratio */}
+                        <div className="grid grid-cols-1 gap-6">
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-cyan-400">🔳</span> Areas & Contraction Ratio
+                                </h3>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                a_chamber: (results.performance.A_chamber?.[i] || 0) * 1e6,
+                                                a_throat: (results.performance.A_throat?.[i] || 0) * 1e6,
+                                                cr: (results.performance.contraction_ratio?.[i] || 0),
+                                            }))}
+                                            margin={{ top: 5, right: 60, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis yAxisId="left" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Area (mm²)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <YAxis yAxisId="right" orientation="right" stroke="#ec4899" tick={{ fontSize: 12 }} label={{ value: 'Contraction Ratio', angle: 90, position: 'insideRight', fill: '#ec4899' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line yAxisId="left" type="monotone" dataKey="a_chamber" name="A_chamber" stroke="#22d3ee" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line yAxisId="left" type="monotone" dataKey="a_throat" name="A_throat" stroke="#0891b2" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line yAxisId="right" type="monotone" dataKey="cr" name="Contraction Ratio" stroke="#ec4899" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+                    </>
+                )}
+            </div>
         </div>
     );
 }

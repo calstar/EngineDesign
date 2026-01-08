@@ -427,6 +427,126 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
     }));
   }, [results]);
 
+  // Get truncation cutoff time from results (if truncated)
+  const truncationCutoffTime = useMemo(() => {
+    if (results?.truncation?.truncated && results.truncation.cutoff_time != null) {
+      return results.truncation.cutoff_time;
+    }
+    return null;
+  }, [results]);
+
+  // Thrust curve chart data (from results or timeseries, respecting truncation)
+  const thrustCurveData = useMemo(() => {
+    // Get cutoff directly from results to avoid dependency timing issues
+    const cutoff = (results?.truncation?.truncated && results?.truncation?.cutoff_time != null)
+      ? results.truncation.cutoff_time
+      : null;
+    
+    // Prefer thrust_curve from results if available
+    if (results?.thrust_curve?.time && results.thrust_curve.thrust_N) {
+      const { time, thrust_N } = results.thrust_curve;
+      // Apply truncation filtering (backend returns full curve, not truncated)
+      const data = time.map((t, i) => ({
+        time: t,
+        thrust_kN: thrust_N[i] / 1000, // Convert N to kN for display
+      }));
+      // Filter to truncation cutoff if applicable
+      if (cutoff !== null) {
+        return data.filter((point) => point.time <= cutoff);
+      }
+      return data;
+    }
+    // Fall back to time-series data, apply truncation if needed
+    if (timeSeriesData?.time && timeSeriesData?.thrust_kN) {
+      const data = timeSeriesData.time.map((t, i) => ({
+        time: t,
+        thrust_kN: timeSeriesData.thrust_kN[i],
+      }));
+      if (cutoff !== null) {
+        return data.filter((point) => point.time <= cutoff);
+      }
+      return data;
+    }
+    return [];
+  }, [results, timeSeriesData]);
+
+  // Tank pressure chart data (from timeseries, respecting truncation)
+  const tankPressureData = useMemo(() => {
+    if (!timeSeriesData?.time || !timeSeriesData?.P_tank_O_psi || !timeSeriesData?.P_tank_F_psi) {
+      return [];
+    }
+    // Get cutoff directly from results
+    const cutoff = (results?.truncation?.truncated && results?.truncation?.cutoff_time != null)
+      ? results.truncation.cutoff_time
+      : null;
+    
+    const data = timeSeriesData.time.map((t, i) => ({
+      time: t,
+      lox_pressure: timeSeriesData.P_tank_O_psi[i],
+      fuel_pressure: timeSeriesData.P_tank_F_psi[i],
+    }));
+    
+    if (cutoff !== null) {
+      return data.filter((point) => point.time <= cutoff);
+    }
+    return data;
+  }, [timeSeriesData, results]);
+
+  // Tank fill level data (calculated from mass flow integration)
+  const tankFillData = useMemo(() => {
+    if (!timeSeriesData?.time || !timeSeriesData?.mdot_O_kg_s || !timeSeriesData?.mdot_F_kg_s) {
+      return [];
+    }
+    
+    const initialLoxMass = parseFloat(loxMass) || 0;
+    const initialFuelMass = parseFloat(fuelMass) || 0;
+    
+    if (initialLoxMass <= 0 || initialFuelMass <= 0) {
+      return [];
+    }
+    
+    // Get cutoff directly from results
+    const cutoff = (results?.truncation?.truncated && results?.truncation?.cutoff_time != null)
+      ? results.truncation.cutoff_time
+      : null;
+    
+    const times = timeSeriesData.time;
+    const mdotO = timeSeriesData.mdot_O_kg_s;
+    const mdotF = timeSeriesData.mdot_F_kg_s;
+    
+    // Calculate cumulative mass consumed using trapezoidal integration
+    const data: { time: number; lox_fill: number; fuel_fill: number; lox_mass: number; fuel_mass: number }[] = [];
+    let cumulativeLoxMass = 0;
+    let cumulativeFuelMass = 0;
+    
+    for (let i = 0; i < times.length; i++) {
+      // Apply cutoff filter early
+      if (cutoff !== null && times[i] > cutoff) {
+        break;
+      }
+      
+      if (i > 0) {
+        const dt = times[i] - times[i - 1];
+        // Trapezoidal integration: average of mdot at i-1 and i, times dt
+        cumulativeLoxMass += ((mdotO[i - 1] + mdotO[i]) / 2) * dt;
+        cumulativeFuelMass += ((mdotF[i - 1] + mdotF[i]) / 2) * dt;
+      }
+      
+      const remainingLox = Math.max(0, initialLoxMass - cumulativeLoxMass);
+      const remainingFuel = Math.max(0, initialFuelMass - cumulativeFuelMass);
+      
+      data.push({
+        time: times[i],
+        lox_fill: (remainingLox / initialLoxMass) * 100,
+        fuel_fill: (remainingFuel / initialFuelMass) * 100,
+        lox_mass: remainingLox,
+        fuel_mass: remainingFuel,
+      });
+    }
+    
+    return data;
+  }, [timeSeriesData, results, loxMass, fuelMass]);
+
   // No config loaded
   if (!config) {
     return (
@@ -1032,6 +1152,212 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
                     </ResponsiveContainer>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Engine Performance Charts */}
+          {(thrustCurveData.length > 0 || tankPressureData.length > 0 || tankFillData.length > 0) && (
+            <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">Engine Performance</h3>
+                {truncationCutoffTime && (
+                  <span className="text-sm text-yellow-400 bg-yellow-500/10 px-2 py-1 rounded">
+                    Truncated at {truncationCutoffTime.toFixed(3)}s
+                    {results?.truncation?.reason && ` - ${results.truncation.reason}`}
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Thrust Curve */}
+                {thrustCurveData.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium text-[var(--color-text-secondary)] mb-2">
+                      Thrust Curve {truncationCutoffTime && '(Truncated)'}
+                    </h4>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={thrustCurveData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                          <XAxis
+                            dataKey="time"
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 12 }}
+                            tickFormatter={(value) => value.toFixed(1)}
+                            label={{ value: 'Time (s)', position: 'bottom', fill: 'var(--color-text-secondary)' }}
+                          />
+                          <YAxis
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 12 }}
+                            tickFormatter={(value) => value.toFixed(1)}
+                            label={{
+                              value: 'Thrust (kN)',
+                              angle: -90,
+                              position: 'insideLeft',
+                              fill: 'var(--color-text-secondary)',
+                            }}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: 'var(--color-bg-secondary)',
+                              border: '1px solid var(--color-border)',
+                              borderRadius: '8px',
+                            }}
+                            labelStyle={{ color: 'var(--color-text-primary)' }}
+                            formatter={(value: number) => [value.toFixed(3), 'Thrust (kN)']}
+                            labelFormatter={(label) => `Time: ${Number(label).toFixed(3)}s`}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="thrust_kN"
+                            stroke="#f97316"
+                            strokeWidth={2}
+                            dot={false}
+                            name="Thrust"
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )}
+
+                {/* Tank Pressure */}
+                {tankPressureData.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium text-[var(--color-text-secondary)] mb-2">
+                      Tank Pressures {truncationCutoffTime && '(Truncated)'}
+                    </h4>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={tankPressureData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                          <XAxis
+                            dataKey="time"
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 12 }}
+                            tickFormatter={(value) => value.toFixed(1)}
+                            label={{ value: 'Time (s)', position: 'bottom', fill: 'var(--color-text-secondary)' }}
+                          />
+                          <YAxis
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 12 }}
+                            tickFormatter={(value) => Math.round(value).toString()}
+                            label={{
+                              value: 'Pressure (psi)',
+                              angle: -90,
+                              position: 'insideLeft',
+                              fill: 'var(--color-text-secondary)',
+                            }}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: 'var(--color-bg-secondary)',
+                              border: '1px solid var(--color-border)',
+                              borderRadius: '8px',
+                            }}
+                            labelStyle={{ color: 'var(--color-text-primary)' }}
+                            formatter={(value: number, name: string) => [
+                              value.toFixed(1),
+                              name === 'lox_pressure' ? 'LOX Tank (psi)' : 'Fuel Tank (psi)',
+                            ]}
+                            labelFormatter={(label) => `Time: ${Number(label).toFixed(3)}s`}
+                          />
+                          <Legend
+                            formatter={(value) => (value === 'lox_pressure' ? 'LOX Tank' : 'Fuel Tank')}
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="lox_pressure"
+                            stroke="#06b6d4"
+                            strokeWidth={2}
+                            dot={false}
+                            name="lox_pressure"
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="fuel_pressure"
+                            stroke="#8b5cf6"
+                            strokeWidth={2}
+                            dot={false}
+                            name="fuel_pressure"
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )}
+
+                {/* Tank Fill Level */}
+                {tankFillData.length > 0 && (
+                  <div>
+                    <h4 className="text-sm font-medium text-[var(--color-text-secondary)] mb-2">
+                      Tank Fill Levels {truncationCutoffTime && '(Truncated)'}
+                    </h4>
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={tankFillData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" />
+                          <XAxis
+                            dataKey="time"
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 12 }}
+                            tickFormatter={(value) => value.toFixed(1)}
+                            label={{ value: 'Time (s)', position: 'bottom', fill: 'var(--color-text-secondary)' }}
+                          />
+                          <YAxis
+                            stroke="var(--color-text-secondary)"
+                            tick={{ fill: 'var(--color-text-secondary)', fontSize: 12 }}
+                            domain={[0, 100]}
+                            tickFormatter={(value) => `${value}%`}
+                            label={{
+                              value: 'Fill Level (%)',
+                              angle: -90,
+                              position: 'insideLeft',
+                              fill: 'var(--color-text-secondary)',
+                            }}
+                          />
+                          <Tooltip
+                            contentStyle={{
+                              backgroundColor: 'var(--color-bg-secondary)',
+                              border: '1px solid var(--color-border)',
+                              borderRadius: '8px',
+                            }}
+                            labelStyle={{ color: 'var(--color-text-primary)' }}
+                            formatter={(value: number, name: string, props) => {
+                              const payload = props.payload;
+                              if (name === 'lox_fill') {
+                                return [`${value.toFixed(1)}% (${payload.lox_mass.toFixed(2)} kg)`, 'LOX Tank'];
+                              }
+                              return [`${value.toFixed(1)}% (${payload.fuel_mass.toFixed(2)} kg)`, 'Fuel Tank'];
+                            }}
+                            labelFormatter={(label) => `Time: ${Number(label).toFixed(3)}s`}
+                          />
+                          <Legend
+                            formatter={(value) => (value === 'lox_fill' ? 'LOX Tank' : 'Fuel Tank')}
+                          />
+                          <ReferenceLine y={0} stroke="#ef4444" strokeDasharray="5 5" />
+                          <Line
+                            type="monotone"
+                            dataKey="lox_fill"
+                            stroke="#06b6d4"
+                            strokeWidth={2}
+                            dot={false}
+                            name="lox_fill"
+                          />
+                          <Line
+                            type="monotone"
+                            dataKey="fuel_fill"
+                            stroke="#8b5cf6"
+                            strokeWidth={2}
+                            dot={false}
+                            name="fuel_fill"
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

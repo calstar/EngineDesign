@@ -659,6 +659,33 @@ def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, co
                            Cf_min_acceptable, Cf_max_acceptable,
                            scale=(Cf_max_acceptable - Cf_min_acceptable))
     
+    # Chamber length penalty
+    # Compute L_chamber from geometry (same as in apply_x_to_config)
+    from engine.core.chamber_geometry import chamber_length_calc, contraction_length_horizontal_calc
+    R_chamber = D_chamber_inner / 2
+    R_throat = np.sqrt(max(0, A_throat / np.pi))
+    contraction_ratio = A_chamber_check / A_throat_check if A_throat_check > 0 else 10.0
+    theta_contraction = np.pi / 4  # 45 degrees
+    L_cylindrical = chamber_length_calc(
+        chamber_volume=V_chamber,
+        area_throat=A_throat,
+        contraction_ratio=contraction_ratio,
+        theta=theta_contraction,
+    )
+    L_contraction = contraction_length_horizontal_calc(
+        area_chamber=A_chamber_check,
+        entrance_arc_start_y=R_throat,  # nozzle entrance radius estimate
+        theta=theta_contraction,
+    )
+    L_chamber_curr = L_cylindrical + L_contraction
+    if L_chamber_curr <= 0 or not np.isfinite(L_chamber_curr):
+        L_chamber_curr = V_chamber / A_chamber_check if A_chamber_check > 0 else 0.2
+    
+    max_chamber_length = float(requirements.get("max_chamber_length_m", 0.50))
+    length_term = 0.0
+    if np.isfinite(L_chamber_curr) and max_chamber_length > 0:
+        length_term = max(0.0, (L_chamber_curr - max_chamber_length) / max_chamber_length) ** 2
+    
     # Lexicographic scalarization
     # Lexicographic scalarization (SCALED DOWN)
     BASE_INFEAS = 1e6
@@ -667,6 +694,7 @@ def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, co
     W_OF = 1e4
     W_CF = 1e2
     W_EXIT = 2.0e2
+    W_LEN = 1e4  # Chamber length constraint (same weight as thrust/O/F)
     
     if not np.isfinite(infeasibility_score) or infeasibility_score < 0:
         infeasibility_score = 1.0
@@ -678,7 +706,8 @@ def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, co
             W_THRUST * thrust_penalty_sq_term +
             W_OF * (of_error ** 2) +
             W_CF * cf_hinge +
-            W_EXIT * exit_pressure_sq_term
+            W_EXIT * exit_pressure_sq_term +
+            W_LEN * length_term
         )
     
     if not np.isfinite(obj):
@@ -1599,7 +1628,7 @@ def run_layer1_optimization(
         W_OF = 1e4               # Level 1: Primary objectives (was 1e6)
         W_CF = 1e2               # Level 2: Secondary objectives (was 1e4)
         W_EXIT = 2.0e2           # Level 2: Secondary objectives (was 2e4)
-        W_LEN = 1.0              # Level 4: Soft preferences (was 1.0)
+        W_LEN = 1e4              # Level 2: Chamber length constraint (increased from 1.0 to enforce max length)
         
         if (not np.isfinite(infeasibility_score)) or infeasibility_score < 0:
             infeasibility_score = 1.0

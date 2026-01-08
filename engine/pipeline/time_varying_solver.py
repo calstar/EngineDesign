@@ -1051,6 +1051,9 @@ class TimeVaryingCoupledSolver:
             "V_chamber": np.array([s.V_chamber for s in self.state_history]),
             "A_throat": np.array([s.A_throat for s in self.state_history]),
             "A_exit": np.array([s.A_exit for s in self.state_history]),
+            "D_chamber": np.array([s.D_chamber for s in self.state_history]),
+            "A_chamber": np.array([np.pi * (s.D_chamber / 2.0)**2 for s in self.state_history]),
+            "contraction_ratio": np.array([(np.pi * (s.D_chamber / 2.0)**2) / s.A_throat if s.A_throat > 0 else 1.0 for s in self.state_history]),
             "eps": np.array([s.eps for s in self.state_history]),
             "recession_chamber": np.array([s.recession_chamber for s in self.state_history]),
             "recession_throat": np.array([s.recession_throat for s in self.state_history]),  # Throat recession (tracked even with graphite)

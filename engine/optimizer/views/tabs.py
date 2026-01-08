@@ -3035,6 +3035,21 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
         # Never let plotting errors break the rest of the tab UI.
         pass
 
+    # Optimization method selector
+    st.markdown("#### Optimization Settings")
+    layer3_opt_method = st.selectbox(
+        "Optimization Method",
+        options=["gradient", "cma", "de"],
+        index=0,  # Default to gradient (fast)
+        key="layer3_opt_method",
+        help=(
+            "**gradient** (recommended): Fast gradient descent exploiting monotonic "
+            "thickness-recession relationship. ~5-15 evaluations, ~30-60 seconds.\n\n"
+            "**cma**: CMA-ES global optimizer. More thorough but slower. ~60-80 evaluations.\n\n"
+            "**de**: Differential Evolution fallback. Similar to CMA-ES."
+        ),
+    )
+    
     if st.button("🚀 Run Layer 3 Optimization", type="primary", key="run_layer3"):
         try:
             # ------------------------------------------------------------------
@@ -3148,6 +3163,7 @@ def _layer3_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
                 update_progress,
                 log_status,
                 objective_callback=objective_callback,
+                optimization_method=layer3_opt_method,
             )
             
             progress_bar.empty()

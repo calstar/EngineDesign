@@ -41,7 +41,8 @@ interface ChartDataPoint {
   copv_pressure?: number;
 }
 
-function formatValue(value: number, decimals: number = 2): string {
+function formatValue(value: number | null | undefined, decimals: number = 2): string {
+  if (value == null) return '—';
   return value.toFixed(decimals);
 }
 

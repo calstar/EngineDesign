@@ -24,9 +24,9 @@ fluids:
     Pc_ref: 2500000.0             # Reference pressure [Pa] for stable Bm calculation
     # Antoine equation coefficients for vapor pressure: log10(P) = A - B/(C + T_K)
     # Ethanol coefficients
-    A_antoine: 8.04494            # Dimensionless
-    B_antoine: 1554.3             # [K]
-    C_antoine: -222.65            # [K]
+    A_antoine: 4.92531            # Dimensionless
+    B_antoine: 1432.526           # [K]
+    C_antoine: -61.819            # [K]
 injector:
   type: pintle
   geometry:

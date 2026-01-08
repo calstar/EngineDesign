@@ -869,9 +869,14 @@ async def upload_layer3_config(file: UploadFile = FastAPIFile(...)):
 @router.get("/layer3")
 async def run_layer3(
     max_iterations: int = 20,
-    save_plots: bool = False
+    save_plots: bool = False,
+    optimization_method: str = "gradient"
 ):
-    """Run Layer 3 thermal protection optimization with Server-Sent Events for progress updates."""
+    """Run Layer 3 thermal protection optimization with Server-Sent Events for progress updates.
+    
+    Args:
+        optimization_method: "gradient" (fast, ~5-15 evals), "cma" (thorough, ~60-80 evals), or "de" (fallback)
+    """
     if not app_state.has_config():
         raise HTTPException(
             status_code=400,
@@ -1010,6 +1015,7 @@ async def run_layer3(
                     update_progress=update_progress,
                     log_status=log_status,
                     objective_callback=objective_callback,
+                    optimization_method=optimization_method,
                 )
             
             loop = asyncio.get_event_loop()
