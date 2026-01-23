@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
   ComposedChart,
   Line,
@@ -15,6 +15,164 @@ import type { ChamberGeometryResponse } from '../api/client';
 // Convert m to mm for display
 const M_TO_MM = 1000;
 const MM_TO_INCH = 1 / 25.4;
+
+// Generate a minimal DXF file with a polyline contour
+function generateDxfContent(xCoords: number[], yCoords: number[], unit: 'mm' | 'inch'): string {
+  // Convert coordinates to selected unit
+  const unitMultiplier = unit === 'mm' ? M_TO_MM : M_TO_MM * MM_TO_INCH;
+  const points = xCoords.map((x, i) => ({
+    x: x * unitMultiplier,
+    y: yCoords[i] * unitMultiplier
+  }));
+
+  // DXF header section
+  const header = `0
+SECTION
+2
+HEADER
+9
+$ACADVER
+1
+AC1015
+9
+$INSUNITS
+70
+${unit === 'mm' ? '4' : '1'}
+0
+ENDSEC
+`;
+
+  // DXF tables section (minimal)
+  const tables = `0
+SECTION
+2
+TABLES
+0
+TABLE
+2
+LTYPE
+70
+1
+0
+LTYPE
+2
+CONTINUOUS
+70
+0
+3
+Solid line
+72
+65
+73
+0
+40
+0.0
+0
+ENDTAB
+0
+TABLE
+2
+LAYER
+70
+2
+0
+LAYER
+2
+0
+70
+0
+62
+7
+6
+CONTINUOUS
+0
+LAYER
+2
+CONTOUR
+70
+0
+62
+3
+6
+CONTINUOUS
+0
+ENDTAB
+0
+ENDSEC
+`;
+
+  // DXF entities section - upper contour polyline
+  let entities = `0
+SECTION
+2
+ENTITIES
+0
+LWPOLYLINE
+8
+CONTOUR
+90
+${points.length}
+70
+0
+`;
+
+  // Add each vertex
+  for (const pt of points) {
+    entities += `10
+${pt.x.toFixed(6)}
+20
+${pt.y.toFixed(6)}
+`;
+  }
+
+  // Add lower contour (mirrored) as separate polyline
+  entities += `0
+LWPOLYLINE
+8
+CONTOUR
+90
+${points.length}
+70
+0
+`;
+
+  // Add mirrored vertices (in reverse order for proper direction)
+  for (let i = points.length - 1; i >= 0; i--) {
+    entities += `10
+${points[i].x.toFixed(6)}
+20
+${(-points[i].y).toFixed(6)}
+`;
+  }
+
+  // Add centerline
+  const xMin = Math.min(...points.map(p => p.x));
+  const xMax = Math.max(...points.map(p => p.x));
+  entities += `0
+LINE
+8
+0
+10
+${xMin.toFixed(6)}
+20
+0.0
+11
+${xMax.toFixed(6)}
+21
+0.0
+`;
+
+  entities += `0
+ENDSEC
+`;
+
+  // DXF end of file
+  const eof = `0
+EOF
+`;
+
+  return header + tables + entities + eof;
+}
 
 // Helper function to get nice step size for a given range
 function getNiceStep(range: number): number {
@@ -125,6 +283,29 @@ export function ChamberContourPlot({
   const [ceaUnit, setCeaUnit] = useState<'mm' | 'inch'>('mm');
   const ceaContourContainerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 1000, height: 350 });
+
+  // Download DXF handler
+  const handleDownloadDxf = useCallback(() => {
+    if (!geometry || !geometry.chamber_contour_x || geometry.chamber_contour_x.length === 0) {
+      return;
+    }
+
+    const dxfContent = generateDxfContent(
+      geometry.chamber_contour_x,
+      geometry.chamber_contour_y,
+      ceaUnit
+    );
+
+    const blob = new Blob([dxfContent], { type: 'application/dxf' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `chamber_contour_${ceaUnit}.dxf`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [geometry, ceaUnit]);
 
   // CEA-solved chamber contour data
   const chamberContourData = useMemo(() => {
@@ -376,6 +557,17 @@ export function ChamberContourPlot({
               Cf = {geometry.Cf.toFixed(4)}
             </span>
           )}
+          {/* Download DXF button */}
+          <button
+            onClick={handleDownloadDxf}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-rose-500/50 transition-all"
+            title={`Download chamber contour as DXF (${ceaUnit})`}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            DXF
+          </button>
         </div>
       </div>
 
