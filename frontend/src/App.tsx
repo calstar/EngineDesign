@@ -7,10 +7,11 @@ import { CustomPlotter } from './components/CustomPlotter';
 import { FlightSimulation } from './components/FlightSimulation';
 import { ChamberGeometry } from './components/ChamberGeometry';
 import { Optimizer } from './components/Optimizer';
+import { ControllerMode } from './components/ControllerMode';
 import { getConfig, getHealth } from './api/client';
 import type { EngineConfig } from './api/client';
 
-type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'optimizer' | 'config';
+type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'optimizer' | 'config' | 'controller';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('forward');
@@ -137,6 +138,16 @@ function App() {
               Optimizer
             </button>
             <button
+              onClick={() => setActiveTab('controller')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'controller'
+                  ? 'border-indigo-500 text-indigo-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Controller
+            </button>
+            <button
               onClick={() => setActiveTab('config')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === 'config'
@@ -228,6 +239,18 @@ function App() {
               </div>
             )}
             <Optimizer config={config} />
+          </div>
+        )}
+
+        {activeTab === 'controller' && (
+          <div className="space-y-6">
+            {!config && (
+              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
+                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
+              </div>
+            )}
+            <ControllerMode config={config} />
           </div>
         )}
 

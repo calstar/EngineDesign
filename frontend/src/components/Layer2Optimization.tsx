@@ -13,13 +13,18 @@ import {
     runLayer2Optimization,
     getLayer2Status,
     stopLayer2Optimization,
-    uploadLayer2Config
+    uploadLayer2Config,
+    simulateLayer2Controller,
+    simulateLayer2ControllerStream,
+    API_BASE
 } from '../api/client';
 import type {
     Layer2Settings,
     Layer2ProgressEvent,
     Layer2Results,
-    DesignRequirements
+    DesignRequirements,
+    Layer2ControllerSimulateResponse,
+    ControllerStreamEvent
 } from '../api/client';
 
 interface Layer2OptimizationProps {
@@ -117,6 +122,17 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
 
     const [eventSourceRef, setEventSourceRef] = useState<EventSource | null>(null);
     const [configLoaded, setConfigLoaded] = useState(false);
+    
+    // Controller simulation state
+    const [controllerResults, setControllerResults] = useState<Layer2ControllerSimulateResponse | null>(null);
+    const [controllerLoading, setControllerLoading] = useState(false);
+    const [controllerError, setControllerError] = useState<string | null>(null);
+    const [controllerProgress, setControllerProgress] = useState(0);
+    const [controllerStage, setControllerStage] = useState('');
+    const [controllerStreamAbort, setControllerStreamAbort] = useState<AbortController | null>(null);
+    
+    // Real-time data for streaming
+    const [realtimeData, setRealtimeData] = useState<Array<ControllerStreamEvent>>([]);
 
     // Calculate min/max objective values for dot scaling
     const { minObj, maxObj } = useMemo(() => {
@@ -343,6 +359,91 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
+    };
+
+    const handleRunController = () => {
+        if (!results?.summary?.thrust_curve_time || !results?.summary?.thrust_curve_values) {
+            setControllerError('No thrust curve available. Run Layer 2 optimization first.');
+            return;
+        }
+
+        setControllerLoading(true);
+        setControllerError(null);
+        setControllerResults(null);
+        setRealtimeData([]);
+        setControllerProgress(0);
+        setControllerStage('Starting...');
+
+        // Use streaming for real-time visualization
+        const abortController = simulateLayer2ControllerStream(
+            {
+                thrust_curve_time: results.summary.thrust_curve_time,
+                thrust_curve_values: results.summary.thrust_curve_values,
+                dt: 0.01,
+            },
+            (event: ControllerStreamEvent) => {
+                if (event.type === 'status' || event.type === 'progress') {
+                    if (event.progress !== undefined) setControllerProgress(event.progress);
+                    if (event.stage) setControllerStage(event.stage);
+                } else if (event.type === 'data') {
+                    // Add data point to real-time array
+                    setRealtimeData(prev => [...prev, event]);
+                } else if (event.type === 'complete') {
+                    setControllerLoading(false);
+                    setControllerProgress(1.0);
+                    setControllerStage('Complete');
+                    // Final results will be built from accumulated realtimeData
+                    // Use a callback to ensure we have the latest data
+                    setRealtimeData(prev => {
+                        const finalResults: Layer2ControllerSimulateResponse = {
+                            time: prev.map(d => d.time || 0),
+                            thrust_ref: prev.map(d => d.thrust_ref || 0),
+                            thrust_actual: prev.map(d => d.thrust_actual || 0),
+                            MR: prev.map(d => d.MR || 0),
+                            P_copv: prev.map(d => d.P_copv || 0),
+                            P_reg: prev.map(d => d.P_reg || 0),
+                            P_u_fuel: prev.map(d => d.P_u_fuel || 0),
+                            P_u_ox: prev.map(d => d.P_u_ox || 0),
+                            P_d_fuel: prev.map(d => d.P_d_fuel || 0),
+                            P_d_ox: prev.map(d => d.P_d_ox || 0),
+                            P_ch: prev.map(d => d.P_ch || 0),
+                            duty_F: prev.map(d => d.duty_F || 0),
+                            duty_O: prev.map(d => d.duty_O || 0),
+                            altitude: prev.map(d => d.altitude || 0),
+                            velocity: prev.map(d => d.velocity || 0),
+                            value_function: prev.map(d => d.value_function || 0),
+                            control_effort: prev.map(d => d.control_effort || 0),
+                            V_u_fuel: prev.map(d => d.V_u_fuel || 0),
+                            V_u_ox: prev.map(d => d.V_u_ox || 0),
+                            mdot_F: prev.map(d => d.mdot_F || 0),
+                            mdot_O: prev.map(d => d.mdot_O || 0),
+                            w_bar: prev.map(d => d.w_bar || []),
+                            constraint_margins: prev.map(d => d.constraint_margins || {}),
+                        };
+                        setControllerResults(finalResults);
+                        return prev;
+                    });
+                } else if (event.type === 'error') {
+                    setControllerError(event.error || 'Unknown error');
+                    setControllerLoading(false);
+                }
+            },
+            (error: string) => {
+                setControllerError(error);
+                setControllerLoading(false);
+            }
+        );
+        
+        setControllerStreamAbort(abortController);
+    };
+    
+    const handleStopController = () => {
+        if (controllerStreamAbort) {
+            controllerStreamAbort.abort();
+            setControllerStreamAbort(null);
+            setControllerLoading(false);
+            setControllerStage('Stopped');
+        }
     };
 
     return (
@@ -875,6 +976,321 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
                                 </div>
                             </div>
                         )}
+
+                    {/* Controller Simulation Section */}
+                    <div className="mt-8 pt-8 border-t border-[var(--color-border)]">
+                        <div className="flex justify-between items-center mb-4">
+                            <h4 className="text-lg font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
+                                <span className="text-purple-400">🎮</span> Controller Simulation
+                            </h4>
+                            <div className="flex gap-2">
+                                {controllerLoading && (
+                                    <div className="flex items-center gap-2 text-sm text-[var(--color-text-secondary)]">
+                                        <span>{controllerStage}</span>
+                                        <span className="text-purple-400 font-bold">{(controllerProgress * 100).toFixed(0)}%</span>
+                                    </div>
+                                )}
+                                {controllerLoading ? (
+                                    <button
+                                        onClick={handleStopController}
+                                        className="px-4 py-2 rounded-lg font-medium transition-colors bg-red-600 hover:bg-red-700 text-white"
+                                    >
+                                        ⏹ Stop
+                                    </button>
+                                ) : (
+                                    <>
+                                        <button
+                                            onClick={handleRunController}
+                                            disabled={!results?.summary?.thrust_curve_time}
+                                            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                                                !results?.summary?.thrust_curve_time
+                                                    ? 'bg-gray-600 cursor-not-allowed text-gray-400'
+                                                    : 'bg-purple-600 hover:bg-purple-700 text-white'
+                                            }`}
+                                        >
+                                            ▶ Run from Layer 2 Results
+                                        </button>
+                                        <label className="px-4 py-2 rounded-lg font-medium transition-colors bg-green-600 hover:bg-green-700 text-white cursor-pointer">
+                                            📁 Run from Config File
+                                            <input
+                                                type="file"
+                                                accept=".yaml,.yml"
+                                                className="hidden"
+                                                onChange={async (e) => {
+                                                    const file = e.target.files?.[0];
+                                                    if (!file) return;
+                                                    
+                                                    setControllerLoading(true);
+                                                    setControllerError(null);
+                                                    setControllerResults(null);
+                                                    setRealtimeData([]);
+                                                    setControllerProgress(0);
+                                                    setControllerStage('Loading config...');
+                                                    
+                                                    try {
+                                                        const formData = new FormData();
+                                                        formData.append('file', file);
+                                                        formData.append('dt', '0.01');
+                                                        
+                                                        const response = await fetch(`${API_BASE}/control/upload-config-and-simulate`, {
+                                                            method: 'POST',
+                                                            body: formData,
+                                                        });
+                                                        
+                                                        if (!response.ok) {
+                                                            throw new Error(`HTTP ${response.status}`);
+                                                        }
+                                                        
+                                                        // Handle streaming response
+                                                        const reader = response.body?.getReader();
+                                                        const decoder = new TextDecoder();
+                                                        let buffer = '';
+                                                        
+                                                        if (!reader) {
+                                                            throw new Error('No response body');
+                                                        }
+                                                        
+                                                        const readStream = () => {
+                                                            reader.read().then(({ done, value }) => {
+                                                                if (done) {
+                                                                    setControllerLoading(false);
+                                                                    return;
+                                                                }
+                                                                
+                                                                buffer += decoder.decode(value, { stream: true });
+                                                                const lines = buffer.split('\n');
+                                                                buffer = lines.pop() || '';
+                                                                
+                                                                for (const line of lines) {
+                                                                    if (line.trim() && line.startsWith('data: ')) {
+                                                                        try {
+                                                                            const data = JSON.parse(line.slice(6));
+                                                                            if (data.type === 'status' || data.type === 'progress') {
+                                                                                if (data.progress !== undefined) setControllerProgress(data.progress);
+                                                                                if (data.stage) setControllerStage(data.stage);
+                                                                            } else if (data.type === 'data') {
+                                                                                setRealtimeData(prev => [...prev, data]);
+                                                                            } else if (data.type === 'complete') {
+                                                                                setControllerLoading(false);
+                                                                                setControllerProgress(1.0);
+                                                                                setControllerStage('Complete');
+                                                                                setRealtimeData(prev => {
+                                                                                    const finalResults: Layer2ControllerSimulateResponse = {
+                                                                                        time: prev.map(d => d.time || 0),
+                                                                                        thrust_ref: prev.map(d => d.thrust_ref || 0),
+                                                                                        thrust_actual: prev.map(d => d.thrust_actual || 0),
+                                                                                        MR: prev.map(d => d.MR || 0),
+                                                                                        P_copv: prev.map(d => d.P_copv || 0),
+                                                                                        P_reg: prev.map(d => d.P_reg || 0),
+                                                                                        P_u_fuel: prev.map(d => d.P_u_fuel || 0),
+                                                                                        P_u_ox: prev.map(d => d.P_u_ox || 0),
+                                                                                        P_d_fuel: prev.map(d => d.P_d_fuel || 0),
+                                                                                        P_d_ox: prev.map(d => d.P_d_ox || 0),
+                                                                                        P_ch: prev.map(d => d.P_ch || 0),
+                                                                                        duty_F: prev.map(d => d.duty_F || 0),
+                                                                                        duty_O: prev.map(d => d.duty_O || 0),
+                                                                                        altitude: prev.map(d => d.altitude || 0),
+                                                                                        velocity: prev.map(d => d.velocity || 0),
+                                                                                        value_function: prev.map(d => d.value_function || 0),
+                                                                                        control_effort: prev.map(d => d.control_effort || 0),
+                                                                                        V_u_fuel: prev.map(d => d.V_u_fuel || 0),
+                                                                                        V_u_ox: prev.map(d => d.V_u_ox || 0),
+                                                                                        mdot_F: prev.map(d => d.mdot_F || 0),
+                                                                                        mdot_O: prev.map(d => d.mdot_O || 0),
+                                                                                        w_bar: prev.map(d => d.w_bar || []),
+                                                                                        constraint_margins: prev.map(d => d.constraint_margins || {}),
+                                                                                    };
+                                                                                    setControllerResults(finalResults);
+                                                                                    return prev;
+                                                                                });
+                                                                            } else if (data.type === 'error') {
+                                                                                setControllerError(data.error || 'Unknown error');
+                                                                                setControllerLoading(false);
+                                                                            }
+                                                                        } catch (err) {
+                                                                            console.error('Error parsing SSE event:', err);
+                                                                        }
+                                                                    }
+                                                                }
+                                                                
+                                                                readStream();
+                                                            }).catch(err => {
+                                                                setControllerError(err instanceof Error ? err.message : 'Stream error');
+                                                                setControllerLoading(false);
+                                                            });
+                                                        };
+                                                        
+                                                        readStream();
+                                                    } catch (err) {
+                                                        setControllerError(err instanceof Error ? err.message : 'Failed to process config');
+                                                        setControllerLoading(false);
+                                                    }
+                                                }}
+                                            />
+                                        </label>
+                                    </>
+                                )}
+                            </div>
+                        </div>
+                        
+                        {controllerLoading && (
+                            <div className="mb-4">
+                                <div className="w-full bg-[var(--color-bg-primary)] rounded-full h-2">
+                                    <div
+                                        className="bg-purple-500 h-full rounded-full transition-all duration-300"
+                                        style={{ width: `${controllerProgress * 100}%` }}
+                                    />
+                                </div>
+                            </div>
+                        )}
+                        
+                        {controllerError && (
+                            <div className="mb-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-sm">
+                                ❌ {controllerError}
+                            </div>
+                        )}
+
+                        {(controllerResults || realtimeData.length > 0) && (
+                            <div className="space-y-6">
+                                {/* Thrust Tracking */}
+                                <div className="p-4 rounded-xl bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                                    <h5 className="text-sm font-semibold mb-3 text-[var(--color-text-primary)]">
+                                        Thrust Tracking {controllerLoading && <span className="text-purple-400 text-xs">(Live)</span>}
+                                    </h5>
+                                    <ResponsiveContainer width="100%" height={250}>
+                                        <LineChart data={(controllerResults ? controllerResults.time : realtimeData.map(d => d.time || 0)).map((t, i) => ({
+                                            time: t,
+                                            reference: controllerResults ? controllerResults.thrust_ref[i] : (realtimeData[i]?.thrust_ref || 0),
+                                            actual: controllerResults ? controllerResults.thrust_actual[i] : (realtimeData[i]?.thrust_actual || 0),
+                                        }))}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit=" s" stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} label={{ value: 'Thrust (N)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="reference" name="Reference (Layer 2)" stroke="#10b981" strokeWidth={2} dot={false} />
+                                            <Line type="monotone" dataKey="actual" name="Actual (Controller)" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+
+                                {/* Robustness Metrics */}
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    <ResultCard
+                                        label="Max Tracking Error"
+                                        value={Math.max(...controllerResults.time.map((t, i) => 
+                                            Math.abs(controllerResults.thrust_ref[i] - controllerResults.thrust_actual[i])
+                                        ))}
+                                        unit="N"
+                                        decimals={1}
+                                        color="red"
+                                    />
+                                    <ResultCard
+                                        label="RMS Tracking Error"
+                                        value={Math.sqrt(
+                                            controllerResults.time.reduce((sum, t, i) => {
+                                                const err = controllerResults.thrust_ref[i] - controllerResults.thrust_actual[i];
+                                                return sum + err * err;
+                                            }, 0) / controllerResults.time.length
+                                        )}
+                                        unit="N"
+                                        decimals={1}
+                                        color="orange"
+                                    />
+                                    <ResultCard
+                                        label="Avg Robustness Bound"
+                                        value={controllerResults.w_bar.length > 0
+                                            ? controllerResults.w_bar.reduce((sum, w) => sum + w.reduce((s, v) => s + Math.abs(v), 0), 0) / (controllerResults.w_bar.length * controllerResults.w_bar[0].length)
+                                            : 0
+                                        }
+                                        unit=""
+                                        decimals={3}
+                                        color="purple"
+                                    />
+                                    <ResultCard
+                                        label="Min Constraint Margin"
+                                        value={controllerResults.constraint_margins.length > 0
+                                            ? Math.min(...controllerResults.constraint_margins.flatMap(m => Object.values(m).filter(v => typeof v === 'number')))
+                                            : 0
+                                        }
+                                        unit=""
+                                        decimals={3}
+                                        color="cyan"
+                                    />
+                                </div>
+
+                                {/* Pressures */}
+                                <div className="p-4 rounded-xl bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                                    <h5 className="text-sm font-semibold mb-3 text-[var(--color-text-primary)]">
+                                        Pressures {controllerLoading && <span className="text-purple-400 text-xs">(Live)</span>}
+                                    </h5>
+                                    <ResponsiveContainer width="100%" height={250}>
+                                        <LineChart data={(controllerResults ? controllerResults.time : realtimeData.map(d => d.time || 0)).map((t, i) => ({
+                                            time: t,
+                                            copv: (controllerResults ? controllerResults.P_copv[i] : (realtimeData[i]?.P_copv || 0)) / 6894.76,
+                                            reg: (controllerResults ? controllerResults.P_reg[i] : (realtimeData[i]?.P_reg || 0)) / 6894.76,
+                                            u_fuel: (controllerResults ? controllerResults.P_u_fuel[i] : (realtimeData[i]?.P_u_fuel || 0)) / 6894.76,
+                                            u_ox: (controllerResults ? controllerResults.P_u_ox[i] : (realtimeData[i]?.P_u_ox || 0)) / 6894.76,
+                                            ch: (controllerResults ? controllerResults.P_ch[i] : (realtimeData[i]?.P_ch || 0)) / 6894.76,
+                                        }))}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit=" s" stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} label={{ value: 'Pressure (psi)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="copv" name="COPV" stroke="#a855f7" strokeWidth={2} dot={false} />
+                                            <Line type="monotone" dataKey="reg" name="Regulator" stroke="#8b5cf6" strokeWidth={2} dot={false} />
+                                            <Line type="monotone" dataKey="u_fuel" name="Ullage Fuel" stroke="#ef4444" strokeWidth={2} dot={false} />
+                                            <Line type="monotone" dataKey="u_ox" name="Ullage LOX" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                                            <Line type="monotone" dataKey="ch" name="Chamber" stroke="#10b981" strokeWidth={2} dot={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+
+                                {/* Actuation */}
+                                <div className="p-4 rounded-xl bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                                    <h5 className="text-sm font-semibold mb-3 text-[var(--color-text-primary)]">
+                                        Actuation (Duty Cycles) {controllerLoading && <span className="text-purple-400 text-xs">(Live)</span>}
+                                    </h5>
+                                    <ResponsiveContainer width="100%" height={200}>
+                                        <LineChart data={(controllerResults ? controllerResults.time : realtimeData.map(d => d.time || 0)).map((t, i) => ({
+                                            time: t,
+                                            duty_F: (controllerResults ? controllerResults.duty_F[i] : (realtimeData[i]?.duty_F || 0)) * 100,
+                                            duty_O: (controllerResults ? controllerResults.duty_O[i] : (realtimeData[i]?.duty_O || 0)) * 100,
+                                        }))}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit=" s" stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} label={{ value: 'Duty (%)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} domain={[0, 100]} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="duty_F" name="Fuel Duty" stroke="#ef4444" strokeWidth={2} dot={false} />
+                                            <Line type="monotone" dataKey="duty_O" name="LOX Duty" stroke="#3b82f6" strokeWidth={2} dot={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+
+                                {/* Mixture Ratio */}
+                                <div className="p-4 rounded-xl bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                                    <h5 className="text-sm font-semibold mb-3 text-[var(--color-text-primary)]">
+                                        Mixture Ratio (MR) {controllerLoading && <span className="text-purple-400 text-xs">(Live)</span>}
+                                    </h5>
+                                    <ResponsiveContainer width="100%" height={200}>
+                                        <LineChart data={(controllerResults ? controllerResults.time : realtimeData.map(d => d.time || 0)).map((t, i) => ({
+                                            time: t,
+                                            MR: controllerResults ? controllerResults.MR[i] : (realtimeData[i]?.MR || 0),
+                                        }))}>
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit=" s" stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 11 }} label={{ value: 'MR', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="MR" name="Mixture Ratio" stroke="#eab308" strokeWidth={2} dot={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        )}
+                    </div>
                 </div>
             )}
         </div>

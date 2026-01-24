@@ -5,7 +5,7 @@
  * from the Python engine - keeping consistency with the Streamlit UI.
  */
 
-const API_BASE = '/api';
+export const API_BASE = '/api';
 
 interface ApiResponse<T> {
   data?: T;
@@ -824,6 +824,336 @@ export interface Layer2Settings {
   de_maxiter?: number;
   de_popsize?: number;
   de_n_time_points?: number;
+}
+
+// ============================================================================
+// Controller Types and API
+// ============================================================================
+
+export interface ControllerInitRequest {
+  controller_config_path?: string;
+  use_engine_config?: boolean;
+}
+
+export interface MeasurementRequest {
+  P_copv: number;
+  P_reg: number;
+  P_u_fuel: number;
+  P_u_ox: number;
+  P_d_fuel: number;
+  P_d_ox: number;
+  timestamp?: number;
+}
+
+export interface NavStateRequest {
+  h: number;
+  vz: number;
+  theta?: number;
+  mass_estimate?: number;
+}
+
+export interface CommandRequest {
+  command_type: 'thrust_desired' | 'altitude_goal';
+  thrust_desired?: number | number[][];
+  altitude_goal?: number;
+}
+
+export interface ControllerStepRequest {
+  meas: MeasurementRequest;
+  nav: NavStateRequest;
+  cmd: CommandRequest;
+}
+
+export interface ControllerSimulateRequest {
+  initial_meas: MeasurementRequest;
+  initial_nav: NavStateRequest;
+  cmd: CommandRequest;
+  duration: number;
+  dt?: number;
+  thrust_curve?: number[];
+  time_array?: number[];
+  controller_config_path?: string;
+}
+
+export interface ControllerSimulateResponse {
+  time: number[];
+  thrust_ref: number[];
+  thrust_actual: number[];
+  MR: number[];
+  P_copv: number[];
+  P_reg: number[];
+  P_u_fuel: number[];
+  P_u_ox: number[];
+  P_d_fuel: number[];
+  P_d_ox: number[];
+  P_ch: number[];
+  duty_F: number[];
+  duty_O: number[];
+  altitude: number[];
+  velocity: number[];
+  value_function: number[];
+  control_effort: number[];
+  V_u_fuel: number[];
+  V_u_ox: number[];
+  mdot_F: number[];
+  mdot_O: number[];
+}
+
+export interface Layer2ControllerSimulateRequest {
+  thrust_curve_time: number[];
+  thrust_curve_values: number[];
+  initial_meas?: MeasurementRequest;
+  initial_nav?: NavStateRequest;
+  dt?: number;
+}
+
+export interface Layer2ConfigSimulateRequest {
+  config_path?: string;
+  initial_meas?: MeasurementRequest;
+  initial_nav?: NavStateRequest;
+  dt?: number;
+}
+
+export interface Layer2ControllerSimulateResponse extends ControllerSimulateResponse {
+  w_bar: number[][];  // Robustness bounds per state component
+  constraint_margins: Array<Record<string, number>>;  // Constraint safety margins
+}
+
+export async function initController(params: ControllerInitRequest): Promise<ApiResponse<any>> {
+  return request('/control/init', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
+}
+
+export async function controllerStep(req: ControllerStepRequest): Promise<ApiResponse<any>> {
+  return request('/control/step', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+export async function simulateController(req: ControllerSimulateRequest): Promise<ApiResponse<ControllerSimulateResponse>> {
+  return request('/control/simulate', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+export async function resetController(): Promise<ApiResponse<{ status: string }>> {
+  return request('/control/reset', {
+    method: 'POST',
+  });
+}
+
+export async function getControllerStatus(): Promise<ApiResponse<any>> {
+  return request('/control/status');
+}
+
+export async function simulateLayer2Controller(req: Layer2ControllerSimulateRequest): Promise<ApiResponse<Layer2ControllerSimulateResponse>> {
+  return request('/control/simulate-layer2', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+export interface ControllerStreamEvent {
+  type: 'status' | 'progress' | 'data' | 'complete' | 'error';
+  progress?: number;
+  stage?: string;
+  message?: string;
+  error?: string;
+  // Data point fields (when type === 'data')
+  time?: number;
+  thrust_ref?: number;
+  thrust_actual?: number;
+  MR?: number;
+  P_copv?: number;
+  P_reg?: number;
+  P_u_fuel?: number;
+  P_u_ox?: number;
+  P_d_fuel?: number;
+  P_d_ox?: number;
+  P_ch?: number;
+  duty_F?: number;
+  duty_O?: number;
+  altitude?: number;
+  velocity?: number;
+  value_function?: number;
+  control_effort?: number;
+  V_u_fuel?: number;
+  V_u_ox?: number;
+  mdot_F?: number;
+  mdot_O?: number;
+  w_bar?: number[];
+  constraint_margins?: Record<string, number>;
+}
+
+export function simulateLayer2ControllerStream(
+  req: Layer2ControllerSimulateRequest,
+  onEvent: (event: ControllerStreamEvent) => void,
+  onError: (error: string) => void
+): AbortController {
+  const url = `${API_BASE}/control/simulate-layer2-stream`;
+  const abortController = new AbortController();
+  
+  // Use fetch with ReadableStream for POST SSE
+  fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(req),
+    signal: abortController.signal,
+  })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      if (!reader) {
+        throw new Error('No response body');
+      }
+      
+      const readStream = () => {
+        reader.read().then(({ done, value }) => {
+          if (done) {
+            return;
+          }
+          
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
+          
+          for (const line of lines) {
+            if (line.trim() && line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                onEvent(data);
+                
+                if (data.type === 'complete' || data.type === 'error') {
+                  return;
+                }
+              } catch (err) {
+                console.error('Error parsing SSE event:', err, line);
+              }
+            }
+          }
+          
+          readStream();
+        }).catch(err => {
+          if (err.name !== 'AbortError') {
+            onError(err instanceof Error ? err.message : 'Stream read error');
+          }
+        });
+      };
+      
+      readStream();
+    })
+    .catch(err => {
+      if (err.name !== 'AbortError') {
+        onError(err instanceof Error ? err.message : 'Failed to start stream');
+      }
+    });
+  
+  return abortController;
+}
+
+export async function simulateFromLayer2Config(req: Layer2ConfigSimulateRequest): Promise<ApiResponse<Layer2ControllerSimulateResponse>> {
+  return request('/control/simulate-from-config', {
+    method: 'POST',
+    body: JSON.stringify(req),
+  });
+}
+
+export function simulateFromLayer2ConfigStream(
+  req: Layer2ConfigSimulateRequest,
+  onEvent: (event: ControllerStreamEvent) => void,
+  onError: (error: string) => void
+): AbortController {
+  const url = `${API_BASE}/control/simulate-from-config-stream`;
+  const abortController = new AbortController();
+  
+  fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(req),
+    signal: abortController.signal,
+  })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      
+      if (!reader) {
+        throw new Error('No response body');
+      }
+      
+      const readStream = () => {
+        reader.read().then(({ done, value }) => {
+          if (done) {
+            return;
+          }
+          
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          
+          for (const line of lines) {
+            if (line.trim() && line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                onEvent(data);
+                
+                if (data.type === 'complete' || data.type === 'error') {
+                  return;
+                }
+              } catch (err) {
+                console.error('Error parsing SSE event:', err, line);
+              }
+            }
+          }
+          
+          readStream();
+        }).catch(err => {
+          if (err.name !== 'AbortError') {
+            onError(err instanceof Error ? err.message : 'Stream read error');
+          }
+        });
+      };
+      
+      readStream();
+    })
+    .catch(err => {
+      if (err.name !== 'AbortError') {
+        onError(err instanceof Error ? err.message : 'Failed to start stream');
+      }
+    });
+  
+  return abortController;
+}
+
+export async function uploadConfigAndSimulate(file: File, dt?: number): Promise<AbortController> {
+  const formData = new FormData();
+  formData.append('file', file);
+  if (dt !== undefined) {
+    formData.append('dt', dt.toString());
+  }
+  
+  // This will return an AbortController for the streaming response
+  // For now, we'll need to handle this differently
+  // Actually, let's create a simpler approach - use the config path endpoint
+  return new AbortController(); // Placeholder
 }
 
 export interface Layer2Results {

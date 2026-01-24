@@ -30,10 +30,19 @@ cd "$PROJECT_ROOT"
 uvicorn backend.main:app --reload --port 8000 &
 BACKEND_PID=$!
 
+# Check if frontend dependencies are installed
+if [ ! -d "$PROJECT_ROOT/frontend/node_modules" ]; then
+    echo -e "${BLUE}Installing frontend dependencies...${NC}"
+    cd "$PROJECT_ROOT/frontend"
+    npm install
+fi
+
 # Start frontend
 echo -e "${BLUE}Starting frontend on http://localhost:5173${NC}"
 cd "$PROJECT_ROOT/frontend"
-npm run dev &
+# Suppress MESA/OpenGL warnings in WSL2 (harmless but noisy)
+export LIBGL_ALWAYS_SOFTWARE=1 2>/dev/null || true
+npm run dev 2>&1 | grep -v "MESA\|ZINK\|glx\|drisw" &
 FRONTEND_PID=$!
 
 echo -e "${GREEN}Both servers running! Press Ctrl+C to stop.${NC}"
