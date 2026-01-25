@@ -6,12 +6,31 @@ import re
 import json
 import sys
 import logging
-from rocketcea.cea_obj import CEA_Obj
 from typing import Tuple, Optional, List, Dict, Any
 from multiprocessing import Pool, cpu_count, Manager
 from functools import partial
 import time
 from .config_schemas import CEAConfig
+
+# Lazy import of rocketcea - only import if we need to build cache
+# This allows the module to work even if rocketcea is not installed/available
+# as long as a cache file exists
+_CEA_Obj = None
+
+def _get_CEA_Obj():
+    """Lazy import of CEA_Obj - only import when needed for cache building."""
+    global _CEA_Obj
+    if _CEA_Obj is None:
+        try:
+            from rocketcea.cea_obj import CEA_Obj
+            _CEA_Obj = CEA_Obj
+        except ImportError as e:
+            raise ImportError(
+                "rocketcea is required to build CEA cache. "
+                "If you have an existing cache file, make sure it's in the correct location. "
+                f"Original error: {e}"
+            )
+    return _CEA_Obj
 
 # Create module-level logger
 logger = logging.getLogger("evaluate")
@@ -142,6 +161,8 @@ def _compute_cea_point_chunk(
     results : List[Tuple[int, int, int, float, float, float, float, float, float]]
         List of (i, j, k_idx, cstar, Cf, Tc, gamma, R, M) tuples
     """
+    # Lazy import CEA_Obj only when needed
+    CEA_Obj = _get_CEA_Obj()
     # Create CEA object per worker (each process gets its own)
     chamber = CEA_Obj(oxName=ox_name, fuelName=fuel_name)
     results = []
@@ -186,21 +207,53 @@ class CEACache:
     def __init__(self, config: CEAConfig):
         self.config = config
         # Make cache file path absolute (relative to current working directory or project root)
+        # Also check output/cache/ directory
         if os.path.isabs(config.cache_file):
             self.cache_file = config.cache_file
         else:
-            # Try current directory first, then project root
+            # Try multiple locations in order:
+            # 1. Current directory
+            # 2. Project root (parent of parent of this file)
+            # 3. output/cache/ directory (common location)
+            # 4. output/cache/ relative to project root
+            cache_found = False
+            parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            
+            # Try current directory
             if os.path.exists(config.cache_file):
                 self.cache_file = os.path.abspath(config.cache_file)
-            else:
-                # Look in parent directory (project root)
-                parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-                potential_path = os.path.join(parent_dir, config.cache_file)
-                if os.path.exists(potential_path):
-                    self.cache_file = potential_path
-                else:
-                    # Use current directory (will create new cache)
-                    self.cache_file = os.path.abspath(config.cache_file)
+                cache_found = True
+            # Try project root
+            elif os.path.exists(os.path.join(parent_dir, config.cache_file)):
+                self.cache_file = os.path.join(parent_dir, config.cache_file)
+                cache_found = True
+            # Try output/cache/ in current directory
+            output_cache_cur = os.path.join("output", "cache", os.path.basename(config.cache_file))
+            if os.path.exists(output_cache_cur):
+                self.cache_file = os.path.abspath(output_cache_cur)
+                cache_found = True
+            # Try output/cache/ relative to project root
+            output_cache_root = os.path.join(parent_dir, "output", "cache", os.path.basename(config.cache_file))
+            if not cache_found and os.path.exists(output_cache_root):
+                self.cache_file = output_cache_root
+                cache_found = True
+            # If still not found, check if any .npz file exists in output/cache/ (use first one found)
+            if not cache_found:
+                for cache_dir in [os.path.join("output", "cache"), os.path.join(parent_dir, "output", "cache")]:
+                    if os.path.isdir(cache_dir):
+                        for file in os.listdir(cache_dir):
+                            if file.endswith(".npz") and "cea_cache" in file.lower():
+                                self.cache_file = os.path.join(cache_dir, file)
+                                cache_found = True
+                                print(f"[INFO] Found CEA cache in output/cache/: {file}")
+                                break
+                        if cache_found:
+                            break
+            
+            if not cache_found:
+                # Cache doesn't exist - will need to build it (requires rocketcea)
+                # Use project root as default location
+                self.cache_file = os.path.join(parent_dir, config.cache_file)
         
         # Determine if using 3D cache (Pc, MR, eps) or 2D cache (Pc, MR)
         self.use_3d = config.eps_range is not None
@@ -424,6 +477,8 @@ class CEACache:
     
     def _build_cache_sequential(self, total_points: int):
         """Sequential CEA cache building (original method)"""
+        # Lazy import CEA_Obj only when needed
+        CEA_Obj = _get_CEA_Obj()
         chamber = CEA_Obj(oxName=self.config.ox_name, fuelName=self.config.fuel_name)
         
         # Initialize tables
