@@ -27,7 +27,8 @@ trap cleanup SIGINT SIGTERM
 # Start backend
 echo -e "${BLUE}Starting backend on http://localhost:8000${NC}"
 cd "$PROJECT_ROOT"
-uvicorn backend.main:app --reload --port 8000 &
+# Use python -m uvicorn to avoid broken conda environment issues
+python3 -m uvicorn backend.main:app --reload --port 8000 &
 BACKEND_PID=$!
 
 # Check if frontend dependencies are installed
