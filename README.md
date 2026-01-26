@@ -18,14 +18,14 @@ A comprehensive physics-based simulation and **multi-layer optimization pipeline
 ```mermaid
 flowchart TB
     subgraph inputs [Inputs]
-        TankP[Tank Pressures<br/>LOX + RP-1]
-        Config[YAML Config<br/>configs/default.yaml]
+        TankP["Tank Pressures: LOX + RP-1"]
+        Config["YAML Config: configs/default.yaml"]
     end
 
     subgraph core [Core Modules]
-        Runner[PintleEngineRunner<br/>engine/core/runner.py]
-        Solver[ChamberSolver<br/>engine/core/chamber_solver.py]
-        CEA[CEA Cache<br/>engine/pipeline/cea_cache.py]
+        Runner["PintleEngineRunner: engine/core/runner.py"]
+        Solver["ChamberSolver: engine/core/chamber_solver.py"]
+        CEA["CEA Cache: engine/pipeline/cea_cache.py"]
     end
 
     subgraph physics [Physics Models]
@@ -33,21 +33,30 @@ flowchart TB
         Injector[Injector Flow]
         Spray[Spray Physics]
         Nozzle[Nozzle Thrust]
-        Thermal[Thermal Protection<br/>Ablative + Graphite]
+        Thermal["Thermal Protection: Ablative + Graphite"]
     end
 
     subgraph optimizer [Optimization Layers]
-        L0[Layer 0: Geometry Pre-opt]
-        L1[Layer 1: Static Optimization]
-        L2[Layer 2: Pressure Curves + Thermal]
-        L3[Layer 3: Thermal Sizing]
-        L4[Layer 4: Flight Validation]
+        L0["Layer 0: Geometry Pre-opt"]
+        L1["Layer 1: Static Optimization"]
+        L2["Layer 2: Pressure Curves + Thermal"]
+        L3["Layer 3: Thermal Sizing"]
+        L4["Layer 4: Flight Validation"]
+    end
+
+    subgraph control [Control System]
+        DDP["Robust DDP Controller: engine/control/robust_ddp/"]
+    end
+
+    subgraph interfaces [User Interfaces]
+        Backend["FastAPI Backend: backend/main.py"]
+        Frontend["React Frontend: frontend/"]
     end
 
     subgraph outputs [Outputs]
-        Thrust[Thrust, Isp, Pc]
+        Thrust["Thrust, Isp, Pc"]
         Curves[Pressure Curves]
-        Design[Optimized Design YAML]
+        Design["Optimized Design YAML"]
     end
 
     TankP --> Runner
@@ -65,9 +74,15 @@ flowchart TB
     L2 --> L3
     L3 --> L4
 
+    Runner --> DDP
+    DDP --> Runner
+
     Runner --> Thrust
     L4 --> Curves
     L4 --> Design
+
+    Backend --> Runner
+    Frontend --> Backend
 ```
 
 ## Multi-Layer Optimization Pipeline
@@ -76,9 +91,9 @@ The optimizer in `engine/optimizer/` runs 5 layers sequentially:
 
 | Layer | Name | Purpose | Key File |
 |-------|------|---------|----------|
-| 0 | Pre-Optimization | Coupled pintle + chamber geometry sizing | `CoupledPintleChamberOptimizer` |
+| 0 | Pre-Optimization | Coupled pintle + chamber geometry sizing | `engine/pipeline/coupled_optimizer.py` (`CoupledPintleChamberOptimizer`) |
 | 1 | Static Optimization | Geometry + initial pressure curves, static hot-fire validation | `layers/layer1_static_optimization.py` |
-| 2 | Burn Candidate | Time-series pressure curve optimization + thermal protection seeds | `layers/layer2_pressure.py`, `layers/layer2_burn_candidate.py` |
+| 2 | Burn Candidate | Time-series pressure curve optimization + thermal protection seeds | `layers/layer2_pressure.py` (optional: `layers/layer2_burn_candidate.py`) |
 | 3 | Thermal Sizing | Final ablative/graphite thickness optimization | `layers/layer3_thermal_protection.py` |
 | 4 | Flight Validation | RocketPy trajectory simulation, tank fill iteration | `layers/layer4_flight_simulation.py` |
 
@@ -109,6 +124,7 @@ EngineDesign/
 │   │   ├── cea_cache.py         # CEA thermochemistry caching
 │   │   ├── io.py                # Config loading/saving
 │   │   ├── time_varying_solver.py
+│   │   ├── coupled_optimizer.py # Layer 0: Coupled pintle+chamber optimizer
 │   │   ├── thermal/             # Thermal protection models
 │   │   │   ├── ablative_cooling.py
 │   │   │   ├── graphite_cooling.py
@@ -117,18 +133,48 @@ EngineDesign/
 │   │       ├── analysis.py
 │   │       └── coupling.py
 │   │
-│   └── optimizer/               # Optimization layers
-│       ├── main_optimizer.py    # Main orchestrator
-│       ├── layers/              # Individual layer implementations
-│       └── views/               # UI components for optimizer
+│   ├── optimizer/               # Optimization layers
+│   │   ├── main_optimizer.py    # Main orchestrator
+│   │   ├── layers/              # Individual layer implementations
+│   │   │   ├── layer1_static_optimization.py
+│   │   │   ├── layer2_pressure.py
+│   │   │   ├── layer3_thermal_protection.py
+│   │   │   └── layer4_flight_simulation.py
+│   │   └── views/               # UI components for optimizer
+│   │
+│   └── control/                 # Control system
+│       └── robust_ddp/          # Robust DDP controller
+│           ├── controller.py    # Main controller
+│           ├── ddp_solver.py    # DDP optimization
+│           ├── dynamics.py      # System dynamics
+│           └── constraints.py   # Safety constraints
 │
-├── ui/                          # Streamlit UI
-│   ├── app.py                   # Main entry point
+├── backend/                     # FastAPI backend
+│   ├── main.py                  # FastAPI application entry point
+│   ├── state.py                 # Application state management
+│   └── routers/                  # API route handlers
+│       ├── config.py            # Configuration endpoints
+│       ├── evaluate.py          # Engine evaluation endpoints
+│       ├── timeseries.py        # Time-series analysis endpoints
+│       ├── flight.py            # Flight simulation endpoints
+│       ├── geometry.py          # Geometry endpoints
+│       ├── optimizer.py         # Optimization endpoints
+│       └── control.py           # Control system endpoints
+│
+├── frontend/                    # React + Vite frontend
+│   ├── src/                     # React source code
+│   ├── package.json             # Node.js dependencies
+│   └── vite.config.ts           # Vite configuration
+│
+├── ui/                          # Streamlit UI components (legacy/integration)
+│   ├── design_optimization_view.py
 │   ├── flight_sim.py            # Flight simulation
-│   └── flight_visuals.py        # Visualization helpers
+│   ├── flight_visuals.py        # Visualization helpers
+│   └── interactive_pipeline.py  # Interactive pipeline
 │
 ├── copv/                        # COPV pressure calculations
 │   ├── copv_solve.py
+│   ├── blowdown_solver.py       # Coupled blowdown simulation
 │   └── n2_Z_lookup.csv
 │
 ├── configs/                     # Configuration files
@@ -140,14 +186,28 @@ EngineDesign/
 │   └── cache/                   # CEA cache files
 │
 ├── docs/                        # Documentation
-│   ├── pipeline_status.md
-│   └── quick_reference.md
+│   ├── pipeline_status.md       # Implementation status
+│   ├── quick_reference.md      # Quick reference guide
+│   ├── layer_requirements.md    # Layer interface requirements
+│   ├── optimizer_readme.md      # Optimizer documentation
+│   ├── optimization_layers_readme.md
+│   └── control/                 # Control system documentation
+│       ├── README.md
+│       ├── DDP_SOLVER.md
+│       └── CONTROLLER_SUMMARY.md
 │
 ├── scripts/                     # Utility scripts
 │   ├── simple_example.py
-│   └── run_full_pipeline.py
+│   ├── run_full_pipeline.py
+│   └── pressure_sweep.py
 │
+├── tests/                       # Test suite
+│   └── control/                 # Control system tests
+│
+├── dev.sh                       # Development startup script
 ├── README.md
+├── QUICKSTART.md                # Quick start guide
+├── STARTUP_GUIDE.md             # Detailed startup instructions
 ├── requirements.txt
 └── .gitignore
 ```
@@ -156,11 +216,35 @@ EngineDesign/
 
 ### Installation
 
+**Python Backend:**
 ```bash
 pip install -r requirements.txt
 ```
 
-**Dependencies:** numpy, scipy, pandas, matplotlib, pydantic, PyYAML, rocketcea, rocketpy, streamlit, plotly, ezdxf, cma
+**Frontend (Optional, for web UI):**
+```bash
+cd frontend
+npm install
+```
+
+**Dependencies:** numpy, scipy, pandas, matplotlib, pydantic, PyYAML, rocketcea, rocketpy, streamlit, plotly, ezdxf, cma, CoolProp, fastapi, uvicorn, python-multipart
+
+**Frontend Dependencies:** Node.js and npm required. See `frontend/package.json` for React/Vite dependencies.
+
+### Running the Application
+
+**Option 1: Development Script (Recommended)**
+```bash
+./dev.sh
+```
+This automatically starts both backend and frontend. See `STARTUP_GUIDE.md` for details.
+
+**Option 2: Manual Startup**
+- Backend: `uvicorn backend.main:app --reload --port 8000`
+- Frontend: `cd frontend && npm run dev`
+
+**Option 3: Python API Only**
+You can use the engine directly via Python without the web interface.
 
 ### Basic Usage
 
@@ -187,18 +271,42 @@ print(f"Mass Flow: {results['mdot_total']:.3f} kg/s")
 print(f"Mixture Ratio: {results['MR']:.2f}")
 ```
 
-### Run the UI
+### Run the Application
 
+The project includes both a **FastAPI backend** and **React frontend** for interactive engine design and optimization.
+
+**Quick Start (Recommended):**
 ```bash
-streamlit run ui/app.py
+./dev.sh
+```
+This starts both backend (http://localhost:8000) and frontend (http://localhost:5173) automatically.
+
+**Manual Startup:**
+
+Backend (FastAPI):
+```bash
+uvicorn backend.main:app --reload --port 8000
 ```
 
-The Streamlit UI provides:
+Frontend (React + Vite):
+```bash
+cd frontend
+npm install  # First time only
+npm run dev
+```
+
+Then open http://localhost:5173 in your browser.
+
+**Alternative: Streamlit UI (Legacy)**
+The `ui/` directory contains Streamlit components that can be integrated into custom applications. See `QUICKSTART.md` and `STARTUP_GUIDE.md` for detailed setup instructions.
+
+The web application provides:
 - Forward solver: Tank pressures → Performance
 - Inverse solvers: Target thrust/O/F → Required tank pressures
 - Full engine optimizer with multi-layer pipeline
 - Time-series analysis and visualization
 - Export optimized configurations
+- Robust DDP control system integration
 
 ### Example Scripts
 
@@ -212,6 +320,10 @@ python scripts/simple_example.py
 # Pressure sweep (2D grid)
 python scripts/pressure_sweep.py
 ```
+
+**For more detailed setup instructions, see:**
+- `QUICKSTART.md` - Quick start guide for backend/frontend
+- `STARTUP_GUIDE.md` - Detailed startup instructions and troubleshooting
 
 ## Configuration
 
@@ -256,6 +368,42 @@ graphite_insert:
   ...
 ```
 
+## Key Features
+
+### Robust DDP Control System
+
+The project includes a robust Differential Dynamic Programming (DDP) controller for real-time engine control and optimization. Located in `engine/control/robust_ddp/`, this system provides:
+
+- **Real-time control**: Optimal control trajectories for tank pressures
+- **Safety constraints**: Hard constraints on chamber pressure, mixture ratio, and stability
+- **Robustness**: Handles model uncertainty and disturbances
+- **Feedforward + Feedback**: Combined control strategy for optimal performance
+
+See `docs/control/` for detailed documentation on the control system architecture and usage.
+
+### Backend API
+
+The FastAPI backend (`backend/main.py`) provides RESTful endpoints for:
+
+- Engine evaluation and performance analysis
+- Time-series pressure curve generation
+- Flight simulation integration
+- Geometry optimization
+- Control system integration
+- Configuration management
+
+API documentation available at http://localhost:8000/docs when the backend is running.
+
+### Frontend Application
+
+The React frontend (`frontend/`) provides an interactive web interface for:
+
+- Real-time engine performance visualization
+- Interactive parameter adjustment
+- Optimization progress monitoring
+- Results export and analysis
+- Control system visualization
+
 ## Key Physics
 
 ### Chamber Solver
@@ -287,6 +435,21 @@ L*-based: `η_c* = 1 - C × e^(-K×L*)`
 ## Related Documentation
 
 See the `docs/` folder for additional documentation:
+
+**Core Documentation:**
 - `docs/pipeline_status.md` - Detailed implementation status
 - `docs/layer_requirements.md` - Layer interface requirements
 - `docs/quick_reference.md` - Quick reference guide
+- `docs/optimizer_readme.md` - Optimizer architecture and usage
+- `docs/optimization_layers_readme.md` - Layer structure and responsibilities
+
+**Control System Documentation:**
+- `docs/control/README.md` - Control system overview
+- `docs/control/DDP_SOLVER.md` - DDP solver implementation
+- `docs/control/CONTROLLER_SUMMARY.md` - Controller architecture
+- `docs/control/CONSTRAINTS.md` - Safety constraints
+- `docs/control/ROBUSTNESS.md` - Robustness features
+
+**Additional Guides:**
+- `QUICKSTART.md` - Quick start for backend/frontend
+- `STARTUP_GUIDE.md` - Detailed startup and troubleshooting
