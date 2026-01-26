@@ -37,9 +37,8 @@ flowchart TB
     end
 
     subgraph optimizer [Optimization Layers]
-        L0["Layer 0: Geometry Pre-opt"]
         L1["Layer 1: Static Optimization"]
-        L2["Layer 2: Pressure Curves + Thermal"]
+        L2["Layer 2: Pressure Curves"]
         L3["Layer 3: Thermal Sizing"]
         L4["Layer 4: Flight Validation"]
     end
@@ -69,7 +68,6 @@ flowchart TB
     Runner --> Nozzle
     Runner --> Thermal
 
-    L0 --> L1
     L1 --> L2
     L2 --> L3
     L3 --> L4
@@ -87,13 +85,12 @@ flowchart TB
 
 ## Multi-Layer Optimization Pipeline
 
-The optimizer in `engine/optimizer/` runs 5 layers sequentially:
+The optimizer in `engine/optimizer/` runs 4 layers sequentially:
 
 | Layer | Name | Purpose | Key File |
 |-------|------|---------|----------|
-| 0 | Pre-Optimization | Coupled pintle + chamber geometry sizing | `engine/pipeline/coupled_optimizer.py` (`CoupledPintleChamberOptimizer`) |
 | 1 | Static Optimization | Geometry + initial pressure curves, static hot-fire validation | `layers/layer1_static_optimization.py` |
-| 2 | Burn Candidate | Time-series pressure curve optimization + thermal protection seeds | `layers/layer2_pressure.py` (optional: `layers/layer2_burn_candidate.py`) |
+| 2 | Pressure Curves | Time-series pressure curve optimization | `layers/layer2_pressure.py` |
 | 3 | Thermal Sizing | Final ablative/graphite thickness optimization | `layers/layer3_thermal_protection.py` |
 | 4 | Flight Validation | RocketPy trajectory simulation, tank fill iteration | `layers/layer4_flight_simulation.py` |
 
@@ -124,7 +121,6 @@ EngineDesign/
 │   │   ├── cea_cache.py         # CEA thermochemistry caching
 │   │   ├── io.py                # Config loading/saving
 │   │   ├── time_varying_solver.py
-│   │   ├── coupled_optimizer.py # Layer 0: Coupled pintle+chamber optimizer
 │   │   ├── thermal/             # Thermal protection models
 │   │   │   ├── ablative_cooling.py
 │   │   │   ├── graphite_cooling.py
@@ -165,12 +161,6 @@ EngineDesign/
 │   ├── src/                     # React source code
 │   ├── package.json             # Node.js dependencies
 │   └── vite.config.ts           # Vite configuration
-│
-├── ui/                          # Streamlit UI components (legacy/integration)
-│   ├── design_optimization_view.py
-│   ├── flight_sim.py            # Flight simulation
-│   ├── flight_visuals.py        # Visualization helpers
-│   └── interactive_pipeline.py  # Interactive pipeline
 │
 ├── copv/                        # COPV pressure calculations
 │   ├── copv_solve.py
@@ -227,24 +217,37 @@ cd frontend
 npm install
 ```
 
-**Dependencies:** numpy, scipy, pandas, matplotlib, pydantic, PyYAML, rocketcea, rocketpy, streamlit, plotly, ezdxf, cma, CoolProp, fastapi, uvicorn, python-multipart
+**Dependencies:** numpy, scipy, pandas, matplotlib, pydantic, PyYAML, rocketcea, rocketpy, plotly, ezdxf, cma, CoolProp, fastapi, uvicorn, python-multipart
 
 **Frontend Dependencies:** Node.js and npm required. See `frontend/package.json` for React/Vite dependencies.
 
 ### Running the Application
 
-**Option 1: Development Script (Recommended)**
+**Recommended: Development Script**
 ```bash
 ./dev.sh
 ```
-This automatically starts both backend and frontend. See `STARTUP_GUIDE.md` for details.
+This automatically starts both the FastAPI backend (http://localhost:8000) and React frontend (http://localhost:5173). The frontend provides an interactive web interface for engine design and optimization. See `STARTUP_GUIDE.md` for details and troubleshooting.
 
-**Option 2: Manual Startup**
-- Backend: `uvicorn backend.main:app --reload --port 8000`
-- Frontend: `cd frontend && npm run dev`
+**Manual Startup (Alternative)**
+If you prefer to start services manually:
 
-**Option 3: Python API Only**
-You can use the engine directly via Python without the web interface.
+Backend (FastAPI):
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+Frontend (React + Vite) - in a separate terminal:
+```bash
+cd frontend
+npm install  # First time only
+npm run dev
+```
+
+Then open http://localhost:5173 in your browser.
+
+**Python API Only**
+You can also use the engine directly via Python without the web interface (see Basic Usage below).
 
 ### Basic Usage
 
@@ -271,42 +274,17 @@ print(f"Mass Flow: {results['mdot_total']:.3f} kg/s")
 print(f"Mixture Ratio: {results['MR']:.2f}")
 ```
 
-### Run the Application
+### Web Application Features
 
-The project includes both a **FastAPI backend** and **React frontend** for interactive engine design and optimization.
+The React frontend (started via `./dev.sh`) provides an interactive web interface with:
 
-**Quick Start (Recommended):**
-```bash
-./dev.sh
-```
-This starts both backend (http://localhost:8000) and frontend (http://localhost:5173) automatically.
-
-**Manual Startup:**
-
-Backend (FastAPI):
-```bash
-uvicorn backend.main:app --reload --port 8000
-```
-
-Frontend (React + Vite):
-```bash
-cd frontend
-npm install  # First time only
-npm run dev
-```
-
-Then open http://localhost:5173 in your browser.
-
-**Alternative: Streamlit UI (Legacy)**
-The `ui/` directory contains Streamlit components that can be integrated into custom applications. See `QUICKSTART.md` and `STARTUP_GUIDE.md` for detailed setup instructions.
-
-The web application provides:
 - Forward solver: Tank pressures → Performance
 - Inverse solvers: Target thrust/O/F → Required tank pressures
 - Full engine optimizer with multi-layer pipeline
 - Time-series analysis and visualization
 - Export optimized configurations
 - Robust DDP control system integration
+- Real-time performance monitoring
 
 ### Example Scripts
 
