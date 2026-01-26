@@ -824,7 +824,8 @@ async def simulate_layer2_controller_stream(request: Layer2ControllerSimulateReq
                 yield f"data: {safe_json_dumps({'type': 'error', 'error': 'Thrust curve is empty'})}\n\n"
                 return
             if len(time_array) != len(thrust_curve):
-                yield f"data: {safe_json_dumps({'type': 'error', 'error': f'Time array length ({len(time_array)}) doesn\'t match thrust curve length ({len(thrust_curve)})'})}\n\n"
+                error_msg = f"Time array length ({len(time_array)}) doesn't match thrust curve length ({len(thrust_curve)})"
+                yield f"data: {safe_json_dumps({'type': 'error', 'error': error_msg})}\n\n"
                 return
             
             duration = float(time_array[-1])
