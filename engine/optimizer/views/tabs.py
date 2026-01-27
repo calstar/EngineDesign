@@ -710,6 +710,34 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
 def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRunner]) -> PintleEngineConfig:
     """Full engine optimization tab - optimizes both pintle injector and chamber together."""
     st.subheader("🚀 Full Engine Optimizer")
+    
+    if runner is None:
+        st.warning("⚠️ Runner not available. Please load configuration first.")
+        return config_obj
+    
+    # Get design requirements
+    requirements = st.session_state.get("design_requirements", {})
+    if not requirements:
+        st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
+        return config_obj
+    
+    # Create subtabs for Optimization and Flight Simulation
+    subtab_optimize, subtab_flight = st.tabs([
+        "⚙️ Engine Optimization",
+        "✈️ Flight Simulation"
+    ])
+    
+    with subtab_optimize:
+        config_obj = _optimizer_subtab_content(config_obj, runner, requirements)
+    
+    with subtab_flight:
+        config_obj = _layer4_tab(config_obj, runner)
+    
+    return config_obj
+
+
+def _optimizer_subtab_content(config_obj: PintleEngineConfig, runner: PintleEngineRunner, requirements: Dict[str, Any]) -> PintleEngineConfig:
+    """Content for the Engine Optimization subtab."""
     st.markdown("""
     **Complete engine optimization** that jointly sizes:
     - **Pintle injector**: orifice count, diameters, gap height, tip diameter
@@ -723,16 +751,6 @@ def _full_engine_optimization_tab(config_obj: PintleEngineConfig, runner: Option
     
     *Note: Orifice angle is fixed at 90° (perpendicular to longitudinal axis) for optimal impingement.*
     """)
-    
-    if runner is None:
-        st.warning("⚠️ Runner not available. Please load configuration first.")
-        return config_obj
-    
-    # Get design requirements
-    requirements = st.session_state.get("design_requirements", {})
-    if not requirements:
-        st.warning("⚠️ Please set design requirements in the 'Design Requirements' tab first.")
-        return config_obj
     
     # Display current design requirements summary
     st.markdown("### 📋 Current Design Requirements")
@@ -4107,10 +4125,6 @@ def _layer4_tab(config_obj: PintleEngineConfig, runner: Optional[PintleEngineRun
             except Exception as layer4_export_exc:
                 st.warning(f"Could not create Layer 4 YAML export: {layer4_export_exc}")
     else:
-        st.info("💡 Layer 4 has not been run yet. Click 'Run Layer 4 with Fake Data' above to test with generated pressure curves.")
+        st.info("💡 Layer 4 has not been run yet. Click 'Run Layer 4 Flight Simulation' above to test with generated pressure curves.")
     
     return config_obj
-
-
-
-

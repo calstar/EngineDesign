@@ -15,6 +15,27 @@ router = APIRouter(prefix="/api/flight", tags=["flight"])
 PSI_TO_PA = 6894.76
 PA_TO_PSI = 1.0 / PSI_TO_PA
 
+# Fluid densities for propellant mass capping (kg/m³)
+LOX_DENSITY = 1141.0  # Liquid oxygen at boiling point
+RP1_DENSITY = 820.0   # RP-1 kerosene
+
+
+def calculate_tank_capacity(height: float, radius: float, density: float, fill_factor: float = 0.95) -> float:
+    """Calculate max propellant mass for a cylindrical tank.
+    
+    Args:
+        height: Tank height in meters
+        radius: Tank radius in meters
+        density: Fluid density in kg/m³
+        fill_factor: Fill factor (default 95% to avoid overfill)
+    
+    Returns:
+        Maximum propellant mass in kg
+    """
+    import math
+    volume = math.pi * radius ** 2 * height
+    return volume * density * fill_factor
+
 
 def convert_numpy(obj):
     """Recursively convert numpy types to Python native types."""
@@ -317,6 +338,60 @@ async def simulate_flight(request: FlightSimRequest):
         
         # Build flight config from base config + request overrides
         config_dict = build_flight_config(app_state.config, request)
+        
+        # Validate and cap propellant masses to prevent tank overfill errors
+        # This ensures the propellant mass doesn't exceed tank volume capacity
+        # Use conservative 75% fill factor to avoid RocketPy's internal numerical precision issues
+        # (RocketPy's tank calculations can fail when liquid level approaches geometry bounds)
+        FILL_FACTOR = 0.75
+        mass_adjustments = {}
+        import math
+        
+        # Get tank dimensions - check both request and config_dict
+        lox_height = None
+        lox_radius = None
+        if request.lox_tank:
+            lox_height = request.lox_tank.height
+            lox_radius = request.lox_tank.radius
+        elif config_dict.get("lox_tank"):
+            lox_height = config_dict["lox_tank"].get("lox_h")
+            lox_radius = config_dict["lox_tank"].get("lox_radius")
+        
+        if lox_height and lox_radius and config_dict.get("lox_tank"):
+            # Calculate tank volume and max mass with conservative margin
+            lox_tank_volume = math.pi * lox_radius ** 2 * lox_height
+            lox_max = lox_tank_volume * LOX_DENSITY * FILL_FACTOR
+            current_lox = config_dict["lox_tank"].get("mass", 0)
+            if current_lox > lox_max:
+                mass_adjustments["lox"] = {
+                    "original": current_lox,
+                    "capped": lox_max,
+                    "tank_volume_m3": lox_tank_volume
+                }
+                config_dict["lox_tank"]["mass"] = lox_max
+                print(f"[Flight] Capped LOX mass: {current_lox:.2f} -> {lox_max:.2f} kg (tank vol: {lox_tank_volume*1000:.1f}L, 75% fill)")
+        
+        fuel_height = None
+        fuel_radius = None
+        if request.fuel_tank:
+            fuel_height = request.fuel_tank.height
+            fuel_radius = request.fuel_tank.radius
+        elif config_dict.get("fuel_tank"):
+            fuel_height = config_dict["fuel_tank"].get("rp1_h")
+            fuel_radius = config_dict["fuel_tank"].get("rp1_radius")
+        
+        if fuel_height and fuel_radius and config_dict.get("fuel_tank"):
+            fuel_tank_volume = math.pi * fuel_radius ** 2 * fuel_height
+            fuel_max = fuel_tank_volume * RP1_DENSITY * FILL_FACTOR
+            current_fuel = config_dict["fuel_tank"].get("mass", 0)
+            if current_fuel > fuel_max:
+                mass_adjustments["fuel"] = {
+                    "original": current_fuel,
+                    "capped": fuel_max,
+                    "tank_volume_m3": fuel_tank_volume
+                }
+                config_dict["fuel_tank"]["mass"] = fuel_max
+                print(f"[Flight] Capped Fuel mass: {current_fuel:.2f} -> {fuel_max:.2f} kg (tank vol: {fuel_tank_volume*1000:.1f}L, 75% fill)")
         
         # Use provided time-series arrays
         times = np.array(request.time_array)

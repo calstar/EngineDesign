@@ -313,7 +313,3 @@ def plot_nozzle_angles(save_path=None, show_plot=True):
         plt.close()
     
     return fig, ax
-
-
-print(lookup_angles(7.0, .8))
-print(lookup_angles_interp_bell(7.0, .8))

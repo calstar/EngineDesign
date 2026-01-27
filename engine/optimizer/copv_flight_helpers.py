@@ -218,6 +218,25 @@ def run_flight_simulation(
             "flight_obj": result.get("flight", None),
             "truncation_info": result.get("truncation_info", {}),  # Pass through truncation info
         }
+    except ValueError as e:
+        error_str = str(e)
+        # Translate RocketPy's internal Function domain error into a user-friendly message
+        if "must be within the domain of the Function" in error_str:
+            # This is a RocketPy internal error about function composition bounds
+            # Usually caused by tank fill levels exceeding geometry constraints
+            return {
+                "success": False,
+                "error": "Tank simulation error: propellant mass may exceed tank capacity. Try reducing LOX or fuel mass slightly.",
+                "apogee": 0,
+                "max_velocity": 0,
+            }
+        # For other ValueErrors, return the actual error
+        return {
+            "success": False,
+            "error": error_str,
+            "apogee": 0,
+            "max_velocity": 0,
+        }
     except Exception as e:
         return {
             "success": False,

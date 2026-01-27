@@ -286,13 +286,14 @@ def design_optimization_view(config_obj: PintleEngineConfig, runner: Optional[Pi
     """)
     
     # Create tabs for different optimization stages
-    tab_design, tab_full_engine, tab_layer1, tab_layer2, tab_layer3, tab_layer4 = st.tabs([
+    tab_design, tab_full_engine, tab_layer1, tab_layer2, tab_layer3, tab_layer4, tab_layer5 = st.tabs([
         "📋 Design Requirements",
         "🚀 Full Engine Optimizer",
         "🔧 Layer 1: Static Optimization",
         "⏱️ Layer 2: Pressure Candidate",
         "🔥 Layer 3: Thermal Protection",
-        "✈️ Layer 4: Flight Simulation"
+        "✈️ Layer 4: Flight Simulation",
+        "📊 Layer 5: Flight Analysis"
     ])
     
     with tab_design:
@@ -312,6 +313,9 @@ def design_optimization_view(config_obj: PintleEngineConfig, runner: Optional[Pi
     
     with tab_layer4:
         config_obj = _layer4_tab(config_obj, runner)
+    
+    with tab_layer5:
+        config_obj = _layer5_tab(config_obj, runner)
     
     return config_obj
 

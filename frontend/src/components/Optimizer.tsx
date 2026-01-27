@@ -3,6 +3,7 @@ import { DesignRequirements } from './DesignRequirements';
 import { Layer1Optimization } from './Layer1Optimization';
 import { Layer2Optimization } from './Layer2Optimization';
 import { Layer3Optimization } from './Layer3Optimization';
+import { Layer4Optimization } from './Layer4Optimization';
 import {
   saveDesignRequirements,
   getDesignRequirements
@@ -16,7 +17,7 @@ interface OptimizerProps {
   config: EngineConfig | null;
 }
 
-type SubTab = 'requirements' | 'layer1' | 'layer2' | 'layer3';
+type SubTab = 'requirements' | 'layer1' | 'layer2' | 'layer3' | 'layer4';
 
 export function Optimizer({ config }: OptimizerProps) {
   const [activeSubTab, setActiveSubTab] = useState<SubTab>('requirements');
@@ -119,6 +120,15 @@ export function Optimizer({ config }: OptimizerProps) {
         >
           🔥 Layer 3: Thermal Protection
         </button>
+        <button
+          onClick={() => setActiveSubTab('layer4')}
+          className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${activeSubTab === 'layer4'
+            ? 'border-cyan-500 text-cyan-400'
+            : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+            }`}
+        >
+          ✈️ Layer 4: Flight Simulation
+        </button>
       </nav>
 
       {/* Sub-tab Content - keep all mounted to preserve state */}
@@ -134,6 +144,9 @@ export function Optimizer({ config }: OptimizerProps) {
         </div>
         <div className={subTabPanelClass('layer3')}>
           <Layer3Optimization requirements={requirements} />
+        </div>
+        <div className={subTabPanelClass('layer4')}>
+          <Layer4Optimization requirements={requirements} />
         </div>
       </div>
     </div>
