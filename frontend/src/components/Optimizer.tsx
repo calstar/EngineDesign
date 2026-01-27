@@ -23,6 +23,9 @@ export function Optimizer({ config }: OptimizerProps) {
   const [requirements, setRequirements] = useState<DesignRequirementsType | null>(null);
   const [saveStatus, setSaveStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
+  // Keep all sub-tab panels mounted; hide inactive ones to preserve state
+  const subTabPanelClass = (tab: SubTab) => (activeSubTab === tab ? '' : 'hidden');
+
   // Load requirements on mount
   useEffect(() => {
     loadRequirements();
@@ -118,20 +121,20 @@ export function Optimizer({ config }: OptimizerProps) {
         </button>
       </nav>
 
-      {/* Sub-tab Content */}
+      {/* Sub-tab Content - keep all mounted to preserve state */}
       <div className="mt-6">
-        {activeSubTab === 'requirements' && (
+        <div className={subTabPanelClass('requirements')}>
           <DesignRequirements config={config} onSave={handleSave} />
-        )}
-        {activeSubTab === 'layer1' && (
+        </div>
+        <div className={subTabPanelClass('layer1')}>
           <Layer1Optimization requirements={requirements} />
-        )}
-        {activeSubTab === 'layer2' && (
+        </div>
+        <div className={subTabPanelClass('layer2')}>
           <Layer2Optimization requirements={requirements} />
-        )}
-        {activeSubTab === 'layer3' && (
+        </div>
+        <div className={subTabPanelClass('layer3')}>
           <Layer3Optimization requirements={requirements} />
-        )}
+        </div>
       </div>
     </div>
   );

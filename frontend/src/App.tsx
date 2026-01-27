@@ -7,16 +7,18 @@ import { CustomPlotter } from './components/CustomPlotter';
 import { FlightSimulation } from './components/FlightSimulation';
 import { ChamberGeometry } from './components/ChamberGeometry';
 import { Optimizer } from './components/Optimizer';
-import { ControllerMode } from './components/ControllerMode';
 import { getConfig, getHealth } from './api/client';
 import type { EngineConfig } from './api/client';
 
-type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'optimizer' | 'config' | 'controller';
+type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'optimizer' | 'config';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('forward');
   const [config, setConfig] = useState<EngineConfig | null>(null);
   const [isConnected, setIsConnected] = useState<boolean | null>(null);
+
+  // Keep all tab panels mounted; hide inactive ones to preserve state
+  const tabPanelClass = (tab: Tab) => (activeTab === tab ? '' : 'hidden');
 
   // Check backend health and load config on mount
   useEffect(() => {
@@ -138,16 +140,6 @@ function App() {
               Optimizer
             </button>
             <button
-              onClick={() => setActiveTab('controller')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'controller'
-                  ? 'border-indigo-500 text-indigo-400'
-                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
-            >
-              Controller
-            </button>
-            <button
               onClick={() => setActiveTab('config')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === 'config'
@@ -178,7 +170,8 @@ function App() {
           </div>
         )}
 
-        {activeTab === 'forward' && (
+        {/* Keep all tab panels mounted; hide inactive ones to preserve state */}
+        <div className={tabPanelClass('forward')}>
           <div className="space-y-6">
             {!config && (
               <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -188,9 +181,9 @@ function App() {
             )}
             <ForwardMode config={config} />
           </div>
-        )}
+        </div>
 
-        {activeTab === 'timeseries' && (
+        <div className={tabPanelClass('timeseries')}>
           <div className="space-y-6">
             {!config && (
               <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -200,13 +193,13 @@ function App() {
             )}
             <TimeSeriesMode config={config} onConfigLoaded={handleConfigLoaded} />
           </div>
-        )}
+        </div>
 
-        {activeTab === 'plotter' && (
+        <div className={tabPanelClass('plotter')}>
           <CustomPlotter />
-        )}
+        </div>
 
-        {activeTab === 'flight' && (
+        <div className={tabPanelClass('flight')}>
           <div className="space-y-6">
             {!config && (
               <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -216,9 +209,9 @@ function App() {
             )}
             <FlightSimulation config={config} />
           </div>
-        )}
+        </div>
 
-        {activeTab === 'geometry' && (
+        <div className={tabPanelClass('geometry')}>
           <div className="space-y-6">
             {!config && (
               <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -228,9 +221,9 @@ function App() {
             )}
             <ChamberGeometry config={config} />
           </div>
-        )}
+        </div>
 
-        {activeTab === 'optimizer' && (
+        <div className={tabPanelClass('optimizer')}>
           <div className="space-y-6">
             {!config && (
               <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -240,21 +233,9 @@ function App() {
             )}
             <Optimizer config={config} />
           </div>
-        )}
+        </div>
 
-        {activeTab === 'controller' && (
-          <div className="space-y-6">
-            {!config && (
-              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
-                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
-                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
-              </div>
-            )}
-            <ControllerMode config={config} />
-          </div>
-        )}
-
-        {activeTab === 'config' && (
+        <div className={tabPanelClass('config')}>
           <div className="space-y-6">
             {/* Upload section - compact */}
             <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -278,7 +259,7 @@ function App() {
               <ConfigEditor config={config} onConfigUpdated={handleConfigLoaded} />
             </div>
           </div>
-        )}
+        </div>
       </main>
 
       {/* Footer */}
