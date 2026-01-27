@@ -113,17 +113,17 @@ def calculate_local_recession_rate(
     return float(recession_rate)
 
 
-def calculate_throat_recession_multiplier(
+def calculate_throat_heuristic_multiplier(
     chamber_pressure: float,
     chamber_velocity: float,
     throat_velocity: float,
     chamber_heat_flux: float,
     gamma: float = 1.2,
-    D_chamber: float = None,  # FIXED: Add missing parameter
-    D_throat: float = None,  # FIXED: Add missing parameter
+    D_chamber: float = None,
+    D_throat: float = None,
 ) -> float:
     """
-    Calculate throat recession multiplier based on local flow conditions.
+    Calculate throat recession multiplier based on local flow conditions using heuristic scaling.
     
     Throat recession is typically 1.2-2.0x higher than chamber due to:
     1. Higher velocity → Higher convective heat transfer
@@ -131,9 +131,14 @@ def calculate_throat_recession_multiplier(
     3. Pressure gradient → Enhanced mass transfer
     4. Turbulence amplification near throat
     
-    Uses Bartz correlation for heat flux ratio:
-        q_throat / q_chamber ∝ (V_throat / V_chamber)^0.8 × (P_throat / P_chamber)^0.2
+    Heuristic scaling for heat flux ratio:
+        q_throat / q_chamber ∝ (V_throat / V_chamber)^1.0 × (P_throat / P_chamber)^0.1
     
+    WARNING: This is not a formal Bartz correlation. Real throat heat transfer depends on 
+    geometry (D_t, curvature), viscosity/Pr, and boundary layer state. If 
+    heat_transfer_coefficient at the throat is already available from a CFD or 
+    boundary-layer code, this heuristic multiplier should not be used.
+
     Parameters:
     -----------
     chamber_pressure : float
@@ -146,6 +151,10 @@ def calculate_throat_recession_multiplier(
         Chamber wall heat flux [W/m²]
     gamma : float
         Specific heat ratio
+    D_chamber : float
+        Chamber diameter [m]
+    D_throat : float
+        Throat diameter [m]
     
     Returns:
     --------
@@ -290,9 +299,9 @@ def update_chamber_geometry_from_ablation(
     else:
         # Use multiplier if throat recession not explicitly provided
         if throat_recession_multiplier is None:
-            # CRITICAL FIX: Remove arbitrary 1.3 - use physics-based default from calculate_throat_recession_multiplier
+            # CRITICAL FIX: Remove arbitrary 1.3 - use physics-based default from calculate_throat_heuristic_multiplier
             # This should be calculated from flow conditions, not hardcoded
-            throat_recession_multiplier = 1.5  # Physics-based default (matches calculate_throat_recession_multiplier default)
+            throat_recession_multiplier = 1.5  # Physics-based default (matches calculate_throat_heuristic_multiplier default)
         effective_recession_throat = effective_recession_chamber * throat_recession_multiplier
     
     # Update chamber diameter and volume

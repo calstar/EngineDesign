@@ -1128,7 +1128,6 @@ async def run_layer3(
                 except Exception as e:
                     # Fallback summary if calculation fails
                     print(f"Error calculating Layer 3 summary: {e}")
-                    import traceback
                     traceback.print_exc()
                     
                     summary = {

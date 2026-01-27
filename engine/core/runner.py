@@ -17,12 +17,11 @@ from engine.core.chamber_profiles import (
 from engine.pipeline.thermal.ablative_geometry import (
     update_chamber_geometry_from_ablation,
     update_nozzle_exit_from_ablation,
-    calculate_throat_recession_multiplier as calculate_ablative_throat_recession_multiplier,
     calculate_local_recession_rate,
 )
 from engine.pipeline.thermal.graphite_cooling import (
     compute_graphite_recession,
-    calculate_throat_recession_multiplier,
+    calculate_throat_heuristic_multiplier,
 )
 from engine.pipeline.constants import DEFAULT_GAMMA_ND
 
@@ -751,6 +750,13 @@ class PintleEngineRunner:
                 
                 return results
             except Exception as e:
+                # STRICT MODE: if graphite insert is enabled, do NOT silently fall back.
+                # The legacy solver does not have enough information to run the strict
+                # graphite oxidation model without hidden defaults.
+                graphite_cfg = getattr(self.config, "graphite_insert", None)
+                if graphite_cfg is not None and getattr(graphite_cfg, "enabled", False):
+                    raise
+
                 import warnings
                 warnings.warn(f"Fully-coupled solver failed: {e}. Falling back to standard solver.")
                 # Fall through to standard solver
@@ -948,6 +954,22 @@ class PintleEngineRunner:
                     
                     # Throat recession (from graphite insert if enabled, else from ablator)
                     if use_graphite_throat:
+                        # Check for simplified mode
+                        simplified_mode = getattr(graphite_cfg, "simplified_graphite_oxidation", False)
+                        
+                        if not simplified_mode:
+                            # STRICT MODE NOTE:
+                            # The graphite oxidation model no longer assumes hidden defaults for gas properties
+                            # (oxygen mass fraction, viscosity, backside temperature, etc.). The legacy
+                            # runner time-march path does not have enough information to supply these
+                            # quantities consistently. Use the fully-coupled solver path instead.
+                            raise ValueError(
+                                "Graphite throat oxidation is running in strict mode and requires explicit gas/thermal inputs "
+                                "(e.g., oxygen_mass_fraction, hot-gas viscosity, backside temperature, etc.). "
+                                "Please run with use_coupled_solver=True (fully-coupled time-varying solver) or set "
+                                "'simplified_graphite_oxidation: true' in your graphite_insert config."
+                            )
+
                         # Use graphite insert properties for throat recession
                         Pc = point_results["Pc"]
                         Tc = point_results["Tc"]
@@ -957,14 +979,14 @@ class PintleEngineRunner:
                         chamber_heat_flux = ablative_diag.get("incident_heat_flux", 1e6) if ablative_diag.get("enabled", False) else 1e6
                         
                         # Estimate throat heat flux (higher than chamber due to sonic conditions)
-                        # Use Bartz correlation multiplier
+                        # Use heuristic multiplier scaling
                         gamma = point_results.get("gamma", DEFAULT_GAMMA_ND)
-                        throat_heat_flux_mult = calculate_throat_recession_multiplier(
+                        throat_heat_flux_mult = calculate_throat_heuristic_multiplier(
                             Pc, 50.0, 1000.0, chamber_heat_flux, gamma  # Approximate velocities
                         )
                         throat_heat_flux = chamber_heat_flux * throat_heat_flux_mult
                         
-                        # Calculate graphite recession rate
+                        # Calculate graphite recession rate (passing dummy values for unused strict inputs in simplified mode)
                         graphite_results = compute_graphite_recession(
                             net_heat_flux=throat_heat_flux,
                             throat_temperature=Tc * 0.85,  # Approximate throat temperature
@@ -972,6 +994,14 @@ class PintleEngineRunner:
                             graphite_config=graphite_cfg,
                             throat_area=cg.A_throat,
                             pressure=Pc,
+                            gas_density=1.0,  # Placeholder
+                            gas_viscosity=4e-5,  # Placeholder
+                            oxygen_mass_fraction=0.0,  # Placeholder
+                            characteristic_length=0.01,  # Placeholder
+                            gas_velocity=1000.0,  # Placeholder
+                            heat_transfer_coefficient=1000.0,  # Placeholder
+                            backside_temperature=300.0,  # Placeholder
+                            effective_thickness=0.01,  # Placeholder
                         )
                         
                         # CRITICAL FIX: For cumulative recession tracking (diagnostics), use recession_rate_calculated
@@ -1015,7 +1045,7 @@ class PintleEngineRunner:
                             # Heat flux (from cooling diagnostics)
                             chamber_heat_flux = ablative_diag.get("incident_heat_flux", 1e6)
                             
-                            throat_mult = calculate_throat_recession_multiplier(
+                            throat_mult = calculate_throat_heuristic_multiplier(
                                 Pc, v_chamber, v_throat, chamber_heat_flux, gamma
                             )
                         

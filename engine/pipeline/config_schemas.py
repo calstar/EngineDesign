@@ -186,7 +186,9 @@ class GraphiteInsertConfig(BaseModel):
     activation_energy: Optional[float] = Field(default=180e3, gt=0, description="Activation energy for Arrhenius oxidation rate [J/mol]. Typical: 150-200 kJ/mol")
     oxidation_reference_temperature: float = Field(default=1500.0, gt=0, description="Reference temperature where oxidation_rate is defined [K]. Typical: 1500-1800 K")
     oxidation_reference_pressure: float = Field(default=1.0e6, gt=0, description="Reference pressure where oxidation_rate is defined [Pa]. Typical: 1 MPa")
-    recession_multiplier: Optional[float] = Field(default=None, gt=0, description="Recession multiplier vs chamber (if None, calculated from Bartz correlation). Typically 1.3-2.5")
+    recession_multiplier: Optional[float] = Field(default=None, gt=0, description="Recession multiplier vs chamber (if None, calculated from flow conditions). Typically 1.3-2.5")
+    sizing_only_mode: bool = Field(default=False, description="If True, suppress recession for sizing iterations. Graphite does recede in reality; use only for design phase.")
+    simplified_graphite_oxidation: bool = Field(default=False, description="If True, use a constant 0.01 mm/s radial oxidation recession rate instead of the physics-based model.")
     char_layer_conductivity: float = Field(default=5.0, gt=0, description="Thermal conductivity of protective layer [W/(m·K)]")
     char_layer_thickness: float = Field(default=0.0005, gt=0, description="Thickness of protective layer [m]")
     coverage_fraction: float = Field(default=1.0, gt=0, le=1.0, description="Fraction of throat/nozzle with graphite insert")
@@ -196,10 +198,27 @@ class GraphiteInsertConfig(BaseModel):
     feedback_fraction_max: Optional[float] = Field(default=None, ge=0, le=1, description="Maximum oxidation heat feedback fraction (default: 0.2)")
     oxidation_enthalpy: Optional[float] = Field(default=None, gt=0, description="Oxidation reaction enthalpy [J/kg C]. If None, auto-selected: 32.8e6 for CO2 (ratio=1.0), 10.1e6 for CO (ratio=2.0)")
     ablation_surface_temperature: Optional[float] = Field(default=None, gt=0, description="Surface temperature at which thermal ablation pins T_s [K] (default: 3000 K). Above this, T_s is fixed and m_dot_th balances energy.")
+    ablation_transition_width: float = Field(default=200.0, gt=0, description="Temperature width [K] for smooth transition to thermal ablation regime.")
     oxidation_pressure_exponent: Optional[float] = Field(default=None, ge=0, description="Pressure exponent for oxidation kinetics (default: 0.5)")
     oxidation_pre_exponential: Optional[float] = Field(default=None, gt=0, description="Pre-exponential factor for Arrhenius oxidation (default: calculated from oxidation_rate)")
     mixture_mw: Optional[float] = Field(default=None, gt=0, description="Average molecular weight of combustion products [kg/mol] (default: 0.024)")
     oxidation_stoichiometry_ratio: Optional[float] = Field(default=None, gt=0, description="Moles of C per mole of O2 (1.0 for CO2, 2.0 for CO) (default: 1.0)")
+    oxygen_mass_fraction: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Free-stream oxygen mass fraction at throat for oxidation model [-].",
+    )
+    oxygen_mole_fraction: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=1,
+        description="Free-stream oxygen mole fraction at throat. If provided, overrides oxygen_mass_fraction conversion.",
+    )
+    friction_coefficient_override: Optional[float] = Field(default=None, gt=0, description="Override skin friction coefficient Cf for blowing parameter calculation.")
+    reference_diffusivity: Optional[float] = Field(default=None, gt=0, description="Reference O2 diffusivity [m²/s] at reference temperature and pressure.")
+    reference_diffusivity_temperature: float = Field(default=1500.0, gt=0, description="Reference temperature [K] for oxygen diffusivity scaling.")
+    reference_diffusivity_pressure: float = Field(default=1.0e6, gt=0, description="Reference pressure [Pa] for oxygen diffusivity scaling.")
 
 
 class StainlessSteelCaseConfig(BaseModel):
