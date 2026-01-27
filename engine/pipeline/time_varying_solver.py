@@ -100,6 +100,9 @@ class TimeVaryingState:
     heat_flux_throat: float  # [W/m²]
     ablative_recession_rate: float  # [m/s]
     graphite_recession_rate: float  # [m/s]
+    # Throat recession breakdown (graphite model)
+    throat_oxidation_recession_rate: float  # [m/s]
+    throat_ablation_recession_rate: float  # [m/s] (thermal/sublimation component)
     
     # Chamber intrinsics (TIME-VARYING - these change as geometry evolves)
     mach_number: float  # Chamber Mach number (should change over time, not hardcoded)
@@ -400,7 +403,7 @@ class TimeVaryingCoupledSolver:
         else:
             recession_rate_ablative = 0.0
         
-        # Calculate graphite recession rate
+        # Calculate graphite recession rate (and breakdown for diagnostics)
         graphite_cfg = getattr(self.config, 'graphite_insert', None)
         if graphite_cfg and graphite_cfg.enabled:
             graphite_response = compute_graphite_recession(
@@ -412,8 +415,13 @@ class TimeVaryingCoupledSolver:
                 pressure=Pc,
             )
             recession_rate_graphite = graphite_response["recession_rate"]
+            throat_oxidation_rate = float(graphite_response.get("oxidation_rate", 0.0) or 0.0)
+            # "recession_rate_thermal" is the thermal/sublimation component in compute_graphite_recession()
+            throat_ablation_rate = float(graphite_response.get("recession_rate_thermal", 0.0) or 0.0)
         else:
             recession_rate_graphite = 0.0
+            throat_oxidation_rate = 0.0
+            throat_ablation_rate = 0.0
         
         # Calculate throat recession multiplier (physics-based)
         if ablative_cfg.enabled and ablative_cfg.throat_recession_multiplier is None:
@@ -966,6 +974,8 @@ class TimeVaryingCoupledSolver:
             heat_flux_throat=heat_flux_throat,
             ablative_recession_rate=recession_rate_ablative,
             graphite_recession_rate=recession_rate_graphite,
+            throat_oxidation_recession_rate=throat_oxidation_rate,
+            throat_ablation_recession_rate=throat_ablation_rate,
             T_ablative_surface=T_ablative_surface,
             T_stainless_chamber=T_stainless_chamber,
             T_graphite_surface=T_graphite_surface,
@@ -1079,6 +1089,8 @@ class TimeVaryingCoupledSolver:
             "heat_flux_throat": np.array([s.heat_flux_throat for s in self.state_history]),
             "ablative_recession_rate": np.array([s.ablative_recession_rate for s in self.state_history]),
             "graphite_recession_rate": np.array([s.graphite_recession_rate for s in self.state_history]),
+            "throat_oxidation_recession_rate": np.array([s.throat_oxidation_recession_rate for s in self.state_history]),
+            "throat_ablation_recession_rate": np.array([s.throat_ablation_recession_rate for s in self.state_history]),
             # CRITICAL: Add time-varying chamber intrinsics (these change over time!)
             "mach_number": np.array([s.mach_number for s in self.state_history]),  # TIME-VARYING - not hardcoded
             "eta_cstar": np.array([s.eta_cstar for s in self.state_history]),  # TIME-VARYING n* - changes with L*

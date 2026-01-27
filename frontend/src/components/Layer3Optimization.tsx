@@ -734,6 +734,40 @@ export function Layer3Optimization({ requirements }: Layer3OptimizationProps) {
                             </div>
                         </div>
 
+                        {/* Throat Recession Rate Breakdown (Oxidation vs Ablation) */}
+                        <div className="grid grid-cols-1 gap-6">
+                            <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+                                <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4 flex items-center gap-2">
+                                    <span className="text-red-400">🧪</span> Throat Recession Rate Breakdown
+                                </h3>
+                                <p className="text-sm text-[var(--color-text-secondary)] mb-4">
+                                    Diagnostic split of throat recession rate into <strong>oxidation</strong> and <strong>thermal ablation</strong>.
+                                </p>
+                                <div className="h-[300px] w-full">
+                                    <ResponsiveContainer width="100%" height="100%">
+                                        <LineChart
+                                            data={results.time_array.map((t, i) => ({
+                                                time: t,
+                                                oxidation: (results.performance.throat_oxidation_recession_rate?.[i] || 0) * 1000,
+                                                ablation: (results.performance.throat_ablation_recession_rate?.[i] || 0) * 1000,
+                                                total: (results.performance.graphite_recession_rate?.[i] || 0) * 1000,
+                                            }))}
+                                            margin={{ top: 5, right: 20, left: 10, bottom: 5 }}
+                                        >
+                                            <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.3} />
+                                            <XAxis dataKey="time" unit="s" stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} />
+                                            <YAxis stroke="var(--color-text-secondary)" tick={{ fontSize: 12 }} label={{ value: 'Rate (mm/s)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }} />
+                                            <Tooltip contentStyle={{ backgroundColor: 'var(--color-bg-primary)', border: '1px solid var(--color-border)', borderRadius: '8px' }} />
+                                            <Legend />
+                                            <Line type="monotone" dataKey="oxidation" name="Oxidation" stroke="#f97316" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line type="monotone" dataKey="ablation" name="Thermal Ablation" stroke="#ef4444" strokeWidth={2} dot={false} isAnimationActive={false} />
+                                            <Line type="monotone" dataKey="total" name="Total (Graphite Model)" stroke="#a855f7" strokeWidth={2} dot={false} strokeDasharray="5 5" isAnimationActive={false} />
+                                        </LineChart>
+                                    </ResponsiveContainer>
+                                </div>
+                            </div>
+                        </div>
+
                         {/* Areas & Contraction Ratio */}
                         <div className="grid grid-cols-1 gap-6">
                             <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">

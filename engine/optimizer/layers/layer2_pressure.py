@@ -801,6 +801,10 @@ def run_layer2_pressure(
     }
     
     def layer2_callback(xk):
+        # Determine which optimizer phase we're in ("DE" or "local").
+        # NOTE: SciPy callbacks only receive xk, so we persist phase in layer2_state.
+        phase = layer2_state.get("phase", "local")
+
         # Check if stop was requested
         if stop_event is not None and stop_event.is_set():
             layer2_state["converged"] = True
@@ -1053,6 +1057,9 @@ def run_layer2_pressure(
                 `n_time_points` defined above.
             phase: Short label for logging (e.g., "DE" or "local").
         """
+        # Persist phase for any external callbacks (SciPy callback only gets xk).
+        layer2_state["phase"] = phase
+
         # Check if stop was requested before starting evaluation
         if stop_event is not None and stop_event.is_set():
             # User requested stop - return best objective found so far to signal convergence
