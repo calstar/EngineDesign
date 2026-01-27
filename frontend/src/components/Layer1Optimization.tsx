@@ -722,6 +722,12 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                 decimals={3}
                 color="indigo"
               />
+              <ResultCard
+                label="Choked Flow Verified?"
+                value={results.performance.chamber_intrinsics?.is_choked === true ? 'Yes' : results.performance.chamber_intrinsics?.is_choked === false ? 'No' : '—'}
+                isText={true}
+                color={results.performance.chamber_intrinsics?.is_choked === true ? 'green' : results.performance.chamber_intrinsics?.is_choked === false ? 'red' : 'blue'}
+              />
             </div>
           </div>
 

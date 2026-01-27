@@ -5,7 +5,7 @@
  * from the Python engine - keeping consistency with the Streamlit UI.
  */
 
-const API_BASE = '/api';
+export const API_BASE = '/api';
 
 interface ApiResponse<T> {
   data?: T;
@@ -123,6 +123,9 @@ export interface RunnerResults {
     reynolds_number?: number; // Reynolds number
     density?: number;         // Gas density [kg/m³]
     sound_speed?: number;     // Sound speed [m/s]
+    is_choked?: boolean;      // Whether flow is choked (P_back/Pc <= critical ratio)
+    critical_pressure_ratio?: number; // Critical P_back/Pc for choking
+    actual_pressure_ratio?: number;   // Actual P_back/Pc ratio
   } | null;
 
   // Injector pressure diagnostics
@@ -723,6 +726,12 @@ export interface Layer1Results {
     failure_reasons?: string[];
 
     // Additional fields
+    chamber_intrinsics?: {
+      is_choked?: boolean;
+      critical_pressure_ratio?: number;
+      actual_pressure_ratio?: number;
+      [key: string]: unknown;
+    };
     [key: string]: unknown;
   };
   validation: Record<string, unknown>;
@@ -963,6 +972,248 @@ export function runLayer2Optimization(
   };
 
   return eventSource;
+}
+
+// ============================================================================
+// Controller API
+// ============================================================================
+
+export interface MeasurementRequest {
+  P_copv: number;
+  P_reg: number;
+  P_u_fuel: number;
+  P_u_ox: number;
+  P_d_fuel: number;
+  P_d_ox: number;
+}
+
+export interface NavStateRequest {
+  h: number;
+  vz: number;
+  theta?: number;
+  mass_estimate?: number;
+}
+
+export interface CommandRequest {
+  command_type: 'thrust_desired' | 'altitude_goal';
+  thrust_desired?: number;
+  altitude_goal?: number;
+}
+
+export interface ControllerInitRequest {
+  controller_config_path?: string;
+}
+
+export interface ControllerSimulateRequest {
+  initial_meas: MeasurementRequest;
+  initial_nav: NavStateRequest;
+  cmd: CommandRequest;
+  duration: number;
+  dt?: number;
+  thrust_curve?: number[];
+  time_array?: number[];
+  controller_config_path?: string;
+}
+
+export interface ControllerSimulateResponse {
+  time: number[];
+  thrust_ref: number[];
+  thrust_actual: number[];
+  MR: number[];
+  P_copv: number[];
+  P_reg: number[];
+  P_u_fuel: number[];
+  P_u_ox: number[];
+  P_d_fuel: number[];
+  P_d_ox: number[];
+  P_ch: number[];
+  duty_F: number[];
+  duty_O: number[];
+  altitude: number[];
+  velocity: number[];
+  value_function: number[];
+  control_effort: number[];
+  V_u_fuel: number[];
+  V_u_ox: number[];
+  mdot_F: number[];
+  mdot_O: number[];
+  w_bar: number[][];
+  constraint_margins: Record<string, number>[];
+}
+
+export interface ControllerStatusResponse {
+  initialized: boolean;
+  tick?: number;
+  state?: Record<string, any>;
+}
+
+export async function initController(
+  requestData: ControllerInitRequest
+): Promise<ApiResponse<{ status: string; config: any }>> {
+  return request<{ status: string; config: any }>('/control/init', {
+    method: 'POST',
+    body: JSON.stringify(requestData),
+  });
+}
+
+export async function simulateController(
+  requestData: ControllerSimulateRequest
+): Promise<ApiResponse<ControllerSimulateResponse>> {
+  return request<ControllerSimulateResponse>('/control/simulate', {
+    method: 'POST',
+    body: JSON.stringify(requestData),
+  });
+}
+
+export async function resetController(): Promise<ApiResponse<{ status: string }>> {
+  return request<{ status: string }>('/control/reset', {
+    method: 'POST',
+  });
+}
+
+export async function getControllerStatus(): Promise<ApiResponse<ControllerStatusResponse>> {
+  return request<ControllerStatusResponse>('/control/status');
+}
+
+// ============================================================================
+// Layer 2 Controller Simulation Types and API
+// ============================================================================
+
+export interface Layer2ControllerSimulateRequest {
+  thrust_curve_time: number[];
+  thrust_curve_values: number[];
+  dt?: number;
+}
+
+export interface Layer2ControllerSimulateResponse {
+  time: number[];
+  thrust_ref: number[];
+  thrust_actual: number[];
+  MR: number[];
+  P_copv: number[];
+  P_reg: number[];
+  P_u_fuel: number[];
+  P_u_ox: number[];
+  P_d_fuel: number[];
+  P_d_ox: number[];
+  P_ch: number[];
+  duty_F: number[];
+  duty_O: number[];
+  altitude: number[];
+  velocity: number[];
+  value_function: number[];
+  control_effort: number[];
+  V_u_fuel: number[];
+  V_u_ox: number[];
+  mdot_F: number[];
+  mdot_O: number[];
+  w_bar: number[][];
+  constraint_margins: Record<string, number>[];
+}
+
+export interface ControllerStreamEvent {
+  type: 'status' | 'progress' | 'data' | 'complete' | 'error';
+  progress?: number;
+  stage?: string;
+  message?: string;
+  error?: string;
+  // Data fields (when type='data')
+  time?: number;
+  thrust_ref?: number;
+  thrust_actual?: number;
+  MR?: number;
+  P_copv?: number;
+  P_reg?: number;
+  P_u_fuel?: number;
+  P_u_ox?: number;
+  P_d_fuel?: number;
+  P_d_ox?: number;
+  P_ch?: number;
+  duty_F?: number;
+  duty_O?: number;
+  altitude?: number;
+  velocity?: number;
+  value_function?: number;
+  control_effort?: number;
+  V_u_fuel?: number;
+  V_u_ox?: number;
+  mdot_F?: number;
+  mdot_O?: number;
+  w_bar?: number[];
+  constraint_margins?: Record<string, number>;
+}
+
+/**
+ * Non-streaming controller simulation for Layer 2.
+ */
+export async function simulateLayer2Controller(
+  requestData: Layer2ControllerSimulateRequest
+): Promise<ApiResponse<Layer2ControllerSimulateResponse>> {
+  return request<Layer2ControllerSimulateResponse>('/control/simulate-layer2', {
+    method: 'POST',
+    body: JSON.stringify(requestData),
+  });
+}
+
+/**
+ * Streaming controller simulation (SSE-like via fetch/ReadableStream) for Layer 2.
+ */
+export function simulateLayer2ControllerStream(
+  requestData: Layer2ControllerSimulateRequest,
+  onEvent: (event: ControllerStreamEvent) => void,
+  onError?: (error: string) => void
+): AbortController {
+  const abortController = new AbortController();
+
+  fetch(`${API_BASE}/control/simulate-layer2-stream`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestData),
+    signal: abortController.signal,
+  })
+    .then(async (response) => {
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Response body is not readable');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              onEvent(data);
+            } catch (e) {
+              console.error('Error parsing stream event:', e);
+            }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name === 'AbortError') return;
+      console.error('Stream error:', err);
+      if (onError) onError(err.message);
+    });
+
+  return abortController;
 }
 
 // ============================================================================

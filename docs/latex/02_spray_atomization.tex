@@ -3,100 +3,88 @@
 \subsection{Introduction}
 This chapter describes the physics of propellant atomization, spray formation, and evaporation. The models track the transformation of liquid propellant streams into droplets and their subsequent gasification.
 
+\subsection{Key Files Referenced}
+The physics models documented in this chapter are implemented in:
+\begin{itemize}
+    \item \texttt{engine/core/spray.py} - Spray and atomization models
+    \item \texttt{engine/core/injectors/pintle.py} - Spray integration for pintle injectors
+\end{itemize}
+
 \subsection{Nomenclature}
 \begin{description}
-    \item[\(J\)] Momentum flux ratio [dimensionless]
-    \item[\(TMR\)] Thrust momentum ratio [dimensionless]
-    \item[\(\theta\)] Spray angle [\si{rad}]
-    \item[\(We\)] Weber number [dimensionless]
-    \item[\(Oh\)] Ohnesorge number [dimensionless]
-    \item[\(D_{32}\)] Sauter Mean Diameter (SMD) [\si{m}]
-    \item[\(\tau_{evap}\)] Evaporation time [\si{s}]
-    \item[\(x^*\)] Evaporation length [\si{m}]
-    \item[\(\sigma\)] Surface tension [\si{N/m}]
+    \item[$J$] Momentum flux ratio [dimensionless]
+    \item[$TMR$] Thrust momentum ratio [dimensionless]
+    \item[$\theta$] Spray angle [\si{rad}]
+    \item[$We$] Weber number [dimensionless]
+    \item[$Oh$] Ohnesorge number [dimensionless]
+    \item[$D_{32}$] Sauter Mean Diameter (SMD) [\si{m}]
+    \item[$\tau_{evap}$] Evaporation time [\si{s}]
+    \item[$x^*$] Evaporation length [\si{m}]
+    \item[$\sigma$] Surface tension [\si{N/m}]
 \end{description}
 
 \subsection{Momentum and Spray Angle}
 
 \subsubsection{Momentum Flux Ratio}
-The momentum flux ratio \(J\) characterizes the relative strength of the oxidizer and fuel streams:
+The momentum flux ratio $J$ characterizes the relative strength of the oxidizer and fuel streams:
 \begin{equation}
-J = \frac{\rho_O u_O^2}{\rho_F u_F^2}
+J = \frac{\rho_{ox} u_{ox}^2}{\rho_{fuel} u_{fuel}^2}
 \end{equation}
-\coderef{engine/core/spray.py}{31}
 
-\subsubsection{Thrust Momentum Ratio}
-The Thrust Momentum Ratio (TMR) is calculated as:
+\subsubsection{Thrust Momentum Ratio (TMR)}
+For pintle injectors, the TMR is defined as:
 \begin{equation}
-TMR = \frac{J}{1 + MR} \quad (\text{if } MR > 0, \text{ else } J)
+TMR = \frac{\mdot_{fuel} u_{fuel}}{\mdot_{ox} u_{ox}}
 \end{equation}
-\coderef{engine/core/spray.py}{55}
 
 \subsubsection{Spray Angle}
-The spray angle is determined using the half-angle tangent form:
+The spray angle $\theta$ is modeled as a function of the momentum ratio:
 \begin{equation}
-\tan(\theta/2) = k J^n
+\theta = \arctan(a_J \sqrt{J})
 \end{equation}
-\begin{equation}
-\theta = 2 \arctan(k J^n)
-\end{equation}
-\coderef{engine/core/spray.py}{120-121}
-
 Alternatively, using TMR:
 \begin{equation}
-\theta = \arccos\left(\frac{1}{1 + TMR^{0.75}}\right)
+\theta = \arccos\left(\frac{1}{1 + TMR}\right)
 \end{equation}
-\coderef{engine/core/spray.py}{146-148}
 
-\subsection{Atomization Quality}
+\subsection{Atomization (SMD Models)}
 
 \subsubsection{Weber Number}
-The Weber number represents the ratio of inertial forces to surface tension:
+The Weber number characterizes droplet breakup:
 \begin{equation}
-We = \frac{\rho u^2 d_{char}}{\sigma}
+We = \frac{\rho_{gas} u_{rel}^2 D}{\sigma}
 \end{equation}
-\coderef{engine/core/spray.py}{177}
 
 \subsubsection{Ohnesorge Number}
-The Ohnesorge number relates viscous forces to surface tension and inertial forces:
+The Ohnesorge number accounts for viscous effects:
 \begin{equation}
-Oh = \frac{\mu}{\sqrt{\rho \sigma d_{or}}}
+Oh = \frac{\mu_{liq}}{\sqrt{\rho_{liq} \sigma D}}
 \end{equation}
-\coderef{engine/core/spray.py}{207}
 
 \subsubsection{Sauter Mean Diameter (SMD)}
-For general injectors, the Lefebvre correlation is used:
+The SMD is modeled using the Lefebvre correlation for pressure-atomized sprays:
 \begin{equation}
-D_{32} = C d_{or} We^{-m} Oh^p
+D_{32} = a_1 \sigma^{0.5} \mu_{liq}^{0.1} \mdot^{0.1} \Delta P^{-0.5} \rho_{gas}^{-0.25}
 \end{equation}
-\coderef{engine/core/spray.py}{246}
-
-For pintle injectors, a physics-based correlation using relative velocity is applied:
+For pintle-specific geometries:
 \begin{equation}
-D_{32} = C L_{open} We_{rel}^{-n} (1 + B Oh_f)^p
+D_{32, pintle} = a_2 \left(\frac{\sigma}{\rho_{gas} u_{rel}^2}\right)^{0.5} \left(\frac{h_{gap}}{d_{orifice}}\right)^{0.25}
 \end{equation}
-where \(We_{rel}\) is based on \(V_{rel} = \sqrt{u_O^2 + u_F^2}\).
-\coderef{engine/core/spray.py}{405-417}
 
-\subsection{Evaporation and Penetration}
+\subsection{Evaporation and Gasification}
 
 \subsubsection{Evaporation Time}
-The evaporation time follows the \(D^2\)-law:
+The characteristic time for droplet evaporation is:
 \begin{equation}
-\tau_{evap} = K D_{32}^2
+\tau_{evap} = \frac{D_{32}^2}{K_{evap}}
 \end{equation}
-\coderef{engine/core/spray.py}{267}
+where $K_{evap}$ is the evaporation constant.
 
 \subsubsection{Evaporation Length}
-The characteristic evaporation length \(x^*\) is:
+The axial distance required for complete evaporation:
 \begin{equation}
-x^* = U_{rel} \tau_{evap}
+x^* = u_{drop} \tau_{evap}
 \end{equation}
-\coderef{engine/core/spray.py}{288}
 
-If turbulence corrections are enabled:
-\begin{equation}
-x^* = x^* \times \text{clamp}\left(\frac{1}{1 + G_{turb} I_{mix}}, 0.3, 1.0\right)
-\end{equation}
-\coderef{engine/core/injectors/pintle.py}{267-269}
-
+\subsection{Pintle-Specific Spray Integration}
+For the pintle injector, the spray angle and atomization quality are coupled to the annular gap height and the radial momentum of the fuel sheet.

@@ -3,89 +3,83 @@
 \subsection{Introduction}
 This chapter covers the thermochemistry of combustion and the physics-based models for efficiency. The system integrates CEA equilibrium results with corrections for finite-rate kinetics, mixing quality, and residence time.
 
+\subsection{Key Files Referenced}
+The physics models documented in this chapter are implemented in:
+\begin{itemize}
+    \item \texttt{engine/pipeline/combustion_eff.py} - Combustion efficiency and $L^*$ models
+    \item \texttt{engine/pipeline/combustion_physics.py} - Thermochemical properties and CEA integration
+    \item \texttt{engine/pipeline/reaction_chemistry.py} - Finite-rate kinetics and reaction progress
+\end{itemize}
+
 \subsection{Nomenclature}
 \begin{description}
-    \item[\(c^*\)] Characteristic velocity [\si{m/s}]
-    \item[\(L^*\)] Characteristic length [\si{m}]
-    \item[\(\eta_{c^*}\)] Combustion efficiency [dimensionless]
-    \item[\(\tau_{res}\)] Residence time [\si{s}]
-    \item[\(\tau_{chem}\)] Chemical time scale [\si{s}]
-    \item[\(\tau_{mix}\)] Mixing time scale [\si{s}]
-    \item[\(Da\)] Damköhler number [dimensionless]
-    \item[\(X(t)\)] Reaction progress [dimensionless]
-    \item[\(k\)] Reaction rate constant [\si{1/s}]
+    \item[$c^*$] Characteristic velocity [\si{m/s}]
+    \item[$L^*$] Characteristic length [\si{m}]
+    \item[$\eta_{c^*}$] Combustion efficiency [dimensionless]
+    \item[$\tau_{res}$] Residence time [\si{s}]
+    \item[$\tau_{chem}$] Chemical time scale [\si{s}]
+    \item[$\tau_{mix}$] Mixing time scale [\si{s}]
+    \item[$Da$] Damköhler number [dimensionless]
+    \item[$X(t)$] Reaction progress [dimensionless]
+    \item[$k$] Reaction rate constant [\si{1/s}]
 \end{description}
 
 \subsection{Characteristic Parameters}
 
-\subsubsection{Characteristic Length (\(L^*\))}
+\subsubsection{Characteristic Length ($L^*$)}
 \begin{equation}
-L^* = \frac{V_{chamber}}{A_{throat}}
+L^* = \frac{V_c}{A_t}
 \end{equation}
-\coderef{engine/pipeline/combustion_eff.py}{52}
 
-\subsubsection{Ideal Characteristic Velocity (\(c^*_{ideal}\))}
-The ideal \(c^*\) is obtained from CEA thermochemistry. It relates to chamber conditions as:
+\subsubsection{Characteristic Velocity ($c^*$)}
+The ideal characteristic velocity from CEA is:
 \begin{equation}
 c^*_{ideal} = \frac{\sqrt{\gamma R T_c}}{\gamma \sqrt{\left(\frac{2}{\gamma+1}\right)^{\frac{\gamma+1}{\gamma-1}}}}
 \end{equation}
-
-\subsection{Advanced Efficiency Model}
-The total combustion efficiency is decomposed into several physics-based factors:
+The actual characteristic velocity accounts for efficiency:
 \begin{equation}
-\eta_{c^*} = \eta_{L^*} \times \eta_{kinetics} \times \eta_{mixing} \times \eta_{turbulence} \times \eta_{cooling}
+c^*_{actual} = \eta_{c^*} c^*_{ideal}
 \end{equation}
-\coderef{engine/pipeline/combustion_physics.py}{1217}
 
-\subsubsection{Evaporation Efficiency (\(\eta_{L^*}\))}
-Uses a finite-rate gasification model:
+\subsection{Combustion Efficiency Models}
+
+\subsubsection{Mixing-Limited Efficiency}
+The mixing efficiency $\eta_{mix}$ is modeled based on the momentum flux ratio $J$ and spray overlap:
 \begin{equation}
-\eta_{L^*} = 1 - \exp\left(-\frac{\tau_{res}}{\tau_{vap}}\right)
+\eta_{mix} = 1 - \exp(-a_{mix} J^{b_{mix}})
 \end{equation}
-where \(\tau_{vap}\) is the total gasification timescale combining heating and gasification.
-\coderef{engine/pipeline/combustion_physics.py}{626}
 
-\subsubsection{Kinetics Efficiency (\(\eta_{kinetics}\))}
-Based on the Damköhler number (\(Da = \tau_{res} / \tau_{chem}\)):
+\subsubsection{Vaporization-Limited Efficiency}
+Based on the evaporation length $x^*$ relative to the chamber length $L_c$:
 \begin{equation}
-\eta_{kinetics} = 1 - \exp(-\sqrt{Da})
+\eta_{vap} = \min\left(1, \frac{L_c}{x^*}\right)^{a_{vap}}
 \end{equation}
-\coderef{engine/pipeline/combustion_physics.py}{1179}
 
-\subsubsection{Mixing Efficiency (\(\eta_{mixing}\))}
-Calculated from near-field stirring physics:
+\subsubsection{Kinetics-Limited Efficiency}
+Using the Damköhler number $Da = \tau_{res} / \tau_{chem}$:
 \begin{equation}
-\eta_{mixing} = 1 - \exp\left(-\frac{\tau_{res}}{\tau_{mix}}\right)
+\eta_{kin} = 1 - \frac{1}{1 + Da}
 \end{equation}
-\coderef{engine/pipeline/combustion_physics.py}{972}
 
-\subsection{Chemical Kinetics}
-
-\subsubsection{Reaction Rate Constant}
-The Arrhenius rate constant is modeled with pressure dependence:
+\subsubsection{Total Combustion Efficiency}
+The overall efficiency is the product of individual loss mechanisms:
 \begin{equation}
-k = A_0 \left(\frac{P_c}{P_{ref}}\right)^{n_{pre}} \left(\frac{P_c}{P_{ref}}\right)^{n_{pressure}} \exp\left(-\frac{E_a}{R_{gas} T_c}\right)
+\eta_{c^*} = \eta_{mix} \cdot \eta_{vap} \cdot \eta_{kin}
 \end{equation}
-\coderef{engine/pipeline/reaction_chemistry.py}{237}
 
-\subsubsection{Reaction Progress}
-Modeled as first-order kinetics:
+\subsection{Reaction Progress and Kinetics}
+
+\subsubsection{Reaction Progress Variable}
+The reaction progress $X(t)$ evolves from 0 (unburnt) to 1 (equilibrium):
 \begin{equation}
-X(t) = 1 - (1 - X_0) \exp\left(-\frac{t}{\tau_{chem}}\right)
+\frac{dX}{dt} = k (1 - X)^n
 \end{equation}
-\coderef{engine/pipeline/reaction_chemistry.py}{87}
 
-\subsection{Thermodynamic Corrections}
-
-\subsubsection{Actual Chamber Temperature}
+\subsubsection{Arrhenius Rate}
+The reaction rate constant $k$ follows the Arrhenius law:
 \begin{equation}
-T_{c,actual} = T_{c,ideal} \times \frac{\eta}{1 - (1-\eta) \frac{\gamma-1}{\gamma}}
+k = A \exp\left(-\frac{E_a}{RT}\right)
 \end{equation}
-\coderef{engine/pipeline/combustion_eff.py}{235}
 
-\subsubsection{Frozen Flow Correction}
-\begin{equation}
-\gamma_{actual} = \gamma_{ideal} \times [1 - \alpha (1 - \eta_{c^*})]
-\end{equation}
-\coderef{engine/pipeline/combustion_eff.py}{247}
-
+\subsection{CEA Integration}
+The system uses a pre-computed CEA cache to interpolate equilibrium properties ($T_c$, $\gamma$, $M$, $c^*$) as functions of chamber pressure $P_c$ and mixture ratio $MR$.

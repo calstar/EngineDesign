@@ -327,6 +327,12 @@ export function ResultsDisplay({ results, isLoading, targetExitPressure }: Resul
             value={formatNumber(chamber?.mach_number_throat ?? null, 3)} 
             unit="" 
           />
+          <SmallMetric 
+            label="Choked Flow Verified?" 
+            value={chamber?.is_choked === true ? 'Yes' : chamber?.is_choked === false ? 'No' : '—'} 
+            unit="" 
+            colorClass={chamber?.is_choked === true ? 'text-green-400' : chamber?.is_choked === false ? 'text-red-400' : ''}
+          />
         </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <SmallMetric 
