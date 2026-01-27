@@ -46,6 +46,12 @@ class GeometryResponse(BaseModel):
     Cf_ideal: Optional[float] = None
     A_throat_solved: Optional[float] = None
     chamber_contour_method: Optional[str] = None  # "solved" or "cea_iterative"
+    # Optimized thicknesses from Layer 3 (if available)
+    t_abl_opt_mm: Optional[float] = None
+    t_gra_opt_mm: Optional[float] = None
+    # Baseline (config) thicknesses from ablative_cooling / graphite_insert
+    t_abl_config_mm: Optional[float] = None
+    t_gra_config_mm: Optional[float] = None
 
 
 @router.get("", response_model=GeometryResponse)
@@ -116,14 +122,14 @@ async def get_chamber_geometry():
             L_nozzle = (D_exit - D_throat) / (2 * np.tan(np.radians(15)))
         
         # Ablative config
-        ablative_cfg = None
+        ablative_cfg: AblativeCoolingConfig | None = None
         ablative_enabled = False
         if hasattr(config, 'ablative_cooling') and config.ablative_cooling:
             ablative_cfg = config.ablative_cooling
             ablative_enabled = getattr(ablative_cfg, 'enabled', False)
         
         # Graphite config
-        graphite_cfg = None
+        graphite_cfg: GraphiteInsertConfig | None = None
         graphite_enabled = False
         if hasattr(config, 'graphite_insert') and config.graphite_insert:
             graphite_cfg = config.graphite_insert
@@ -284,6 +290,36 @@ async def get_chamber_geometry():
             nozzle_y = []
             nozzle_method = f"fallback_conical (rao failed: {str(e)[:50]})"
         
+        # Get Layer 3 optimized thicknesses if available
+        t_abl_opt_mm: float | None = None
+        t_gra_opt_mm: float | None = None
+        
+        # Try to get results from optimizer router (which stores them in its global state)
+        from backend.routers.optimizer import _layer3_status
+        if _layer3_status.get("results") is not None:
+            l3_results = _layer3_status["results"]
+            summary = l3_results.get("summary", {})
+            t_abl_opt_mm = summary.get("optimized_ablative_thickness")
+            if t_abl_opt_mm is not None:
+                t_abl_opt_mm *= 1000.0  # Convert to mm
+            t_gra_opt_mm = summary.get("optimized_graphite_thickness")
+            if t_gra_opt_mm is not None:
+                t_gra_opt_mm *= 1000.0  # Convert to mm
+
+        # Baseline (config) thicknesses in mm, if available
+        t_abl_config_mm: float | None = None
+        t_gra_config_mm: float | None = None
+        if ablative_cfg is not None:
+            try:
+                t_abl_config_mm = float(getattr(ablative_cfg, "initial_thickness", 0.0)) * 1000.0
+            except Exception:
+                t_abl_config_mm = None
+        if graphite_cfg is not None:
+            try:
+                t_gra_config_mm = float(getattr(graphite_cfg, "initial_thickness", 0.0)) * 1000.0
+            except Exception:
+                t_gra_config_mm = None
+
         return GeometryResponse(
             positions=geometry["positions"].tolist(),
             R_gas=geometry["R_gas"].tolist(),
@@ -310,6 +346,10 @@ async def get_chamber_geometry():
             Cf_ideal=Cf_ideal_solved,
             A_throat_solved=A_throat_solved,
             chamber_contour_method=chamber_contour_method,
+            t_abl_opt_mm=t_abl_opt_mm,
+            t_gra_opt_mm=t_gra_opt_mm,
+            t_abl_config_mm=t_abl_config_mm,
+            t_gra_config_mm=t_gra_config_mm,
         )
         
     except Exception as e:

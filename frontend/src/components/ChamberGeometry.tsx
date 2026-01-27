@@ -13,6 +13,7 @@ import {
 import { getChamberGeometry } from '../api/client';
 import type { ChamberGeometryResponse, EngineConfig } from '../api/client';
 import { ChamberContourPlot } from './ChamberContourPlot';
+import { ChamberThermalGraphic } from './ChamberThermalGraphic';
 
 interface ChamberGeometryProps {
   config: EngineConfig | null;
@@ -383,6 +384,13 @@ export function ChamberGeometry({ config }: ChamberGeometryProps) {
           </ResponsiveContainer>
         </div>
       )}
+
+      {/* Thermal Thickness Graphic (Layer 3) */}
+      <ChamberThermalGraphic
+        geometry={geometry}
+        showLowerHalf={showLowerHalf}
+        onShowLowerHalfChange={setShowLowerHalf}
+      />
 
       {/* CEA-Solved Chamber Contour */}
       <ChamberContourPlot geometry={geometry} />
