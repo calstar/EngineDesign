@@ -544,19 +544,14 @@ class TimeVaryingCoupledSolver:
             recession_throat_new = recession_graphite_new
             
             # Update chamber volume (ablative recession still affects chamber)
-            # Initialize D_chamber_new based on current state
-            if previous_state is not None:
-                D_chamber_base = previous_state.D_chamber
-            else:
-                D_chamber_base = self.D_chamber_initial
-                
+            # Use INITIAL diameter as the reference and apply cumulative recession once.
             if ablative_cfg.enabled:
-                D_chamber_new = D_chamber_base + 2.0 * recession_chamber_new * ablative_cfg.coverage_fraction
+                D_chamber_new = self.D_chamber_initial + 2.0 * recession_chamber_new * ablative_cfg.coverage_fraction
                 V_chamber_new = np.pi * (D_chamber_new / 2.0) ** 2 * self.L_chamber
             else:
-                # No ablative - use previous volume (or initial if first step)
-                V_chamber_new = V_chamber  # This is the volume from previous_state or initial
-                D_chamber_new = D_chamber_base
+                # No ablative - keep previous volume/diameter (or initial if first step)
+                D_chamber_new = self.D_chamber_initial if previous_state is None else previous_state.D_chamber
+                V_chamber_new = V_chamber  # Volume carried over
         elif graphite_cfg and graphite_cfg.enabled and graphite_thickness_remaining <= 0:
             # Graphite insert fully consumed - now ablative recession affects throat area
             recession_graphite_new = recession_graphite  # No more graphite to erode
