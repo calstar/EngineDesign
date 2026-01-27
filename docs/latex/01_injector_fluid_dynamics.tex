@@ -1,0 +1,114 @@
+\section{Injector Fluid Dynamics}
+
+\subsection{Introduction}
+This chapter details the fluid dynamics models used for propellant injection. The core of the injection model is the orifice flow equation, supplemented by dynamic discharge coefficient models and feed system pressure loss calculations.
+
+\subsection{Nomenclature}
+\begin{description}
+    \item[\(\mdot\)] Mass flow rate [\si{kg/s}]
+    \item[\(C_d\)] Discharge coefficient [dimensionless]
+    \item[\(A\)] Flow area [\si{m^2}]
+    \item[\(\rho\)] Fluid density [\si{kg/m^3}]
+    \item[\(\Delta P\)] Pressure drop [\si{Pa}]
+    \item[\(Re\)] Reynolds number [dimensionless]
+    \item[\(u\)] Flow velocity [\si{m/s}]
+    \item[\(d_h\)] Hydraulic diameter [\si{m}]
+    \item[\(\mu\)] Dynamic viscosity [\si{Pa.s}]
+    \item[\(K_{eff}\)] Effective loss coefficient [dimensionless]
+\end{description}
+
+\subsection{Governing Equations}
+
+\subsubsection{Orifice Flow Equation}
+The fundamental equation for mass flow through an injector orifice is:
+\begin{equation}
+\mdot = C_d A \sqrt{2 \rho \Delta P}
+\end{equation}
+\coderef{engine/core/injectors/pintle.py}{162, 188}
+
+\subsubsection{Reynolds Number}
+The Reynolds number is calculated as:
+\begin{equation}
+Re = \frac{\rho u d_h}{\mu}
+\end{equation}
+\coderef{engine/core/discharge.py}{96}
+
+\subsection{Discharge Coefficient Models}
+
+\subsubsection{Base \(C_d(Re)\) Model}
+The discharge coefficient is modeled as a function of the Reynolds number:
+\begin{equation}
+C_d(Re) = C_{d,\infty} - \frac{a_{Re}}{\sqrt{\max(Re, 10^{-6})}}
+\end{equation}
+\coderef{engine/core/discharge.py}{47}
+
+\subsubsection{Pressure and Temperature Corrections}
+If enabled, the \(C_d\) is corrected for compressibility and viscosity effects:
+\begin{equation}
+C_d(P) = C_d(Re) \times \left[1 + a_P \left(\frac{P}{P_{ref}} - 1\right)\right]
+\end{equation}
+\coderef{engine/core/discharge.py}{52}
+
+\begin{equation}
+C_d(T) = C_d(Re) \times \left[1 + a_T \left(\frac{T}{T_{ref}} - 1\right)\right]
+\end{equation}
+\coderef{engine/core/discharge.py}{58}
+
+The final \(C_d\) is clamped:
+\begin{equation}
+C_d = \text{clamp}(C_d, C_{d,min}, C_{d,\infty})
+\end{equation}
+\coderef{engine/core/discharge.py}{62}
+
+\subsection{Feed System Pressure Losses}
+
+\subsubsection{Effective Loss Coefficient}
+The effective loss coefficient \(K_{eff}\) can be pressure-dependent:
+\begin{equation}
+K_{eff} = 
+\begin{cases} 
+K_0 & \text{if } \phi = \text{none} \\
+K_0 + K_1 \sqrt{\max(0, P_{tank})} & \text{if } \phi = \text{sqrtP} \\
+K_0 + K_1 \ln(P_{tank}) & \text{if } \phi = \text{logP}
+\end{cases}
+\end{equation}
+\coderef{engine/pipeline/feed_loss.py}{37-43}
+
+\subsubsection{Pressure Drop Calculation}
+The feed system pressure drop is calculated using the standard minor loss form:
+\begin{equation}
+\Delta P_{feed} = K_{eff} \frac{\rho}{2} u^2
+\end{equation}
+where \(u = \mdot / (\rho A_{area})\).
+\coderef{engine/pipeline/feed_loss.py}{82}
+
+\subsection{Injector-Specific Formulations}
+
+\subsubsection{Pintle Injector}
+For the pintle injector, the effective areas and hydraulic diameters are determined by the geometry (gap height, orifice diameters).
+\coderef{engine/core/injectors/pintle.py}{67-68}
+
+\subsubsection{Coaxial Injector}
+For the coaxial injector, the annulus area and hydraulic diameter are:
+\begin{equation}
+A_{annulus} = \frac{\pi}{4} (d_{outer}^2 - d_{inner}^2)
+\end{equation}
+\begin{equation}
+d_{h,annulus} = d_{outer} - d_{inner}
+\end{equation}
+where \(d_{outer} = d_{inner} + 2 h_{gap}\).
+\coderef{engine/core/injectors/coaxial.py}{30-36}
+
+The axial velocity is corrected for swirl:
+\begin{equation}
+u_F = \frac{u_{F,axial}}{\cos(\alpha_{swirl})}
+\end{equation}
+\coderef{engine/core/injectors/coaxial.py}{158}
+
+\subsubsection{Impinging Injector}
+The sheet velocity after impingement is calculated as the vector sum:
+\begin{equation}
+u_{sheet} = \sqrt{u_O^2 + u_F^2 - 2 u_O u_F \cos(\theta_{imp})}
+\end{equation}
+\coderef{engine/core/injectors/impinging.py}{168}
+

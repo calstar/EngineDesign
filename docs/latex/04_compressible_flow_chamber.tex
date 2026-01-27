@@ -1,0 +1,81 @@
+\section{Compressible Flow \& Chamber Pressure Solution}
+
+\subsection{Introduction}
+This chapter describes the physics of compressible flow within the rocket engine and the numerical algorithm used to solve for the steady-state chamber pressure. The core principle is the balance of mass flow supplied by the injectors and the mass flow demanded by the choked throat.
+
+\subsection{Nomenclature}
+\begin{description}
+    \item[\(P_c\)] Chamber pressure [\si{Pa}]
+    \item[\(\mdot_{supply}\)] Mass flow rate from injectors [\si{kg/s}]
+    \item[\(\mdot_{demand}\)] Mass flow rate through throat [\si{kg/s}]
+    \item[\(A^*\)] Throat area [\si{m^2}]
+    \item[\(\gamma\)] Specific heat ratio [dimensionless]
+    \item[\(R\)] Gas constant [\si{J/(kg.K)}]
+    \item[\(T_c\)] Chamber temperature [\si{K}]
+    \item[\(M\)] Mach number [dimensionless]
+\end{description}
+
+\subsection{Supply-Demand Balance}
+The steady-state chamber pressure \(P_c\) is found by solving the residual equation:
+\begin{equation}
+f(P_c) = \mdot_{supply}(P_c) - \mdot_{demand}(P_c) = 0
+\end{equation}
+\coderef{engine/core/chamber_solver.py}{209}
+
+\subsubsection{Supply Side}
+The supply mass flow \(\mdot_{supply}\) is the sum of oxidizer and fuel mass flows, which depend on the pressure drop across the injector:
+\begin{equation}
+\mdot_{supply} = \mdot_O(P_{tank,O} - P_c) + \mdot_F(P_{tank,F} - P_c)
+\end{equation}
+\coderef{engine/core/chamber_solver.py}{101}
+
+\subsubsection{Demand Side}
+The demand mass flow \(\mdot_{demand}\) is determined by the choked flow condition at the throat:
+\begin{equation}
+\mdot_{demand} = \frac{P_c A^*}{c^*}
+\end{equation}
+where \(c^*\) is the actual characteristic velocity accounting for efficiency.
+\coderef{engine/core/chamber_solver.py}{200}
+
+\subsection{Isentropic Flow Relations}
+
+\subsubsection{Throat Conditions}
+At the throat, the flow is always sonic (\(M=1.0\)). The critical ratios are:
+\begin{equation}
+\frac{P^*}{P_c} = \left( \frac{2}{\gamma+1} \right)^{\frac{\gamma}{\gamma-1}}
+\end{equation}
+\begin{equation}
+\frac{T^*}{T_c} = \frac{2}{\gamma+1}
+\end{equation}
+\coderef{engine/core/chamber_physics_fixed.py}{66, 71}
+
+The sonic velocity at the throat is:
+\begin{equation}
+a^* = \sqrt{\gamma R T^*}
+\end{equation}
+\coderef{engine/core/chamber_physics_fixed.py}{76}
+
+\subsubsection{General Isentropic Ratios}
+For any Mach number \(M\), the local properties are related to stagnation properties (\(P_c, T_c\)) by:
+\begin{equation}
+\frac{P}{P_c} = \left( 1 + \frac{\gamma-1}{2} M^2 \right)^{-\frac{\gamma}{\gamma-1}}
+\end{equation}
+\begin{equation}
+\frac{T}{T_c} = \left( 1 + \frac{\gamma-1}{2} M^2 \right)^{-1}
+\end{equation}
+\coderef{engine/core/chamber_physics_fixed.py}{274, 279}
+
+\subsection{Area-Mach Relation}
+The relationship between the local area \(A\) and the sonic throat area \(A^*\) is:
+\begin{equation}
+\frac{A}{A^*} = \frac{1}{M} \left[ \frac{2}{\gamma+1} \left( 1 + \frac{\gamma-1}{2} M^2 \right) \right]^{\frac{\gamma+1}{2(\gamma-1)}}
+\end{equation}
+\coderef{engine/core/mach_solver.py}{37}
+
+\subsection{Numerical Solution}
+The chamber pressure is solved using bracketed root-finding algorithms (e.g., Brent's method). The search space is bounded by:
+\begin{equation}
+P_{c,min} \le P_c \le \min(P_{tank,O}, P_{tank,F}) \times (1 - \text{margin})
+\end{equation}
+\coderef{engine/core/chamber_solver.py}{252}
+

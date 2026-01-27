@@ -417,6 +417,7 @@ class PintleEngineRunner:
             warnings.warn(f"Pressure profile calculation failed: {e}")
         
         # Calculate chamber intrinsics
+        # Pass ambient pressure (Pa) for choking check, or use 0.9 * 1 atm as fallback
         chamber_intrinsics = None
         try:
             chamber_intrinsics = calculate_chamber_intrinsics(
@@ -429,6 +430,7 @@ class PintleEngineRunner:
                 A_throat=cg.A_throat,
                 Lstar=current_Lstar,
                 MR=MR,
+                P_back=Pa,  # Pass ambient pressure for choking verification
             )
         except Exception as e:
             import traceback

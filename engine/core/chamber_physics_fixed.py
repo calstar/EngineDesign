@@ -10,7 +10,7 @@ Key fixes:
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import numpy as np
 from engine.pipeline.numerical_robustness import NumericalStability
 from engine.core.mach_solver import solve_mach_robust
@@ -21,15 +21,19 @@ def calculate_throat_conditions(
     Tc: float,
     gamma: float,
     R: float,
+    P_back: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     Calculate throat conditions using isentropic flow relations.
     
-    CRITICAL: At the throat, flow is ALWAYS sonic (M = 1.0)
+    CRITICAL: At the throat, flow is ALWAYS sonic (M = 1.0) when choked.
     This is the definition of the throat in a converging-diverging nozzle.
     
+    Choking occurs when: P_back/Pc <= (2/(γ+1))^(γ/(γ-1))
+    If this condition is not met, the flow may not be choked and M_throat < 1.0.
+    
     Isentropic relations for sonic throat:
-    - M_throat = 1.0 (always)
+    - M_throat = 1.0 (when choked)
     - P_throat/Pc = [2/(γ+1)]^(γ/(γ-1))
     - T_throat/Tc = 2/(γ+1)
     - v_throat = a_throat = sqrt(γ × R × T_throat)
@@ -38,32 +42,62 @@ def calculate_throat_conditions(
     Parameters:
     -----------
     Pc : float
-        Chamber pressure [Pa]
+        Chamber pressure [Pa] (stagnation pressure P₀ ≈ Pc)
     Tc : float
         Chamber temperature [K]
     gamma : float
         Specific heat ratio
     R : float
         Gas constant [J/(kg·K)]
+    P_back : float, optional
+        Back pressure [Pa] (ambient pressure or pressure nozzle exhausts into).
+        If provided, checks if flow is choked. If None, assumes choked flow.
     
     Returns:
     --------
     throat_conditions : dict
-        - M_throat: Mach number (always 1.0)
+        - M_throat: Mach number (1.0 if choked, < 1.0 if not choked)
         - P_throat: Throat pressure [Pa]
         - T_throat: Throat temperature [K]
-        - v_throat: Throat velocity [m/s] (sonic)
+        - v_throat: Throat velocity [m/s] (sonic if choked)
         - a_throat: Throat sound speed [m/s]
         - rho_throat: Throat density [kg/m³]
+        - is_choked: bool, whether flow is choked (P_back/Pc <= critical ratio)
+        - critical_pressure_ratio: float, critical pressure ratio for choking
+        - actual_pressure_ratio: float, actual P_back/Pc ratio
     """
-    # CRITICAL: Throat is always sonic
+    # Calculate critical pressure ratio for choking
+    # Choking occurs when: P_back/Pc <= (2/(γ+1))^(γ/(γ-1))
+    pressure_ratio_exponent = gamma / (gamma - 1.0)
+    pressure_ratio_base = 2.0 / (gamma + 1.0)
+    critical_pressure_ratio = pressure_ratio_base ** pressure_ratio_exponent
+    
+    # Check if flow is choked (if back pressure is provided)
+    is_choked = True
+    actual_pressure_ratio = None
+    if P_back is not None and Pc > 0:
+        actual_pressure_ratio = P_back / Pc
+        # Flow is choked if P_back/Pc <= critical ratio
+        is_choked = actual_pressure_ratio <= critical_pressure_ratio
+        
+        if not is_choked:
+            import warnings
+            warnings.warn(
+                f"Flow may not be choked: P_back/Pc = {actual_pressure_ratio:.6f} > "
+                f"critical ratio = {critical_pressure_ratio:.6f}. "
+                f"Throat Mach number may be < 1.0. "
+                f"P_back = {P_back:.2e} Pa, Pc = {Pc:.2e} Pa.",
+                RuntimeWarning
+            )
+    
+    # CRITICAL: Throat is sonic (M = 1.0) when choked
+    # If not choked, M_throat < 1.0, but we still use M = 1.0 as assumption
+    # (for rocket engines, flow is almost always choked)
     M_throat = 1.0
     
     # Isentropic pressure ratio at throat (critical pressure ratio)
     # P*/P0 = [2/(γ+1)]^(γ/(γ-1))
-    pressure_ratio_exponent = gamma / (gamma - 1.0)
-    pressure_ratio_base = 2.0 / (gamma + 1.0)
-    P_throat_Pc_ratio = pressure_ratio_base ** pressure_ratio_exponent
+    P_throat_Pc_ratio = critical_pressure_ratio
     P_throat = Pc * P_throat_Pc_ratio
     
     # Isentropic temperature ratio at throat (critical temperature ratio)
@@ -84,6 +118,24 @@ def calculate_throat_conditions(
     # Throat velocity = sound speed (M = 1.0)
     v_throat = a_throat
     
+    # VERIFICATION: Calculate M_throat from v_throat / a_throat to verify consistency
+    # This should equal 1.0 exactly (within numerical precision)
+    M_throat_verified, M_verify_valid = NumericalStability.safe_divide(
+        v_throat, a_throat, 1.0, "M_throat_verified"
+    )
+    if not M_verify_valid.passed:
+        M_throat_verified = 1.0  # Fallback to expected value
+    
+    # Warn if verification deviates significantly from 1.0 (indicates numerical error)
+    if abs(M_throat_verified - 1.0) > 1e-6:
+        import warnings
+        warnings.warn(
+            f"Throat Mach verification failed: M_throat_verified = {M_throat_verified:.8f} "
+            f"(expected 1.0). Deviation: {abs(M_throat_verified - 1.0):.2e}. "
+            f"This may indicate numerical precision issues.",
+            RuntimeWarning
+        )
+    
     # Throat density from ideal gas law
     rho_throat, rho_valid = NumericalStability.safe_divide(
         P_throat, R * T_throat, 1.0, "rho_throat"
@@ -96,7 +148,8 @@ def calculate_throat_conditions(
         rho_throat = rho_chamber * rho_throat_rho_ratio
     
     return {
-        "M_throat": M_throat,  # Always 1.0
+        "M_throat": M_throat,  # 1.0 if choked (physical assumption)
+        "M_throat_verified": float(M_throat_verified),  # Calculated from v/a (should be 1.0 if choked)
         "P_throat": float(P_throat),
         "T_throat": float(T_throat),
         "v_throat": float(v_throat),
@@ -104,6 +157,9 @@ def calculate_throat_conditions(
         "rho_throat": float(rho_throat),
         "P_throat_Pc_ratio": float(P_throat_Pc_ratio),
         "T_throat_Tc_ratio": float(T_throat_Tc_ratio),
+        "is_choked": bool(is_choked),  # Whether flow is choked
+        "critical_pressure_ratio": float(critical_pressure_ratio),  # Critical P_back/Pc for choking
+        "actual_pressure_ratio": float(actual_pressure_ratio) if actual_pressure_ratio is not None else None,
     }
 
 

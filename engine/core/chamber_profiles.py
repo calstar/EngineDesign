@@ -179,6 +179,7 @@ def calculate_chamber_intrinsics(
     A_throat: float,
     Lstar: float,
     MR: float,
+    P_back: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Calculate chamber intrinsic properties.
@@ -203,6 +204,9 @@ def calculate_chamber_intrinsics(
         Characteristic length [m]
     MR : float
         Mixture ratio
+    P_back : float, optional
+        Back pressure [Pa] (ambient pressure). If None, uses 0.9 * 101325 Pa as fallback.
+        Used to verify flow is choked at throat.
     
     Returns:
     --------
@@ -268,6 +272,56 @@ def calculate_chamber_intrinsics(
     else:
         velocity_throat = sound_speed  # Fallback
     
+    # Calculate throat sound speed for verification
+    T_throat = Tc * (2.0 / (gamma + 1.0))  # Critical temperature ratio
+    a_throat_squared = gamma * R * T_throat
+    a_throat, a_throat_valid = NumericalStability.safe_sqrt(a_throat_squared, "a_throat")
+    if not a_throat_valid.passed:
+        a_throat = sound_speed * np.sqrt(2.0 / (gamma + 1.0))  # Fallback
+    
+    # VERIFICATION: Calculate M_throat from v_throat / a_throat to verify consistency
+    # This should equal 1.0 exactly (within numerical precision)
+    M_throat_verified, M_verify_valid = NumericalStability.safe_divide(
+        velocity_throat, a_throat, 1.0, "M_throat_verified"
+    )
+    if not M_verify_valid.passed:
+        M_throat_verified = 1.0  # Fallback to expected value
+    
+    # Warn if verification deviates significantly from 1.0 (indicates numerical error)
+    if abs(M_throat_verified - 1.0) > 1e-6:
+        import warnings
+        warnings.warn(
+            f"Throat Mach verification failed: M_throat_verified = {M_throat_verified:.8f} "
+            f"(expected 1.0). Deviation: {abs(M_throat_verified - 1.0):.2e}. "
+            f"This may indicate numerical precision issues.",
+            RuntimeWarning
+        )
+    
+    # Check if flow is choked using pressure ratio criterion
+    # Choking occurs when: P_back/Pc <= (2/(γ+1))^(γ/(γ-1))
+    # Use provided P_back, or fallback to 0.9 * 1 atm if not provided
+    P_back_used = P_back if P_back is not None else 0.9 * 101325.0  # Fallback: 0.9 atm
+    pressure_ratio_exponent = gamma / (gamma - 1.0)
+    pressure_ratio_base = 2.0 / (gamma + 1.0)
+    critical_pressure_ratio = pressure_ratio_base ** pressure_ratio_exponent
+    
+    is_choked = True
+    actual_pressure_ratio = None
+    if Pc > 0:
+        actual_pressure_ratio = P_back_used / Pc
+        # Flow is choked if P_back/Pc <= critical ratio
+        is_choked = actual_pressure_ratio <= critical_pressure_ratio
+        
+        if not is_choked:
+            import warnings
+            warnings.warn(
+                f"Flow may not be choked: P_back/Pc = {actual_pressure_ratio:.6f} > "
+                f"critical ratio = {critical_pressure_ratio:.6f}. "
+                f"Throat Mach number may be < 1.0. "
+                f"P_back = {P_back_used:.2e} Pa, Pc = {Pc:.2e} Pa.",
+                RuntimeWarning
+            )
+    
     # CRITICAL: M_throat = 1.0 (always, by definition of throat)
     # This is NOT the chamber Mach number (which is subsonic)
     # This is NOT the exit Mach number (which is supersonic)
@@ -324,6 +378,10 @@ def calculate_chamber_intrinsics(
         "mach_number": float(mach_number),  # CHAMBER Mach number (subsonic, ~0.01-0.1)
         "mach_number_chamber": float(mach_number),  # Explicit: this is chamber Mach number
         "mach_number_throat": 1.0,  # Throat is always M = 1.0 (sonic) - by definition
+        "mach_number_throat_verified": float(M_throat_verified),  # Calculated from v/a (verification)
+        "is_choked": bool(is_choked),  # Whether flow is choked (P_back/Pc <= critical ratio)
+        "critical_pressure_ratio": float(critical_pressure_ratio),  # Critical P_back/Pc for choking
+        "actual_pressure_ratio": float(actual_pressure_ratio) if actual_pressure_ratio is not None else None,
         "reynolds_number": float(reynolds_number),
         "viscosity": float(viscosity),
         "volume": float(V_chamber),

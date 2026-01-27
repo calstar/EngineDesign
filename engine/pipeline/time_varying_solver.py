@@ -281,6 +281,15 @@ class TimeVaryingCoupledSolver:
         # CRITICAL: Calculate chamber intrinsics (Mach number, etc.) - these should change over time
         # as geometry evolves. This was missing before!
         from engine.core.chamber_profiles import calculate_chamber_intrinsics
+        # Get ambient pressure from config if available, otherwise use fallback (0.9 * 1 atm)
+        P_back = None
+        if hasattr(self.config, 'environment') and self.config.environment is not None:
+            elevation = getattr(self.config.environment, 'elevation', None)
+            if elevation is not None:
+                # Use standard atmosphere model
+                from engine.core.runner import compute_ambient_pressure_from_elevation
+                P_back = compute_ambient_pressure_from_elevation(elevation)
+        # If still None, fallback will be used (0.9 * 1 atm)
         chamber_intrinsics = calculate_chamber_intrinsics(
             Pc=Pc,
             Tc=Tc,
@@ -291,6 +300,7 @@ class TimeVaryingCoupledSolver:
             A_throat=A_throat,
             Lstar=Lstar,
             MR=MR,
+            P_back=P_back,  # Pass ambient pressure if available, None uses fallback
         )
         mach_number = chamber_intrinsics["mach_number"]  # Now calculated dynamically, not hardcoded
         

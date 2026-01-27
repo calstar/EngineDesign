@@ -324,7 +324,7 @@ export function ResultsDisplay({ results, isLoading, targetExitPressure }: Resul
           />
           <SmallMetric 
             label="Throat Mach" 
-            value={formatNumber(chamber?.sound_speed && chamber?.velocity_throat ? chamber.velocity_throat / chamber.sound_speed : null, 3)} 
+            value={formatNumber(chamber?.mach_number_throat ?? null, 3)} 
             unit="" 
           />
         </div>
