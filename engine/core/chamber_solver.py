@@ -13,7 +13,10 @@ from engine.pipeline.thermal.regen_cooling import (
     compute_regen_heat_transfer,
     estimate_hot_wall_heat_flux,
 )
-from engine.pipeline.thermal.ablative_cooling import compute_ablative_response
+from engine.pipeline.thermal.ablative_cooling import (
+    compute_ablative_response,
+    compute_ablative_heat_flux_profile,
+)
 from engine.pipeline.numerical_robustness import (
     PhysicalConstraints,
     NumericalStability,
@@ -1085,6 +1088,49 @@ class ChamberSolver:
                 ablative_results["temperature_reduction"] = 0.0
             
             ablative_results["effective_gas_temperature"] = float(effective_Tc)
+            
+            # Compute ablative heat flux profile along chamber
+            # Get chamber and throat dimensions
+            chamber_geom = ensure_chamber_geometry(config)
+            D_chamber = geometry.get("diameter", 0.1)
+            D_throat = np.sqrt(4.0 * chamber_geom.A_throat / np.pi) if chamber_geom.A_throat > 0 else 0.05
+            L_chamber = geometry.get("length", 0.15)
+            
+            # Add molecular weight to gas props for profile computation
+            gas_props_profile = {
+                "Tc": effective_Tc,
+                "Pc": Pc_val,
+                "gamma": gamma,
+                "R": R,
+                "M": cea_props.get("M", 24.0),  # Molecular weight [kg/kmol]
+            }
+            
+            ablative_profile = compute_ablative_heat_flux_profile(
+                gas_props_profile,
+                abl_cfg,
+                mdot_total,
+                L_chamber,
+                D_chamber,
+                D_throat,
+                n_segments=20,
+            )
+            
+            # Debug logging for heat flux profile
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"[ABLATIVE PROFILE] L_chamber={L_chamber:.4f}m, D_chamber={D_chamber:.4f}m, D_throat={D_throat:.4f}m")
+            logger.info(f"[ABLATIVE PROFILE] segment_x length={len(ablative_profile.get('segment_x', []))}, segment_q_incident length={len(ablative_profile.get('segment_q_incident', []))}")
+            if ablative_profile.get('segment_q_incident'):
+                logger.info(f"[ABLATIVE PROFILE] q_incident range: {min(ablative_profile['segment_q_incident']):.2e} to {max(ablative_profile['segment_q_incident']):.2e} W/m²")
+            
+            # Add profile data to ablative results
+            ablative_results["segment_x"] = ablative_profile["segment_x"]
+            ablative_results["segment_q_incident"] = ablative_profile["segment_q_incident"]
+            ablative_results["segment_q_conv"] = ablative_profile["segment_q_conv"]
+            ablative_results["segment_q_rad"] = ablative_profile["segment_q_rad"]
+            ablative_results["segment_q_net"] = ablative_profile["segment_q_net"]
+            ablative_results["throat_index"] = ablative_profile["throat_index"]
+            
             cooling_results["ablative"] = ablative_results
 
         cooling_eff = self._compute_cooling_efficiency(

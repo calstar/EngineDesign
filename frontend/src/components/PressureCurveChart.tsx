@@ -10,6 +10,7 @@ import {
   ResponsiveContainer,
 } from 'recharts';
 import type { TimeSeriesData, TimeSeriesSummary } from '../api/client';
+import { HeatFluxProfileChart } from './HeatFluxProfileChart';
 
 interface PressureCurveChartProps {
   data: TimeSeriesData;
@@ -39,6 +40,8 @@ interface ChartDataPoint {
   V_chamber_pct_change?: number;
   A_throat_pct_change?: number;
   copv_pressure?: number;
+   lox_mass_remaining?: number;
+   fuel_mass_remaining?: number;
 }
 
 function formatValue(value: number | null | undefined, decimals: number = 2): string {
@@ -199,6 +202,8 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
       ? ((data.A_throat_m2[i] / data.A_throat_initial_m2) - 1) * 100
       : undefined,
     copv_pressure: data.copv_pressure_psi?.[i],
+    lox_mass_remaining: data.lox_mass_remaining_kg?.[i],
+    fuel_mass_remaining: data.fuel_mass_remaining_kg?.[i],
   }));
 
   // Calculate max time for x-axis domain
@@ -258,6 +263,8 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
       case 'recession_cumulative_graphite_oxidation': return 'mm';
       case 'V_chamber_pct_change':
       case 'A_throat_pct_change': return '%';
+      case 'lox_mass_remaining':
+      case 'fuel_mass_remaining': return 'kg';
       default: return '';
     }
   };
@@ -537,6 +544,58 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
         </div>
       )}
 
+      {/* Tank Fill Levels (Propellant Mass Remaining) */}
+      {(data.lox_mass_remaining_kg || data.fuel_mass_remaining_kg) && (
+        <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+          <h4 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
+            Tank Fill Levels vs Time
+          </h4>
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.5} />
+              <XAxis
+                dataKey="time"
+                type="number"
+                domain={[minTime, maxTimeInt]}
+                ticks={integerTicks}
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                tickFormatter={formatTick}
+                allowDecimals={false}
+                label={{ value: 'Time (s)', position: 'insideBottom', offset: -5, fill: 'var(--color-text-secondary)' }}
+              />
+              <YAxis
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                label={{ value: 'Mass (kg)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }}
+              />
+              <Tooltip content={customTooltip} />
+              <Legend />
+              {data.lox_mass_remaining_kg && (
+                <Line
+                  type="monotone"
+                  dataKey="lox_mass_remaining"
+                  name="LOX Mass"
+                  stroke="#06b6d4"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              )}
+              {data.fuel_mass_remaining_kg && (
+                <Line
+                  type="monotone"
+                  dataKey="fuel_mass_remaining"
+                  name="Fuel Mass"
+                  stroke="#f97316"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              )}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
       {/* 6. Injector Pressure Drops */}
       {data.delta_P_injector_O_psi && data.delta_P_injector_F_psi && (
         <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -796,6 +855,9 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
           </ResponsiveContainer>
         </div>
       )}
+
+      {/* 10. Heat Flux Profile Charts */}
+      <HeatFluxProfileChart data={data} />
 
       {/* Correlation Heatmap */}
       {data.correlation_matrix && data.correlation_labels && data.correlation_labels.length >= 2 && (

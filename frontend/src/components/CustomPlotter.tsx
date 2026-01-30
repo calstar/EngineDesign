@@ -62,6 +62,11 @@ const SERIES_COLORS = [
 type PlotType = 'line' | 'scatter';
 type ScaleType = 'linear' | 'log';
 
+interface CustomPlotterProps {
+  /** Whether the plotter tab is currently visible (for render optimizations). */
+  isVisible?: boolean;
+}
+
 function loadResultsFromSession(): { data: TimeSeriesData; summary: TimeSeriesSummary } | null {
   try {
     const stored = sessionStorage.getItem(TIMESERIES_RESULTS_KEY);
@@ -96,7 +101,7 @@ function formatValue(value: number, decimals: number = 3): string {
   }
 }
 
-export function CustomPlotter() {
+export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
   const results = useMemo(() => loadResultsFromSession(), []);
   
   // Available fields
@@ -259,6 +264,64 @@ export function CustomPlotter() {
     a.click();
     URL.revokeObjectURL(url);
   }, [results, availableFields, chartData]);
+
+  // Download RASP .eng thrust curve
+  const handleDownloadENG = useCallback(() => {
+    if (!results) return;
+
+    const time = results.data.time;
+    const thrust_kN = results.data.thrust_kN;
+
+    if (
+      !Array.isArray(time) ||
+      !Array.isArray(thrust_kN) ||
+      time.length === 0 ||
+      time.length !== thrust_kN.length
+    ) {
+      return;
+    }
+
+    // Convert thrust from kN to N
+    const thrust_N = thrust_kN.map((v) => v * 1000);
+
+    // Integrate thrust to get total impulse [N·s] using trapezoidal rule
+    let totalImpulse = 0;
+    for (let i = 1; i < time.length; i++) {
+      const dt = time[i] - time[i - 1];
+      if (dt <= 0) continue;
+      const avgThrust = 0.5 * (thrust_N[i] + thrust_N[i - 1]);
+      totalImpulse += avgThrust * dt;
+    }
+
+    const motorName = 'PINTLE-MOTOR';
+    const diameter_mm = 100; // Placeholder diameter, edit in .eng if needed
+    const length_mm = 1000; // Placeholder length, edit in .eng if needed
+    const propMass_kg = results.summary.total_propellant_kg ?? 0;
+    const delay_s = 0.0;
+
+    const header = [
+      motorName,
+      diameter_mm.toFixed(0),
+      length_mm.toFixed(0),
+      propMass_kg.toFixed(3),
+      totalImpulse.toFixed(1),
+      delay_s.toFixed(1),
+    ].join(' ');
+
+    const lines = [
+      header,
+      ...time.map((t, i) => `${t.toFixed(4)} ${thrust_N[i].toFixed(2)}`),
+    ];
+
+    const engText = lines.join('\n');
+    const blob = new Blob([engText], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'thrust_curve.eng';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [results]);
 
   // Empty state
   if (!results) {
@@ -543,7 +606,7 @@ export function CustomPlotter() {
       </div>
 
       {/* Chart */}
-      {yAxes.length > 0 ? (
+      {yAxes.length > 0 && isVisible ? (
         <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
@@ -669,81 +732,93 @@ export function CustomPlotter() {
       )}
 
       {/* Data Preview */}
-      <div className="rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)] overflow-hidden">
-        <button
-          onClick={() => setShowDataPreview(!showDataPreview)}
-          className="w-full px-4 py-3 flex items-center justify-between text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
-        >
-          <span className="flex items-center gap-2">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
-            </svg>
-            Data Preview ({chartData.length} rows, {availableFields.length} columns)
-          </span>
-          <svg 
-            className={`w-4 h-4 transition-transform ${showDataPreview ? 'rotate-180' : ''}`} 
-            fill="none" 
-            stroke="currentColor" 
-            viewBox="0 0 24 24"
+      {isVisible && (
+        <div className="rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)] overflow-hidden">
+          <button
+            onClick={() => setShowDataPreview(!showDataPreview)}
+            className="w-full px-4 py-3 flex items-center justify-between text-sm font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
           >
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-          </svg>
-        </button>
-        
-        {showDataPreview && (
-          <div className="border-t border-[var(--color-border)]">
-            <div className="p-3 flex justify-end border-b border-[var(--color-border)]">
-              <button
-                onClick={handleDownloadCSV}
-                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-emerald-500 transition-colors flex items-center gap-1"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                Download CSV
-              </button>
-            </div>
-            
-            <div className="overflow-x-auto max-h-64 overflow-y-auto">
-              <table className="w-full text-xs">
-                <thead className="sticky top-0 bg-[var(--color-bg-secondary)]">
-                  <tr className="border-b border-[var(--color-border)]">
-                    {availableFields.slice(0, 10).map(field => {
-                      const info = getFieldInfo(field);
-                      return (
-                        <th key={field} className="text-left py-2 px-2 text-[var(--color-text-secondary)] font-medium whitespace-nowrap">
-                          {info.label} {info.unit && `(${info.unit})`}
+            <span className="flex items-center gap-2">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4" />
+              </svg>
+              Data Preview ({chartData.length} rows, {availableFields.length} columns)
+            </span>
+            <svg 
+              className={`w-4 h-4 transition-transform ${showDataPreview ? 'rotate-180' : ''}`} 
+              fill="none" 
+              stroke="currentColor" 
+              viewBox="0 0 24 24"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          
+          {showDataPreview && (
+            <div className="border-t border-[var(--color-border)]">
+              <div className="p-3 flex justify-end gap-2 border-b border-[var(--color-border)]">
+                <button
+                  onClick={handleDownloadENG}
+                  className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-emerald-500 transition-colors flex items-center gap-1"
+                  title="Export thrust curve as RASP .eng file for rocket simulation software"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3 3-3M8 4h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" />
+                  </svg>
+                  Export .eng
+                </button>
+                <button
+                  onClick={handleDownloadCSV}
+                  className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-emerald-500 transition-colors flex items-center gap-1"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Download CSV
+                </button>
+              </div>
+              
+              <div className="overflow-x-auto max-h-64 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead className="sticky top-0 bg-[var(--color-bg-secondary)]">
+                    <tr className="border-b border-[var(--color-border)]">
+                      {availableFields.slice(0, 10).map(field => {
+                        const info = getFieldInfo(field);
+                        return (
+                          <th key={field} className="text-left py-2 px-2 text-[var(--color-text-secondary)] font-medium whitespace-nowrap">
+                            {info.label} {info.unit && `(${info.unit})`}
+                          </th>
+                        );
+                      })}
+                      {availableFields.length > 10 && (
+                        <th className="text-left py-2 px-2 text-[var(--color-text-secondary)] font-medium">
+                          +{availableFields.length - 10} more
                         </th>
-                      );
-                    })}
-                    {availableFields.length > 10 && (
-                      <th className="text-left py-2 px-2 text-[var(--color-text-secondary)] font-medium">
-                        +{availableFields.length - 10} more
-                      </th>
-                    )}
-                  </tr>
-                </thead>
-                <tbody>
-                  {chartData.slice(0, 50).map((row, i) => (
-                    <tr key={i} className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-bg-primary)]/50">
-                      {availableFields.slice(0, 10).map(field => (
-                        <td key={field} className="py-1.5 px-2 text-[var(--color-text-primary)] whitespace-nowrap">
-                          {row[field] !== undefined ? formatValue(row[field]) : '-'}
-                        </td>
-                      ))}
+                      )}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-              {chartData.length > 50 && (
-                <p className="text-center text-xs text-[var(--color-text-secondary)] py-2">
-                  Showing first 50 of {chartData.length} rows. Download CSV for full data.
-                </p>
-              )}
+                  </thead>
+                  <tbody>
+                    {chartData.slice(0, 50).map((row, i) => (
+                      <tr key={i} className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-bg-primary)]/50">
+                        {availableFields.slice(0, 10).map(field => (
+                          <td key={field} className="py-1.5 px-2 text-[var(--color-text-primary)] whitespace-nowrap">
+                            {row[field] !== undefined ? formatValue(row[field]) : '-'}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {chartData.length > 50 && (
+                  <p className="text-center text-xs text-[var(--color-text-secondary)] py-2">
+                    Showing first 50 of {chartData.length} rows. Download CSV for full data.
+                  </p>
+                )}
+              </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { evaluate } from '../api/client';
 import type { RunnerResults, EngineConfig } from '../api/client';
 import { ResultsDisplay } from './ResultsDisplay';
@@ -8,12 +8,32 @@ interface ForwardModeProps {
 }
 
 export function ForwardMode({ config }: ForwardModeProps) {
-  const [loxPressure, setLoxPressure] = useState<string>('750');
-  const [fuelPressure, setFuelPressure] = useState<string>('600');
+  // Use config's initial pressures if available, falling back to sensible defaults
+  const loxConfig = config?.lox_tank as Record<string, unknown> | undefined;
+  const fuelConfig = config?.fuel_tank as Record<string, unknown> | undefined;
+  const defaultLox = loxConfig?.initial_pressure_psi ? String(loxConfig.initial_pressure_psi) : '750';
+  const defaultFuel = fuelConfig?.initial_pressure_psi ? String(fuelConfig.initial_pressure_psi) : '600';
+
+  const [loxPressure, setLoxPressure] = useState<string>(defaultLox);
+  const [fuelPressure, setFuelPressure] = useState<string>(defaultFuel);
   const [results, setResults] = useState<RunnerResults | null>(null);
   const [ambientPressure, setAmbientPressure] = useState<number | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Update defaults when config changes
+  useEffect(() => {
+    if (config) {
+      const loxConfig = config.lox_tank as Record<string, unknown> | undefined;
+      const fuelConfig = config.fuel_tank as Record<string, unknown> | undefined;
+      if (loxConfig?.initial_pressure_psi) {
+        setLoxPressure(String(loxConfig.initial_pressure_psi));
+      }
+      if (fuelConfig?.initial_pressure_psi) {
+        setFuelPressure(String(fuelConfig.initial_pressure_psi));
+      }
+    }
+  }, [config]);
 
   const handleEvaluate = useCallback(async () => {
     const lox = parseFloat(loxPressure);

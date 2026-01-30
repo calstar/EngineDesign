@@ -1079,7 +1079,7 @@ def run_layer1_optimization(
     # CRITICAL: Injector bounds must be sized for target mass flow!
     # For 7000N thrust at Isp≈280s, O/F=2.3: mdot_O≈1.7 kg/s, mdot_F≈0.74 kg/s
     # Relaxed bounds to allow optimizer to explore wider geometry space
-    max_n_orifices = 20  # Allow up to 20 orifices
+    max_n_orifices = 14  # Restrict to exactly 14 orifices
     max_d_orifice = 0.003  # 1-3mm range for better atomization flexibility
     max_LOX_area = max_n_orifices * np.pi * (max_d_orifice / 2) ** 2
     max_d_pintle = 0.030  # 6-30mm range
@@ -1104,7 +1104,7 @@ def run_layer1_optimization(
         (min_outer_diameter, max_chamber_od),  # [3] outer diameter
         (0.006, 0.030),             # [4] d_pintle_tip - RELAXED: 6-30mm for better exploration
         (0.0003, 0.0015),           # [5] h_gap - RELAXED: 0.3-1.5mm for stability
-        (8, 20),                    # [6] n_orifices - RELAXED: 8-20 for flexibility
+        (14, 14.1),                 # [6] n_orifices - FIXED: ~14 orifices
         (0.001, 0.004),             # [7] d_orifice - RELAXED: 1-4mm for atomization control
         (max_lox_P_psi * min_P_ratio, max_lox_P_psi * max_P_ratio),    # [8] P_O_start_psi
         (max_fuel_P_psi * min_P_ratio, max_fuel_P_psi * max_P_ratio),  # [9] P_F_start_psi

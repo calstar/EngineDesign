@@ -2,12 +2,220 @@
 
 from __future__ import annotations
 
-from typing import Dict, Union
+from typing import Dict, Union, List, Optional
 
 import numpy as np
 
 from engine.pipeline.config_schemas import AblativeCoolingConfig
 from engine.pipeline.constants import STEFAN_BOLTZMANN_W_M2_K4, EPSILON_SMALL
+
+
+def compute_ablative_heat_flux_profile(
+    gas_props: Dict[str, float],
+    ablative_config: AblativeCoolingConfig,
+    mdot_total: float,
+    L_chamber: float,
+    D_chamber: float,
+    D_throat: float,
+    n_segments: int = 20,
+) -> Dict[str, List[float]]:
+    """
+    Compute heat flux profile along the chamber/contraction for ablative cooling.
+    
+    This function samples axial stations along the chamber (0 = injector, L = throat)
+    and computes the incident and net heat flux at each station using quasi-1D flow
+    approximations and Bartz-like correlations.
+    
+    Parameters
+    ----------
+    gas_props : dict
+        Gas properties including Tc, Pc, gamma, R, M (molecular weight)
+    ablative_config : AblativeCoolingConfig
+        Ablative cooling configuration
+    mdot_total : float
+        Total mass flow rate [kg/s]
+    L_chamber : float
+        Chamber length [m] (injector to throat)
+    D_chamber : float
+        Chamber inner diameter [m]
+    D_throat : float
+        Throat diameter [m]
+    n_segments : int
+        Number of axial segments (default: 20)
+    
+    Returns
+    -------
+    profile : dict
+        - segment_x: Axial positions [m] (0 = injector, L_chamber = throat)
+        - segment_q_incident: Incident heat flux [W/m²] (conv + rad)
+        - segment_q_conv: Convective heat flux [W/m²]
+        - segment_q_rad: Radiative heat flux [W/m²]
+        - segment_q_net: Net heat flux after relief [W/m²]
+        - throat_index: Index of throat position in arrays
+    """
+    if not ablative_config.enabled or L_chamber <= 0 or D_throat <= 0:
+        return {
+            "segment_x": [],
+            "segment_q_incident": [],
+            "segment_q_conv": [],
+            "segment_q_rad": [],
+            "segment_q_net": [],
+            "throat_index": -1,
+        }
+    
+    # Extract gas properties
+    Tc = gas_props.get("Tc", 3000.0)
+    Pc = gas_props.get("Pc", 2e6)
+    gamma = gas_props.get("gamma", 1.2)
+    R_gas = gas_props.get("R", 350.0)
+    M_mol = gas_props.get("M", 24.0)  # Molecular weight [kg/kmol]
+    
+    # Wall temperature (fixed surface temperature limit for ablative)
+    T_wall = ablative_config.surface_temperature_limit
+    
+    # Create axial position array (injector at 0, throat at L_chamber)
+    segment_x = np.linspace(0, L_chamber, n_segments)
+    segment_length = L_chamber / n_segments
+    
+    # Arrays for results
+    segment_q_conv = np.zeros(n_segments)
+    segment_q_rad = np.zeros(n_segments)
+    segment_q_incident = np.zeros(n_segments)
+    segment_q_net = np.zeros(n_segments)
+    
+    # Throat area and chamber area
+    A_throat = np.pi * (D_throat / 2) ** 2
+    A_chamber = np.pi * (D_chamber / 2) ** 2
+    
+    # Quasi-1D area profile: linear contraction from chamber to throat
+    # A(x) = A_chamber - (A_chamber - A_throat) * (x / L_chamber)
+    # This is a simplification - real nozzles have curved contractions
+    
+    # Gas viscosity using Huzel formula: μ = 46.6e-10 × M^0.5 × T^0.6 [lb·s/in²]
+    # Convert to Pa·s: multiply by 6894.76
+    def calc_viscosity(T_K, M_kg_kmol):
+        T_R = T_K * 1.8  # Kelvin to Rankine
+        mu_imperial = 46.6e-10 * (M_kg_kmol ** 0.5) * (T_R ** 0.6)
+        return mu_imperial * 6894.76  # Convert to Pa·s
+    
+    # Gas thermal conductivity estimate: k ≈ μ × cp / Pr
+    # Typical Pr for combustion gases: 0.7-0.8
+    Pr_gas = 0.75
+    cp_gas = gamma * R_gas / (gamma - 1.0)
+    
+    # Recovery factor for adiabatic wall temperature
+    # Typical value for turbulent flow: r ≈ Pr^(1/3) ≈ 0.9
+    recovery_factor = 0.9
+    
+    for i, x in enumerate(segment_x):
+        # Normalized position (0 at injector, 1 at throat)
+        xi = x / L_chamber if L_chamber > 0 else 0.0
+        
+        # Local area (linear contraction)
+        A_local = A_chamber - (A_chamber - A_throat) * xi
+        D_local = np.sqrt(4.0 * A_local / np.pi)
+        
+        # Local area ratio
+        area_ratio = A_local / A_throat
+        
+        # Quasi-1D flow state estimation
+        # In the chamber/contraction (subsonic), M increases from ~0.01 to 1.0 at throat
+        # Use isentropic relation: A/A* = (1/M) × [(2/(γ+1)) × (1 + (γ-1)/2 × M²)]^((γ+1)/(2(γ-1)))
+        # For subsonic flow, approximate M from area ratio
+        if area_ratio > 1.01:
+            # Subsonic approximation: M ≈ A*/A for small M
+            # More accurate: iterate or use approximation
+            M_local = 1.0 / area_ratio  # First-order approximation
+            M_local = min(M_local, 0.99)  # Cap at subsonic
+        else:
+            # At or near throat: M ≈ 1.0
+            M_local = 1.0
+        
+        # Local temperature (isentropic): T_local/Tc = 1 / [1 + (γ-1)/2 × M²]
+        temp_factor = 1.0 / (1.0 + (gamma - 1.0) / 2.0 * M_local ** 2)
+        T_local = Tc * temp_factor
+        
+        # Local pressure (isentropic): P_local/Pc = [1 + (γ-1)/2 × M²]^(-γ/(γ-1))
+        pressure_exp = -gamma / (gamma - 1.0)
+        P_local = Pc * (1.0 + (gamma - 1.0) / 2.0 * M_local ** 2) ** pressure_exp
+        
+        # Local density: ρ = P / (R × T)
+        rho_local = P_local / (R_gas * max(T_local, 1.0))
+        
+        # Local velocity: V = M × sqrt(γ × R × T)
+        a_local = np.sqrt(gamma * R_gas * T_local)
+        V_local = M_local * a_local
+        
+        # Adiabatic wall temperature: Taw = T_local × [1 + r × (γ-1)/2 × M²]
+        # Where r is recovery factor
+        Taw = T_local * (1.0 + recovery_factor * (gamma - 1.0) / 2.0 * M_local ** 2)
+        
+        # Gas properties at local temperature
+        mu_local = calc_viscosity(T_local, M_mol)
+        k_local = mu_local * cp_gas / Pr_gas
+        
+        # Reynolds number based on local diameter
+        Re_local = rho_local * V_local * D_local / max(mu_local, 1e-8)
+        
+        # Nusselt number: Dittus-Boelter for turbulent flow
+        # Nu = 0.023 × Re^0.8 × Pr^0.4
+        if Re_local > 2300:
+            Nu_local = 0.023 * (Re_local ** 0.8) * (Pr_gas ** 0.4)
+        else:
+            Nu_local = 4.36  # Laminar pipe flow
+        
+        # Convective heat transfer coefficient
+        h_local = Nu_local * k_local / max(D_local, 1e-6)
+        
+        # Bartz-like throat correction factor (higher heat flux near throat)
+        # σ = (0.5 × (Tw/Tc) × (1 + (γ-1)/2 × M²) + 0.5)^0.68 × (1 + (γ-1)/2 × M²)^0.12
+        # Simplified: heat flux increases near throat due to higher velocity and thinner boundary layer
+        throat_factor = 1.0 + 0.5 * xi  # Gradual increase toward throat
+        
+        # Convective heat flux: q_conv = h × (Taw - Tw)
+        q_conv = h_local * throat_factor * max(Taw - T_wall, 0.0)
+        
+        # Radiative heat flux: q_rad = ε × σ × (Tg⁴ - Tw⁴)
+        emissivity = ablative_config.surface_emissivity
+        q_rad = emissivity * STEFAN_BOLTZMANN_W_M2_K4 * (T_local ** 4 - T_wall ** 4)
+        q_rad = max(q_rad, 0.0)  # Only positive (gas → wall)
+        
+        # Incident heat flux (total from gas to wall)
+        q_incident = q_conv + q_rad
+        
+        # Store results
+        segment_q_conv[i] = q_conv
+        segment_q_rad[i] = q_rad
+        segment_q_incident[i] = q_incident
+    
+    # Compute net heat flux (after blowing/relief)
+    # Relief model: f_relief = clip(a + b × q_incident, f_min, 1)
+    # Simple first-pass: constant relief factor based on blowing efficiency
+    f_relief_base = 1.0 - ablative_config.blowing_efficiency
+    
+    # Scale relief with incident flux (higher flux → more pyrolysis → more blowing)
+    # f_relief(x) = clip(f_base - k × (q_incident / q_max), f_min, 1)
+    q_max = np.max(segment_q_incident) if np.max(segment_q_incident) > 0 else 1.0
+    f_relief_scaling = 0.2  # How much relief increases with heat flux
+    
+    for i in range(n_segments):
+        q_norm = segment_q_incident[i] / q_max
+        # Higher flux → lower f_relief (more cooling from blowing)
+        f_relief = f_relief_base - f_relief_scaling * q_norm
+        f_relief = np.clip(f_relief, ablative_config.blowing_min_reduction_factor, 1.0)
+        segment_q_net[i] = segment_q_incident[i] * f_relief
+    
+    # Find throat index (last element = throat)
+    throat_index = n_segments - 1
+    
+    return {
+        "segment_x": segment_x.tolist(),
+        "segment_q_incident": segment_q_incident.tolist(),
+        "segment_q_conv": segment_q_conv.tolist(),
+        "segment_q_rad": segment_q_rad.tolist(),
+        "segment_q_net": segment_q_net.tolist(),
+        "throat_index": throat_index,
+    }
 
 
 def compute_ablative_response(

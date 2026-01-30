@@ -399,7 +399,7 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
     def _consumed_mass(mdot_func, t_end, n_samples=1500):
         times = np.linspace(0, t_end, n_samples)
         vals = np.array([float(mdot_func(t)) for t in times])
-        return float(np.trapz(vals, times))
+        return float(np.trapezoid(vals, times) if hasattr(np, "trapezoid") else np.trapz(vals, times))
 
     # Only if we have Function/callable mdot after truncation
     try:

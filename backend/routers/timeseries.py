@@ -229,6 +229,87 @@ def compute_timeseries_results(
             recession_rate_graphite_thermal_um_s.append(np.nan)
             recession_rate_graphite_oxidation_um_s.append(np.nan)
     
+    # Extract Heat Flux Profiles from regen or ablative cooling data
+    # Priority: regen > ablative (use whichever is available)
+    axial_positions = None
+    heat_flux_profiles = []
+    wall_temp_profiles = []
+    
+    # Ablative-specific profiles (incident, conv, rad, net)
+    ablative_axial_positions = None
+    ablative_q_incident_profiles = []
+    ablative_q_conv_profiles = []
+    ablative_q_rad_profiles = []
+    ablative_q_net_profiles = []
+    ablative_throat_index = -1
+    
+    # Debug: check first diagnostic for structure
+    import logging
+    logger = logging.getLogger(__name__)
+    if diagnostics_list and len(diagnostics_list) > 0 and isinstance(diagnostics_list[0], dict):
+        first_diag = diagnostics_list[0]
+        cooling_data = first_diag.get("cooling", {})
+        logger.info(f"[TIMESERIES DEBUG] First diagnostic 'cooling' keys: {list(cooling_data.keys()) if cooling_data else 'no cooling'}")
+        if cooling_data and "ablative" in cooling_data:
+            abl_data = cooling_data["ablative"]
+            logger.info(f"[TIMESERIES DEBUG] ablative keys: {list(abl_data.keys()) if isinstance(abl_data, dict) else 'not a dict'}")
+            if isinstance(abl_data, dict):
+                logger.info(f"[TIMESERIES DEBUG] ablative segment_x length: {len(abl_data.get('segment_x', []))}")
+    
+    for i, diag in enumerate(diagnostics_list):
+        if not isinstance(diag, dict):
+            heat_flux_profiles.append([])
+            wall_temp_profiles.append([])
+            ablative_q_incident_profiles.append([])
+            ablative_q_conv_profiles.append([])
+            ablative_q_rad_profiles.append([])
+            ablative_q_net_profiles.append([])
+            continue
+            
+        cooling = diag.get("cooling", {})
+        regen = cooling.get("regen", {}) if cooling else {}
+        ablative = cooling.get("ablative", {}) if cooling else {}
+        
+        # Try regen first
+        if regen and isinstance(regen, dict):
+            segment_positions = regen.get("segment_positions", [])
+            segment_heat_flux = regen.get("segment_heat_flux", [])
+            segment_wall_temps = regen.get("segment_wall_temperatures", [])
+            
+            # Set axial_positions once (should be same for all time steps)
+            if axial_positions is None and segment_positions:
+                axial_positions = [float(p) for p in segment_positions]
+            
+            heat_flux_profiles.append([float(q) for q in segment_heat_flux] if segment_heat_flux else [])
+            wall_temp_profiles.append([float(t) for t in segment_wall_temps] if segment_wall_temps else [])
+        else:
+            heat_flux_profiles.append([])
+            wall_temp_profiles.append([])
+        
+        # Extract ablative profile data (separate from regen)
+        if ablative and isinstance(ablative, dict):
+            segment_x = ablative.get("segment_x", [])
+            segment_q_incident = ablative.get("segment_q_incident", [])
+            segment_q_conv = ablative.get("segment_q_conv", [])
+            segment_q_rad = ablative.get("segment_q_rad", [])
+            segment_q_net = ablative.get("segment_q_net", [])
+            throat_idx = ablative.get("throat_index", -1)
+            
+            # Set ablative positions once
+            if ablative_axial_positions is None and segment_x:
+                ablative_axial_positions = [float(p) for p in segment_x]
+                ablative_throat_index = throat_idx
+            
+            ablative_q_incident_profiles.append([float(q) for q in segment_q_incident] if segment_q_incident else [])
+            ablative_q_conv_profiles.append([float(q) for q in segment_q_conv] if segment_q_conv else [])
+            ablative_q_rad_profiles.append([float(q) for q in segment_q_rad] if segment_q_rad else [])
+            ablative_q_net_profiles.append([float(q) for q in segment_q_net] if segment_q_net else [])
+        else:
+            ablative_q_incident_profiles.append([])
+            ablative_q_conv_profiles.append([])
+            ablative_q_rad_profiles.append([])
+            ablative_q_net_profiles.append([])
+    
     # Extract geometry evolution data (from evaluate_arrays_with_time results)
     Lstar_mm = None
     V_chamber_m3 = None
@@ -325,6 +406,34 @@ def compute_timeseries_results(
         result_data["A_throat_m2"] = A_throat_m2
         result_data["A_throat_initial_m2"] = float(A_throat_m2[0])
     
+    # Add Heat Flux Profiles (only if data exists)
+    # Regen heat flux profiles
+    if axial_positions:
+        result_data["axial_positions_m"] = axial_positions
+        result_data["heat_flux_profiles_w_m2"] = heat_flux_profiles
+        result_data["wall_temp_profiles_k"] = wall_temp_profiles
+    
+    # Ablative heat flux profiles (separate from regen)
+    # Debug logging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"[TIMESERIES] ablative_axial_positions: {ablative_axial_positions is not None}, length={len(ablative_axial_positions) if ablative_axial_positions else 0}")
+    logger.info(f"[TIMESERIES] ablative_q_incident_profiles length: {len(ablative_q_incident_profiles)}")
+    if ablative_q_incident_profiles and len(ablative_q_incident_profiles) > 0:
+        non_empty = sum(1 for p in ablative_q_incident_profiles if p and len(p) > 0)
+        logger.info(f"[TIMESERIES] ablative_q_incident_profiles non-empty profiles: {non_empty}/{len(ablative_q_incident_profiles)}")
+    
+    if ablative_axial_positions:
+        result_data["ablative_axial_positions_m"] = ablative_axial_positions
+        result_data["ablative_q_incident_profiles_w_m2"] = ablative_q_incident_profiles
+        result_data["ablative_q_conv_profiles_w_m2"] = ablative_q_conv_profiles
+        result_data["ablative_q_rad_profiles_w_m2"] = ablative_q_rad_profiles
+        result_data["ablative_q_net_profiles_w_m2"] = ablative_q_net_profiles
+        result_data["ablative_throat_index"] = ablative_throat_index
+        logger.info(f"[TIMESERIES] Added ablative heat flux data to result_data")
+    else:
+        logger.info(f"[TIMESERIES] NO ablative_axial_positions - skipping ablative data")
+    
     # Calculate summary statistics
     thrust_arr = np.asarray(results["F"], dtype=float) / 1000.0
     Pc_arr = np.asarray(results["Pc"], dtype=float) * PA_TO_PSI
@@ -338,10 +447,49 @@ def compute_timeseries_results(
         "avg_Pc_psi": float(np.nanmean(Pc_arr)),
         "peak_Pc_psi": float(np.nanmax(Pc_arr)),
         "avg_Isp_s": float(np.nanmean(Isp_arr)),
-        "total_impulse_kNs": float(np.trapz(thrust_arr, times)),
-        "total_propellant_kg": float(np.trapz(mdot_arr, times)),
+        "total_impulse_kNs": float(np.trapezoid(thrust_arr, times) if hasattr(np, "trapezoid") else np.trapz(thrust_arr, times)),
+        "total_propellant_kg": float(np.trapezoid(mdot_arr, times) if hasattr(np, "trapezoid") else np.trapz(mdot_arr, times)),
         "burn_time_s": float(times[-1] - times[0]) if len(times) > 1 else 0.0,
     }
+    
+    # =========================================================================
+    # Propellant Mass Remaining (Tank Fill Levels)
+    # =========================================================================
+    # Calculate total propellant consumed per branch
+    mdot_O_arr = np.asarray(results["mdot_O"], dtype=float)
+    mdot_F_arr = np.asarray(results["mdot_F"], dtype=float)
+    if hasattr(np, "trapezoid"):
+        total_lox_kg = float(np.trapezoid(mdot_O_arr, times))
+        total_fuel_kg = float(np.trapezoid(mdot_F_arr, times))
+    else:
+        total_lox_kg = float(np.trapz(mdot_O_arr, times))
+        total_fuel_kg = float(np.trapz(mdot_F_arr, times))
+
+    # If blowdown mode provided mass history, use it directly
+    if lox_mass_kg is not None and len(lox_mass_kg) == len(times):
+        result_data["lox_mass_remaining_kg"] = to_float_array(lox_mass_kg).tolist()
+    else:
+        # Calculate from integrating mass flow (mass remaining = total - cumulative consumed)
+        times_arr = np.asarray(times, dtype=float)
+        mdot_O_arr_clean = np.nan_to_num(mdot_O_arr, nan=0.0)
+        cumulative_O = np.zeros(len(times_arr))
+        for i in range(1, len(times_arr)):
+            dt = times_arr[i] - times_arr[i - 1]
+            cumulative_O[i] = cumulative_O[i - 1] + 0.5 * (mdot_O_arr_clean[i - 1] + mdot_O_arr_clean[i]) * dt
+        lox_remaining = total_lox_kg - cumulative_O
+        result_data["lox_mass_remaining_kg"] = lox_remaining.tolist()
+
+    if fuel_mass_kg is not None and len(fuel_mass_kg) == len(times):
+        result_data["fuel_mass_remaining_kg"] = to_float_array(fuel_mass_kg).tolist()
+    else:
+        times_arr = np.asarray(times, dtype=float)
+        mdot_F_arr_clean = np.nan_to_num(mdot_F_arr, nan=0.0)
+        cumulative_F = np.zeros(len(times_arr))
+        for i in range(1, len(times_arr)):
+            dt = times_arr[i] - times_arr[i - 1]
+            cumulative_F[i] = cumulative_F[i - 1] + 0.5 * (mdot_F_arr_clean[i - 1] + mdot_F_arr_clean[i]) * dt
+        fuel_remaining = total_fuel_kg - cumulative_F
+        result_data["fuel_mass_remaining_kg"] = fuel_remaining.tolist()
     
     # =========================================================================
     # COPV Sizing Analysis - Always run if press_tank config is available

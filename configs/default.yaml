@@ -149,17 +149,18 @@ graphite_insert:
   char_layer_conductivity: 5.0
   char_layer_thickness: 0.0005
   coverage_fraction: 1.0
-  emissivity: 0.8                        # Surface emissivity for radiation
-  ambient_temperature: 300.0             # Ambient temperature for radiation [K]
-  feedback_fraction_min: 0.0             # Min oxidation heat feedback fraction
-  feedback_fraction_max: 0.2             # Max oxidation heat feedback fraction
-  oxidation_enthalpy: 32.8e6             # Oxidation reaction enthalpy [J/kg C] for CO2
-  ablation_surface_temperature: 3000.0   # Surface temp at thermal ablation [K]
-  oxidation_pressure_exponent: 0.5       # Pressure exponent for oxidation kinetics
-  oxidation_pre_exponential: null        # Auto-calculated from oxidation_rate
-  mixture_mw: 0.024                       # Avg molecular weight of combustion products [kg/mol]
-  oxidation_stoichiometry_ratio: 1.0     # Moles of C per mole of O2 (1.0 for CO2)
-  oxygen_mass_fraction: 0.05             # Free-stream O2 mass fraction at throat (fuel-rich: ~0.01-0.1)
+  # Physics-based oxidation model parameters (required in strict mode)
+  emissivity: 0.8                           # Surface emissivity for radiation
+  ambient_temperature: 300.0                # Ambient temperature for radiation [K]
+  feedback_fraction_min: 0.0                # Minimum oxidation heat feedback fraction
+  feedback_fraction_max: 0.2                # Maximum oxidation heat feedback fraction
+  oxidation_enthalpy: 32.8e6                # Oxidation reaction enthalpy [J/kg C]
+  ablation_surface_temperature: 3000.0      # Surface temperature for thermal ablation [K]
+  oxidation_pressure_exponent: 0.5          # Pressure exponent for oxidation kinetics
+  oxidation_pre_exponential: null           # Pre-exponential factor (calculated if null)
+  mixture_mw: 0.024                         # Average molecular weight [kg/mol]
+  oxidation_stoichiometry_ratio: 1.0        # Moles of C per mole of O2
+  oxygen_mass_fraction: 0.05                # Effective oxidizer availability
 stainless_steel_case: null
 discharge:
   oxidizer:
@@ -289,12 +290,14 @@ solver:
     tolerance: 0.0001
 # Tank configurations - 'mass' is the PROPELLANT mass (initial liquid fill)
 lox_tank:
+  initial_pressure_psi: 750.0 # Initial pressure for Forward Mode autofill
   lox_h: 1.14
   lox_radius: 0.06985
   ox_tank_pos: 0.8
   mass: 18.0  # LOX propellant mass [kg] (not tank structure mass)
   tank_volume_m3: 0.017474  # LOX tank volume [m³] (calculated from π×r²×h)
 fuel_tank:
+  initial_pressure_psi: 600.0 # Initial pressure for Forward Mode autofill
   rp1_h: 0.609
   rp1_radius: 0.0762
   fuel_tank_pos: 3

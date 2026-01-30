@@ -235,7 +235,7 @@ def run_layer4_flight_simulation(
                     initial_thrust = float(thrust_array[0])
                     # Guard against zero division if time range is degenerate
                     try:
-                        total_impulse = float(np.trapz(thrust_array, time_array_local))
+                        total_impulse = float(np.trapezoid(thrust_array, time_array_local) if hasattr(np, "trapezoid") else np.trapz(thrust_array, time_array_local))
                         avg_thrust = float(total_impulse / max(actual_burn_time, 1e-6))
                     except Exception:
                         total_impulse = 0.0

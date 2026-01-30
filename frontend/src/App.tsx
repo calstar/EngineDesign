@@ -7,11 +7,20 @@ import { CustomPlotter } from './components/CustomPlotter';
 import { FlightSimulation } from './components/FlightSimulation';
 import { ChamberGeometry } from './components/ChamberGeometry';
 import { Optimizer } from './components/Optimizer';
+import { ControllerMode } from './components/ControllerMode';
 import { OptimizerDemo } from './components/OptimizerDemo';
 import { getConfig, getHealth } from './api/client';
 import type { EngineConfig } from './api/client';
 
-type Tab = 'forward' | 'timeseries' | 'plotter' | 'flight' | 'geometry' | 'optimizer' | 'demo' | 'config';
+type Tab =
+  | 'forward'
+  | 'timeseries'
+  | 'plotter'
+  | 'flight'
+  | 'geometry'
+  | 'optimizer'
+  | 'controller'
+  | 'demo' | 'config';
 
 function App() {
   const [activeTab, setActiveTab] = useState<Tab>('forward');
@@ -141,6 +150,16 @@ function App() {
               Optimizer
             </button>
             <button
+              onClick={() => setActiveTab('controller')}
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+                activeTab === 'controller'
+                  ? 'border-teal-500 text-teal-400'
+                  : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
+              }`}
+            >
+              Controller
+            </button>
+            <button
               onClick={() => setActiveTab('demo')}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
                 activeTab === 'demo'
@@ -207,7 +226,7 @@ function App() {
         </div>
 
         <div className={tabPanelClass('plotter')}>
-          <CustomPlotter />
+          <CustomPlotter isVisible={activeTab === 'plotter'} />
         </div>
 
         <div className={tabPanelClass('flight')}>
@@ -243,6 +262,18 @@ function App() {
               </div>
             )}
             <Optimizer config={config} />
+          </div>
+        </div>
+
+        <div className={tabPanelClass('controller')}>
+          <div className="space-y-6">
+            {!config && (
+              <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+                <h3 className="text-lg font-semibold mb-4 text-[var(--color-text-primary)]">Load Configuration</h3>
+                <ConfigUpload onConfigLoaded={handleConfigLoaded} />
+              </div>
+            )}
+            <ControllerMode config={config} />
           </div>
         </div>
 

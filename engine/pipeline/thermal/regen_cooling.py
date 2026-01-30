@@ -529,6 +529,7 @@ def compute_regen_heat_transfer(
             "segment_wall_temperatures": wall_hot_segments,
             "segment_coolant_wall_temperatures": wall_cold_segments,
             "segment_heat_flux": segment_heat_fluxes,
+            "segment_positions": [i * segment_length + segment_length / 2 for i in range(segment_count)],
         }
     )
 

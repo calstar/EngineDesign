@@ -327,6 +327,9 @@ export interface TimeSeriesData {
   mdot_total_kg_s: number[];
   cstar_actual_m_s: number[];
   gamma: number[];
+  // Tank fill levels (propellant mass remaining)
+  lox_mass_remaining_kg?: number[];
+  fuel_mass_remaining_kg?: number[];
   Cd_O?: number[];
   Cd_F?: number[];
   // Optional fields for additional plots
@@ -350,6 +353,17 @@ export interface TimeSeriesData {
   // Correlation matrix data
   correlation_matrix?: number[][];
   correlation_labels?: string[];
+  // Heat Flux Profiles (Regen Cooling)
+  heat_flux_profiles_w_m2?: number[][];
+  wall_temp_profiles_k?: number[][];
+  axial_positions_m?: number[];
+  // Heat Flux Profiles (Ablative Cooling)
+  ablative_axial_positions_m?: number[];
+  ablative_q_incident_profiles_w_m2?: number[][];
+  ablative_q_conv_profiles_w_m2?: number[][];
+  ablative_q_rad_profiles_w_m2?: number[][];
+  ablative_q_net_profiles_w_m2?: number[][];
+  ablative_throat_index?: number;
 }
 
 // Summary statistics
