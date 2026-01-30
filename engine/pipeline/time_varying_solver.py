@@ -122,6 +122,10 @@ class TimeVaryingState:
     nozzle_max_wall_temp: float  # [K] - Maximum wall temperature in nozzle
     nozzle_is_melting: bool  # Whether nozzle is melting
     nozzle_hotspot_count: int  # Number of hotspots detected
+    
+    # Full diagnostics from ChamberSolver (includes ablative heat flux profiles)
+    # Must be at end since it has a default value
+    diagnostics: Optional[Dict[str, Any]] = None
 
 
 class TimeVaryingCoupledSolver:
@@ -820,12 +824,13 @@ class TimeVaryingCoupledSolver:
         try:
             from engine.pipeline.stability.analysis import comprehensive_stability_analysis
             
-            # Create diagnostics dict for comprehensive analysis
+            # Create stability diagnostics dict for comprehensive analysis
+            # (separate from solver diagnostics to avoid overwriting ablative profiles)
             # Calculate component mass flows
             mdot_O = mdot_total * MR / (1.0 + MR)
             mdot_F = mdot_total / (1.0 + MR)
             
-            diagnostics = {
+            stability_diag = {
                 "mdot_O": mdot_O,
                 "mdot_F": mdot_F,
                 "P_tank_O": P_tank_O,
@@ -841,7 +846,7 @@ class TimeVaryingCoupledSolver:
                 gamma=gamma_chamber,
                 R=R_chamber,
                 Tc=Tc,
-                diagnostics=diagnostics,
+                diagnostics=stability_diag,
             )
             
             # Update stability_margin from comprehensive analysis
@@ -1030,6 +1035,8 @@ class TimeVaryingCoupledSolver:
             nozzle_max_wall_temp=nozzle_dynamics["max_wall_temp"],
             nozzle_is_melting=nozzle_dynamics["is_melting"],
             nozzle_hotspot_count=nozzle_dynamics["hotspot_count"],
+            # Full diagnostics from ChamberSolver (includes ablative heat flux profiles)
+            diagnostics=diagnostics,
         )
         
         return state
@@ -1158,6 +1165,9 @@ class TimeVaryingCoupledSolver:
         results["reaction_progress_injection"] = np.array([s.reaction_progress["progress_injection"] for s in self.state_history])
         results["tau_residence"] = np.array([s.tau_residence for s in self.state_history])
         results["tau_effective"] = np.array([s.tau_effective for s in self.state_history])
+        
+        # Include full diagnostics from ChamberSolver (contains ablative heat flux profiles)
+        results["diagnostics"] = [s.diagnostics for s in self.state_history]
         
         return results
 

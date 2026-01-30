@@ -746,7 +746,7 @@ class PintleEngineRunner:
                 results["eta_cstar"] = results["cstar_actual"] / results["cstar_ideal"]
                 results["gamma"] = results["gamma_chamber"]
                 results["R"] = results["R_chamber"]
-                results["diagnostics"] = []
+                # diagnostics now comes from get_results_dict() - contains ablative heat flux profiles
                 
                 return results
             except Exception as e:

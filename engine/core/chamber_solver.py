@@ -1089,12 +1089,22 @@ class ChamberSolver:
             
             ablative_results["effective_gas_temperature"] = float(effective_Tc)
             
-            # Compute ablative heat flux profile along chamber
+            # Compute ablative heat flux profile along chamber AND nozzle
             # Get chamber and throat dimensions
             chamber_geom = ensure_chamber_geometry(config)
             D_chamber = geometry.get("diameter", 0.1)
             D_throat = np.sqrt(4.0 * chamber_geom.A_throat / np.pi) if chamber_geom.A_throat > 0 else 0.05
             L_chamber = geometry.get("length", 0.15)
+            
+            # Get nozzle dimensions
+            D_exit = np.sqrt(4.0 * chamber_geom.A_exit / np.pi) if chamber_geom.A_exit and chamber_geom.A_exit > 0 else None
+            # Estimate nozzle length from geometry (typically 0.8-1.2 × throat diameter × sqrt(expansion_ratio))
+            if D_exit and D_throat > 0 and chamber_geom.expansion_ratio:
+                # Rao bell nozzle length approximation: L_nozzle ≈ 0.8 × D_throat × sqrt(eps - 1)
+                eps = chamber_geom.expansion_ratio
+                L_nozzle = 0.8 * D_throat * np.sqrt(max(eps - 1.0, 0.1)) if eps > 1 else None
+            else:
+                L_nozzle = None
             
             # Add molecular weight to gas props for profile computation
             gas_props_profile = {
@@ -1113,6 +1123,9 @@ class ChamberSolver:
                 D_chamber,
                 D_throat,
                 n_segments=20,
+                L_nozzle=L_nozzle,
+                D_exit=D_exit,
+                include_nozzle=True,
             )
             
             # Debug logging for heat flux profile

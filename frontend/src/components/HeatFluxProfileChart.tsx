@@ -120,6 +120,7 @@ export function HeatFluxProfileChart({ data }: HeatFluxProfileChartProps) {
   }, [hasRegenHeatFluxData, axial_positions_m, heat_flux_profiles_w_m2, activeIndices]);
 
   // Transform data for recharts - ablative heat flux profiles (incident vs net)
+  // Backend already outputs throat-centered coordinates: x=0 at throat, negative=chamber, positive=nozzle
   const ablativeChartData: AblativeDataPoint[] = useMemo(() => {
     if (!hasAblativeHeatFluxData || !ablative_axial_positions_m) return [];
 
@@ -128,7 +129,8 @@ export function HeatFluxProfileChart({ data }: HeatFluxProfileChartProps) {
 
     return ablative_axial_positions_m.map((pos, posIdx) => {
       const point: AblativeDataPoint = {
-        position: pos * 1000, // Convert m to mm for display
+        // Backend already provides throat-centered coords, just convert m to mm
+        position: pos * 1000,
       };
 
       const incidentProfile = ablative_q_incident_profiles_w_m2?.[timeIdx];
@@ -155,14 +157,8 @@ export function HeatFluxProfileChart({ data }: HeatFluxProfileChartProps) {
       ablative_q_net_profiles_w_m2, ablative_q_conv_profiles_w_m2, ablative_q_rad_profiles_w_m2, 
       activeIndices, time]);
 
-  // Get throat position for ablative chart reference line
-  const throatPositionMm = useMemo(() => {
-    if (!ablative_axial_positions_m || ablative_throat_index === undefined || ablative_throat_index < 0) {
-      return null;
-    }
-    const throatPos = ablative_axial_positions_m[ablative_throat_index];
-    return throatPos !== undefined ? throatPos * 1000 : null;
-  }, [ablative_axial_positions_m, ablative_throat_index]);
+  // Throat position is now at x=0 (after coordinate transformation)
+  const throatPositionMm = 0;
 
   // Transform data for recharts - wall temperature profiles
   const wallTempChartData: ProfileDataPoint[] = useMemo(() => {
@@ -455,7 +451,7 @@ export function HeatFluxProfileChart({ data }: HeatFluxProfileChartProps) {
           </div>
           <p className="text-xs text-[var(--color-text-secondary)] mb-4">
             Incident heat flux (conv + rad) and net heat flux after blowing relief. 
-            Throat is at the right edge (x = {throatPositionMm?.toFixed(1)} mm).
+            x = 0 at throat, negative towards injector (matches chamber geometry plot).
           </p>
 
           <ResponsiveContainer width="100%" height={280}>
@@ -467,7 +463,7 @@ export function HeatFluxProfileChart({ data }: HeatFluxProfileChartProps) {
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
                 label={{ 
-                  value: 'Axial Position (mm) — 0 = Injector, max = Throat', 
+                  value: 'Axial Position (mm) — 0 = Throat, negative = Injector', 
                   position: 'insideBottom', 
                   offset: -15, 
                   fill: 'var(--color-text-secondary)',
