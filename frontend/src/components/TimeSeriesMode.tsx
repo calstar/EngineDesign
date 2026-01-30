@@ -716,7 +716,7 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
                 Time-Series Results
               </h3>
               <p className="text-sm text-[var(--color-text-secondary)]">
-                {results.data.time.length} data points over {results.summary.burn_time_s.toFixed(2)}s burn
+                {results.data.time.length} data points over {results.summary?.burn_time_s?.toFixed(2) || '—'}s burn
               </p>
             </div>
           </div>

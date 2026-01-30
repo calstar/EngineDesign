@@ -162,18 +162,27 @@ function CorrelationHeatmap({ matrix, labels }: CorrelationHeatmapProps) {
 }
 
 export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
+  // Guard against missing data
+  if (!data || !data.time || data.time.length === 0 || !summary) {
+    return (
+      <div className="p-8 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)] text-center">
+        <p className="text-[var(--color-text-secondary)]">No pressure curve data available</p>
+      </div>
+    );
+  }
+
   // Transform data for recharts - keep it simple like before
   const chartData: ChartDataPoint[] = data.time.map((t, i) => ({
     time: t,
-    thrust: data.thrust_kN[i],
-    Pc: data.Pc_psi[i],
-    Isp: data.Isp_s[i],
-    P_tank_O: data.P_tank_O_psi[i],
-    P_tank_F: data.P_tank_F_psi[i],
-    MR: data.MR[i],
-    mdot_total: data.mdot_total_kg_s[i],
-    mdot_O: data.mdot_O_kg_s[i],
-    mdot_F: data.mdot_F_kg_s[i],
+    thrust: data.thrust_kN?.[i],
+    Pc: data.Pc_psi?.[i],
+    Isp: data.Isp_s?.[i],
+    P_tank_O: data.P_tank_O_psi?.[i],
+    P_tank_F: data.P_tank_F_psi?.[i],
+    MR: data.MR?.[i],
+    mdot_total: data.mdot_total_kg_s?.[i],
+    mdot_O: data.mdot_O_kg_s?.[i],
+    mdot_F: data.mdot_F_kg_s?.[i],
     delta_P_injector_O: data.delta_P_injector_O_psi?.[i],
     delta_P_injector_F: data.delta_P_injector_F_psi?.[i],
     Lstar: data.Lstar_mm?.[i],

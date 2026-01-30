@@ -441,8 +441,8 @@ async def run_layer1(
                             return
                     raise
             
-            # Update config
-            app_state.config = optimized_config
+            # Update config and recreate runner with new config
+            app_state.set_config(optimized_config)
             
             # Store results (convert numpy types for JSON serialization)
             performance = results.get("performance", {})
@@ -698,7 +698,7 @@ async def run_layer2(
                         stopped_by_user = True
                 
                 # Update app state (even if stopped - we want to save the best solution)
-                app_state.config = optimized_config
+                app_state.set_config(optimized_config)
                 
                 results_dict = convert_numpy({
                     "performance": summary, # Layer 2 summary contains performance info
@@ -1063,8 +1063,8 @@ async def run_layer3(
                     if _stop_event and _stop_event.is_set():
                         stopped_by_user = True
                 
-                # Update app state
-                app_state.config = optimized_config
+                # Update app state and recreate runner with new config
+                app_state.set_config(optimized_config)
                 
                 # Build comprehensive summary from thermal_results and updated_time_results
                 try:
