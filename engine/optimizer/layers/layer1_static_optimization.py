@@ -683,8 +683,15 @@ def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, co
     
     max_chamber_length = float(requirements.get("max_chamber_length_m", 0.50))
     length_term = 0.0
+    length_violation = False
     if np.isfinite(L_chamber_curr) and max_chamber_length > 0:
-        length_term = max(0.0, (L_chamber_curr - max_chamber_length) / max_chamber_length) ** 2
+        if L_chamber_curr > max_chamber_length:
+            # Hard constraint: treat as infeasibility
+            length_violation = True
+            length_term = ((L_chamber_curr - max_chamber_length) / max_chamber_length) ** 2
+        else:
+            # Soft penalty to guide optimizer away from the boundary
+            length_term = max(0.0, (L_chamber_curr - max_chamber_length * 0.9) / (max_chamber_length * 0.1)) ** 2
     
     # Lexicographic scalarization
     # Lexicographic scalarization (SCALED DOWN)
@@ -699,7 +706,10 @@ def _compute_objective_value(result: dict, x: np.ndarray, requirements: dict, co
     if not np.isfinite(infeasibility_score) or infeasibility_score < 0:
         infeasibility_score = 1.0
     
-    if infeasibility_score > 0.0:
+    # Treat length violation as infeasibility (hard constraint)
+    if length_violation:
+        obj = BASE_INFEAS + W_INFEAS * length_term
+    elif infeasibility_score > 0.0:
         obj = BASE_INFEAS + W_INFEAS * float(infeasibility_score)
     else:
         obj = (
@@ -1556,6 +1566,48 @@ def run_layer1_optimization(
                 excess = rel - deadband
                 exit_pressure_sq_term = (1.0 * excess) ** 2
         
+        # Injector pressure drop constraint: ΔP should be 0.2-0.7 × Pc
+        # This ensures good atomization (ΔP not too low) without excessive pressure waste (ΔP not too high)
+        injector_dp_penalty = 0.0
+        if eval_success and np.isfinite(Pc_actual) and Pc_actual > 0:
+            # Get injector pressures from nested dict (injector_pressure or diagnostics)
+            injector_pressure_dict = final_results.get("injector_pressure", {})
+            if not injector_pressure_dict:
+                injector_pressure_dict = final_results.get("diagnostics", {})
+            
+            P_injector_O = injector_pressure_dict.get("P_injector_O")
+            P_injector_F = injector_pressure_dict.get("P_injector_F")
+            
+            # Also check diagnostics if not in injector_pressure
+            if P_injector_O is None:
+                P_injector_O = final_results.get("diagnostics", {}).get("P_injector_O")
+            if P_injector_F is None:
+                P_injector_F = final_results.get("diagnostics", {}).get("P_injector_F")
+            
+            # Convert to float and validate
+            P_injector_O = float(P_injector_O) if P_injector_O is not None else np.nan
+            P_injector_F = float(P_injector_F) if P_injector_F is not None else np.nan
+            
+            # LOX injector pressure drop
+            if np.isfinite(P_injector_O):
+                delta_P_O = P_injector_O - Pc_actual
+                delta_P_O_norm = delta_P_O / Pc_actual  # Normalized by Pc
+                # Quadratic penalty outside [0.2, 0.7] deadband
+                if delta_P_O_norm < 0.2:
+                    injector_dp_penalty += (0.2 - delta_P_O_norm) ** 2
+                elif delta_P_O_norm > 0.7:
+                    injector_dp_penalty += (delta_P_O_norm - 0.7) ** 2
+            
+            # Fuel injector pressure drop
+            if np.isfinite(P_injector_F):
+                delta_P_F = P_injector_F - Pc_actual
+                delta_P_F_norm = delta_P_F / Pc_actual  # Normalized by Pc
+                # Quadratic penalty outside [0.2, 0.7] deadband
+                if delta_P_F_norm < 0.2:
+                    injector_dp_penalty += (0.2 - delta_P_F_norm) ** 2
+                elif delta_P_F_norm > 0.7:
+                    injector_dp_penalty += (delta_P_F_norm - 0.7) ** 2
+        
         # Stability gates contribute to feasibility (lexicographic stage 1)
         stability_state = stability.get("stability_state", "unstable")
         stability_score = float(stability.get("stability_score", 0.0))
@@ -1613,9 +1665,15 @@ def run_layer1_optimization(
         L_chamber_curr = getattr(getattr(config, "chamber", None), "length", None)
         L_chamber_curr = float(L_chamber_curr) if (L_chamber_curr is not None and np.isfinite(L_chamber_curr)) else np.nan
         length_term = 0.0
+        length_violation = False
         if np.isfinite(L_chamber_curr) and max_chamber_length > 0:
-            # Only penalize if exceeds max (soft preference for shorter)
-            length_term = max(0.0, (L_chamber_curr - max_chamber_length) / max_chamber_length) ** 2
+            if L_chamber_curr > max_chamber_length:
+                # Hard constraint: treat as infeasibility
+                length_violation = True
+                length_term = ((L_chamber_curr - max_chamber_length) / max_chamber_length) ** 2
+            else:
+                # Soft penalty to guide optimizer away from the boundary
+                length_term = max(0.0, (L_chamber_curr - max_chamber_length * 0.9) / (max_chamber_length * 0.1)) ** 2
         
         # ------------------------------------------------------------------
         # Lexicographic-ish scalarization with normalized weights
@@ -1628,12 +1686,16 @@ def run_layer1_optimization(
         W_OF = 1e4               # Level 1: Primary objectives (was 1e6)
         W_CF = 1e2               # Level 2: Secondary objectives (was 1e4)
         W_EXIT = 2.0e2           # Level 2: Secondary objectives (was 2e4)
+        W_INJECTOR_DP = 1e4      # Level 1.5: Injector pressure drop (critical for proper atomization and efficiency)
         W_LEN = 1e4              # Level 2: Chamber length constraint (increased from 1.0 to enforce max length)
         
         if (not np.isfinite(infeasibility_score)) or infeasibility_score < 0:
             infeasibility_score = 1.0
         
-        if infeasibility_score > 0.0:
+        # Treat length violation as infeasibility (hard constraint)
+        if length_violation:
+            obj = BASE_INFEAS + W_INFEAS * length_term
+        elif infeasibility_score > 0.0:
             obj = BASE_INFEAS + W_INFEAS * float(infeasibility_score)
         else:
             obj = (
@@ -1641,6 +1703,7 @@ def run_layer1_optimization(
                 W_OF * (of_error ** 2) +
                 W_CF * cf_hinge +
                 W_EXIT * exit_pressure_sq_term +
+                W_INJECTOR_DP * injector_dp_penalty +
                 W_LEN * length_term
             )
         
@@ -2506,6 +2569,16 @@ def run_layer1_optimization(
         if d_pintle_final >= D_chamber_final:
             geometry_check_passed = False
             geometry_failure_reasons.append(f"Pintle diameter {d_pintle_final*1000:.1f}mm >= chamber diameter {D_chamber_final*1000:.1f}mm")
+    
+    # Chamber length constraint
+    L_chamber_final = getattr(getattr(optimized_config, "chamber", None), "length", None)
+    L_chamber_final = float(L_chamber_final) if (L_chamber_final is not None and np.isfinite(L_chamber_final)) else np.nan
+    max_chamber_length = float(requirements.get("max_chamber_length_m", 0.50))
+    
+    if np.isfinite(L_chamber_final) and max_chamber_length > 0:
+        if L_chamber_final > max_chamber_length:
+            geometry_check_passed = False
+            geometry_failure_reasons.append(f"Chamber length {L_chamber_final*1000:.1f}mm > max allowed {max_chamber_length*1000:.1f}mm")
 
     pressure_candidate_valid = thrust_check_passed and of_check_passed and stability_check_passed and geometry_check_passed
     
