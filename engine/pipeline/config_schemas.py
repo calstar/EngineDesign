@@ -715,6 +715,29 @@ class ThrustConfig(BaseModel):
     burn_time: float = Field(gt=0, description="Burn time [s]")
 
 
+class FrozenParametersConfig(BaseModel):
+    """Frozen parameter values for Layer 1 optimization.
+    
+    When a parameter is set (not None), the optimizer will use that exact
+    value instead of optimizing it. Values use user-friendly units.
+    """
+    # Chamber geometry
+    A_throat_mm2: Optional[float] = Field(default=None, gt=0, description="Frozen throat area [mm²]")
+    Lstar_mm: Optional[float] = Field(default=None, gt=0, description="Frozen characteristic length L* [mm]")
+    expansion_ratio: Optional[float] = Field(default=None, gt=1, description="Frozen expansion ratio (A_exit/A_throat)")
+    D_chamber_outer_mm: Optional[float] = Field(default=None, gt=0, description="Frozen chamber outer diameter [mm]")
+    
+    # Injector geometry
+    d_pintle_tip_mm: Optional[float] = Field(default=None, gt=0, description="Frozen pintle tip diameter [mm]")
+    h_gap_mm: Optional[float] = Field(default=None, gt=0, description="Frozen annular gap height [mm]")
+    n_orifices: Optional[int] = Field(default=None, gt=0, description="Frozen number of LOX orifices")
+    d_orifice_mm: Optional[float] = Field(default=None, gt=0, description="Frozen LOX orifice diameter [mm]")
+    
+    # Initial tank pressures
+    P_O_start_psi: Optional[float] = Field(default=None, gt=0, description="Frozen initial LOX tank pressure [psi]")
+    P_F_start_psi: Optional[float] = Field(default=None, gt=0, description="Frozen initial fuel tank pressure [psi]")
+
+
 class DesignRequirementsConfig(BaseModel):
     """Design requirements for optimizer"""
     # Performance targets
@@ -756,6 +779,12 @@ class DesignRequirementsConfig(BaseModel):
     # COPV
     copv_free_volume_L: Optional[float] = Field(default=4.5, gt=0, description="COPV free internal volume [L]")
     copv_free_volume_m3: Optional[float] = Field(default=None, gt=0, description="COPV free volume [m³] (auto-converted from L if None)")
+    
+    # Frozen parameters (optional - for locking specific values during optimization)
+    frozen_parameters: Optional[FrozenParametersConfig] = Field(
+        default=None,
+        description="Optional frozen parameter values for Layer 1 optimization. When set, these values are used instead of being optimized."
+    )
 
 
 class HybridOptimizerConfig(BaseModel):

@@ -622,6 +622,25 @@ export async function getChamberGeometry(): Promise<ApiResponse<ChamberGeometryR
 // Optimizer Types and API
 // ============================================================================
 
+// Frozen parameters for Layer 1 optimization (user-friendly units)
+export interface FrozenParameters {
+  // Chamber geometry
+  A_throat_mm2?: number;           // Throat area [mm²]
+  Lstar_mm?: number;               // Characteristic length L* [mm]
+  expansion_ratio?: number;        // Expansion ratio (A_exit/A_throat)
+  D_chamber_outer_mm?: number;     // Chamber outer diameter [mm]
+
+  // Injector geometry
+  d_pintle_tip_mm?: number;        // Pintle tip diameter [mm]
+  h_gap_mm?: number;               // Annular gap height [mm]
+  n_orifices?: number;             // Number of LOX orifices
+  d_orifice_mm?: number;           // LOX orifice diameter [mm]
+
+  // Initial tank pressures
+  P_O_start_psi?: number;          // Initial LOX tank pressure [psi]
+  P_F_start_psi?: number;          // Initial fuel tank pressure [psi]
+}
+
 export interface DesignRequirements {
   // Performance targets
   target_thrust: number;
@@ -662,6 +681,9 @@ export interface DesignRequirements {
   // COPV
   copv_free_volume_L?: number;
   copv_free_volume_m3?: number;
+
+  // Frozen parameters (optional - for locking specific values during optimization)
+  frozen_parameters?: FrozenParameters;
 }
 
 export interface DesignRequirementsResponse {

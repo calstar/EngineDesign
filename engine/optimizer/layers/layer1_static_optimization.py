@@ -1232,6 +1232,64 @@ def run_layer1_optimization(
         P_F_start_init,
     ])
     
+    # =========================================================================
+    # Handle Frozen Parameters from Design Requirements
+    # =========================================================================
+    # If user has specified frozen_parameters, pin those values by:
+    # 1. Setting bounds to [value, value] (prevents CMA-ES from exploring)
+    # 2. Setting x0 to the frozen value
+    # Frozen parameters use user-friendly units and are converted to SI here.
+    frozen = requirements.get("frozen_parameters", {}) or {}
+    frozen_param_names = []
+    
+    # Map frozen parameters to their x-vector indices and unit conversions
+    # Index | Parameter name          | Frozen key         | Conversion
+    # ------+-------------------------+--------------------+------------
+    #  0    | A_throat [m²]           | A_throat_mm2       | mm² -> m² (*1e-6)
+    #  1    | Lstar [m]               | Lstar_mm           | mm -> m (*1e-3)
+    #  2    | expansion_ratio [-]     | expansion_ratio    | none
+    #  3    | D_chamber_outer [m]     | D_chamber_outer_mm | mm -> m (*1e-3)
+    #  4    | d_pintle_tip [m]        | d_pintle_tip_mm    | mm -> m (*1e-3)
+    #  5    | h_gap [m]               | h_gap_mm           | mm -> m (*1e-3)
+    #  6    | n_orifices [-]          | n_orifices         | none (int)
+    #  7    | d_orifice [m]           | d_orifice_mm       | mm -> m (*1e-3)
+    #  8    | P_O_start [psi]         | P_O_start_psi      | none
+    #  9    | P_F_start [psi]         | P_F_start_psi      | none
+    
+    frozen_mapping = [
+        ("A_throat_mm2", 1e-6),      # idx 0
+        ("Lstar_mm", 1e-3),          # idx 1
+        ("expansion_ratio", 1.0),    # idx 2
+        ("D_chamber_outer_mm", 1e-3),# idx 3
+        ("d_pintle_tip_mm", 1e-3),   # idx 4
+        ("h_gap_mm", 1e-3),          # idx 5
+        ("n_orifices", 1.0),         # idx 6 (integer)
+        ("d_orifice_mm", 1e-3),      # idx 7
+        ("P_O_start_psi", 1.0),      # idx 8
+        ("P_F_start_psi", 1.0),      # idx 9
+    ]
+    
+    for idx, (key, conversion) in enumerate(frozen_mapping):
+        frozen_val = frozen.get(key)
+        if frozen_val is not None:
+            # Convert from user-friendly units to SI/optimizer units
+            val_si = frozen_val * conversion
+            # Special case: n_orifices is integer
+            if key == "n_orifices":
+                val_si = int(round(frozen_val))
+            # Pin bounds to frozen value (CMA-ES will sample this exact value)
+            # Use a tiny epsilon for bounds to avoid numerical issues
+            eps = 1e-12 if key != "n_orifices" else 0.01
+            bounds[idx] = (val_si - eps, val_si + eps)
+            # Set x0 to frozen value
+            x0[idx] = val_si
+            frozen_param_names.append(f"{key}={frozen_val}")
+    
+    if frozen_param_names:
+        layer1_logger.info(f"Frozen parameters: {', '.join(frozen_param_names)}")
+        layer1_logger.info("These values will be fixed during optimization.")
+    # =========================================================================
+    
     # Clip to bounds
     for i, (lo, hi) in enumerate(bounds):
         x0[i] = np.clip(x0[i], lo, hi)

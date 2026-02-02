@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import type { EngineConfig, DesignRequirements as DesignRequirementsType } from '../api/client';
+import type { EngineConfig, DesignRequirements as DesignRequirementsType, FrozenParameters } from '../api/client';
 
 interface DesignRequirementsProps {
   config: EngineConfig | null;
@@ -14,30 +14,31 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
     target_apogee: 3048.0,
     optimal_of_ratio: 2.3,
     target_burn_time: 10.0,
-    
+
     // Tank pressures
     max_lox_tank_pressure_psi: 700.0,
     max_fuel_tank_pressure_psi: 850.0,
-    
+
     // Geometry constraints
     max_engine_length: 0.5,
     max_chamber_outer_diameter: 0.15,
     max_nozzle_exit_diameter: 0.101,
-    
+
     // L* constraints
     min_Lstar: 0.95,
     max_Lstar: 1.27,
-    
+
     // Stability requirements (new comprehensive analysis)
     min_stability_score: 0.75,
     require_stable_state: true,
-    
+    stability_margin_handicap: 0.0,
+
     // Stability requirements (legacy margins)
     min_stability_margin: 1.2,
     chugging_margin_min: 0.2,
     acoustic_margin_min: 0.1,
     feed_stability_min: 0.15,
-    
+
     // COPV
     copv_free_volume_L: 4.5,
   });
@@ -55,6 +56,28 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
 
   const updateField = (field: keyof DesignRequirementsType, value: number | boolean) => {
     setRequirements(prev => ({ ...prev, [field]: value }));
+  };
+
+  // Helper to update a frozen parameter value
+  const updateFrozenParam = (field: keyof FrozenParameters, value: number | undefined) => {
+    setRequirements(prev => ({
+      ...prev,
+      frozen_parameters: {
+        ...prev.frozen_parameters,
+        [field]: value,
+      },
+    }));
+  };
+
+  // Helper to check if a parameter is frozen
+  const isFrozen = (field: keyof FrozenParameters): boolean => {
+    return requirements.frozen_parameters?.[field] !== undefined && requirements.frozen_parameters?.[field] !== null;
+  };
+
+  // Helper to get frozen value or empty string for display
+  const getFrozenValue = (field: keyof FrozenParameters): string => {
+    const val = requirements.frozen_parameters?.[field];
+    return val !== undefined && val !== null ? String(val) : '';
   };
 
   return (
@@ -270,14 +293,14 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
       {/* Stability Requirements */}
       <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
         <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-4">🛡️ Stability Requirements</h3>
-        
+
         <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-4">
           <p className="text-sm text-blue-400">
-            <strong>New Comprehensive Stability Analysis:</strong><br/>
-            • Uses stability_score (0-1) and stability_state ("stable"/"marginal"/"unstable")<br/>
-            • Considers chugging, acoustic modes, feed system, and mode coupling<br/>
-            • <strong>Stable</strong>: score ≥ 0.75 (recommended for flight)<br/>
-            • <strong>Marginal</strong>: 0.4 ≤ score &lt; 0.75 (acceptable with caution)<br/>
+            <strong>New Comprehensive Stability Analysis:</strong><br />
+            • Uses stability_score (0-1) and stability_state ("stable"/"marginal"/"unstable")<br />
+            • Considers chugging, acoustic modes, feed system, and mode coupling<br />
+            • <strong>Stable</strong>: score ≥ 0.75 (recommended for flight)<br />
+            • <strong>Marginal</strong>: 0.4 ≤ score &lt; 0.75 (acceptable with caution)<br />
             • <strong>Unstable</strong>: score &lt; 0.4 (not acceptable)
           </p>
         </div>
@@ -318,7 +341,7 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
             </summary>
             <div className="mt-4 space-y-3 pl-4 border-l-2 border-[var(--color-border)]">
               <p className="text-xs text-[var(--color-text-secondary)]">These are used for detailed feedback but the optimizer primarily uses stability_score above.</p>
-              
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-[var(--color-text-secondary)] mb-1">
@@ -383,6 +406,321 @@ export function DesignRequirements({ config, onSave }: DesignRequirementsProps) 
             </div>
           </details>
         </div>
+      </div>
+
+      {/* Frozen Parameters - Collapsible Dropdown */}
+      <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-xl p-6">
+        <details>
+          <summary className="cursor-pointer text-lg font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
+            🔒 Frozen Parameters (Optional)
+          </summary>
+
+          <div className="mt-4 space-y-4">
+            <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+              <p className="text-sm text-blue-300">
+                <strong>Freeze optimization parameters:</strong> When enabled, these values will be fixed during Layer 1 optimization
+                instead of being optimized. Leave empty to let the optimizer find the best value.
+              </p>
+            </div>
+
+            {/* Chamber Geometry */}
+            <div className="space-y-3">
+              <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] border-b border-[var(--color-border)] pb-1">
+                Chamber Geometry
+              </h4>
+              <div className="grid grid-cols-2 gap-4">
+                {/* A_throat_mm2 */}
+                <div className={`p-3 rounded-lg border ${isFrozen('A_throat_mm2') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Throat Area [mm²]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('A_throat_mm2')}
+                      onChange={(e) => updateFrozenParam('A_throat_mm2', e.target.checked ? 1000 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('A_throat_mm2')}
+                    onChange={(e) => updateFrozenParam('A_throat_mm2', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('A_throat_mm2')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="500"
+                    max="3000"
+                    step="10"
+                    placeholder="e.g. 1000"
+                  />
+                </div>
+
+                {/* Lstar_mm */}
+                <div className={`p-3 rounded-lg border ${isFrozen('Lstar_mm') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      L* (Char. Length) [mm]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('Lstar_mm')}
+                      onChange={(e) => updateFrozenParam('Lstar_mm', e.target.checked ? 1000 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('Lstar_mm')}
+                    onChange={(e) => updateFrozenParam('Lstar_mm', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('Lstar_mm')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="800"
+                    max="1500"
+                    step="10"
+                    placeholder="e.g. 1000"
+                  />
+                </div>
+
+                {/* expansion_ratio */}
+                <div className={`p-3 rounded-lg border ${isFrozen('expansion_ratio') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Expansion Ratio
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('expansion_ratio')}
+                      onChange={(e) => updateFrozenParam('expansion_ratio', e.target.checked ? 5.0 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('expansion_ratio')}
+                    onChange={(e) => updateFrozenParam('expansion_ratio', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('expansion_ratio')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="2"
+                    max="15"
+                    step="0.1"
+                    placeholder="e.g. 5.0"
+                  />
+                </div>
+
+                {/* D_chamber_outer_mm */}
+                <div className={`p-3 rounded-lg border ${isFrozen('D_chamber_outer_mm') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Chamber OD [mm]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('D_chamber_outer_mm')}
+                      onChange={(e) => updateFrozenParam('D_chamber_outer_mm', e.target.checked ? 120 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('D_chamber_outer_mm')}
+                    onChange={(e) => updateFrozenParam('D_chamber_outer_mm', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('D_chamber_outer_mm')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="60"
+                    max="250"
+                    step="5"
+                    placeholder="e.g. 120"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Injector Geometry */}
+            <div className="space-y-3">
+              <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] border-b border-[var(--color-border)] pb-1">
+                Injector Geometry
+              </h4>
+              <div className="grid grid-cols-2 gap-4">
+                {/* d_pintle_tip_mm */}
+                <div className={`p-3 rounded-lg border ${isFrozen('d_pintle_tip_mm') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Pintle Tip Ø [mm]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('d_pintle_tip_mm')}
+                      onChange={(e) => updateFrozenParam('d_pintle_tip_mm', e.target.checked ? 25 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('d_pintle_tip_mm')}
+                    onChange={(e) => updateFrozenParam('d_pintle_tip_mm', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('d_pintle_tip_mm')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="10"
+                    max="50"
+                    step="1"
+                    placeholder="e.g. 25"
+                  />
+                </div>
+
+                {/* h_gap_mm */}
+                <div className={`p-3 rounded-lg border ${isFrozen('h_gap_mm') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Gap Height [mm]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('h_gap_mm')}
+                      onChange={(e) => updateFrozenParam('h_gap_mm', e.target.checked ? 1.0 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('h_gap_mm')}
+                    onChange={(e) => updateFrozenParam('h_gap_mm', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('h_gap_mm')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="0.2"
+                    max="3.0"
+                    step="0.1"
+                    placeholder="e.g. 1.0"
+                  />
+                </div>
+
+                {/* n_orifices */}
+                <div className={`p-3 rounded-lg border ${isFrozen('n_orifices') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      # LOX Orifices
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('n_orifices')}
+                      onChange={(e) => updateFrozenParam('n_orifices', e.target.checked ? 16 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('n_orifices')}
+                    onChange={(e) => updateFrozenParam('n_orifices', e.target.value ? parseInt(e.target.value) : undefined)}
+                    disabled={!isFrozen('n_orifices')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="4"
+                    max="48"
+                    step="2"
+                    placeholder="e.g. 16"
+                  />
+                </div>
+
+                {/* d_orifice_mm */}
+                <div className={`p-3 rounded-lg border ${isFrozen('d_orifice_mm') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Orifice Ø [mm]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('d_orifice_mm')}
+                      onChange={(e) => updateFrozenParam('d_orifice_mm', e.target.checked ? 2.5 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('d_orifice_mm')}
+                    onChange={(e) => updateFrozenParam('d_orifice_mm', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('d_orifice_mm')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="0.5"
+                    max="8"
+                    step="0.1"
+                    placeholder="e.g. 2.5"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Initial Tank Pressures */}
+            <div className="space-y-3">
+              <h4 className="text-sm font-semibold text-[var(--color-text-secondary)] border-b border-[var(--color-border)] pb-1">
+                Initial Tank Pressures
+              </h4>
+              <div className="grid grid-cols-2 gap-4">
+                {/* P_O_start_psi */}
+                <div className={`p-3 rounded-lg border ${isFrozen('P_O_start_psi') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      LOX Tank P₀ [psi]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('P_O_start_psi')}
+                      onChange={(e) => updateFrozenParam('P_O_start_psi', e.target.checked ? 500 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('P_O_start_psi')}
+                    onChange={(e) => updateFrozenParam('P_O_start_psi', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('P_O_start_psi')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="200"
+                    max="800"
+                    step="25"
+                    placeholder="e.g. 500"
+                  />
+                </div>
+
+                {/* P_F_start_psi */}
+                <div className={`p-3 rounded-lg border ${isFrozen('P_F_start_psi') ? 'border-amber-500/50 bg-amber-500/10' : 'border-[var(--color-border)]'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-[var(--color-text-secondary)]">
+                      Fuel Tank P₀ [psi]
+                    </label>
+                    <input
+                      type="checkbox"
+                      checked={isFrozen('P_F_start_psi')}
+                      onChange={(e) => updateFrozenParam('P_F_start_psi', e.target.checked ? 600 : undefined)}
+                      className="w-4 h-4 text-amber-500 bg-[var(--color-bg-primary)] border-[var(--color-border)] rounded"
+                    />
+                  </div>
+                  <input
+                    type="number"
+                    value={getFrozenValue('P_F_start_psi')}
+                    onChange={(e) => updateFrozenParam('P_F_start_psi', e.target.value ? parseFloat(e.target.value) : undefined)}
+                    disabled={!isFrozen('P_F_start_psi')}
+                    className="w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg text-[var(--color-text-primary)] focus:outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                    min="200"
+                    max="900"
+                    step="25"
+                    placeholder="e.g. 600"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Summary of frozen parameters */}
+            {requirements.frozen_parameters && Object.values(requirements.frozen_parameters).some(v => v !== undefined && v !== null) && (
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+                <p className="text-sm text-amber-300">
+                  <strong>Frozen:</strong>{' '}
+                  {Object.entries(requirements.frozen_parameters)
+                    .filter(([, v]) => v !== undefined && v !== null)
+                    .map(([k, v]) => `${k.replace(/_mm2?$|_psi$/g, '')}=${v}`)
+                    .join(', ')}
+                </p>
+              </div>
+            )}
+          </div>
+        </details>
       </div>
 
       {/* Save Button */}
