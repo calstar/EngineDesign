@@ -2551,6 +2551,9 @@ def run_layer1_optimization(
                 initial_performance["cstar_actual"] = eval_results["cstar_actual"]
             if "cstar_ideal" in eval_results:
                 initial_performance["cstar_ideal"] = eval_results["cstar_ideal"]
+            # Copy chamber_intrinsics (contains is_choked, etc.)
+            if "chamber_intrinsics" in eval_results and eval_results["chamber_intrinsics"]:
+                initial_performance["chamber_intrinsics"] = eval_results["chamber_intrinsics"]
         except Exception:
             # If re-evaluation fails, calculate Cf from available data
             F_val = initial_performance.get("F", 0)
@@ -2725,6 +2728,53 @@ def run_layer1_optimization(
         final_performance["P_F_start_psi"] = max_fuel_P_psi * 0.8
         final_performance["P_O_start_ratio"] = 0.8
         final_performance["P_F_start_ratio"] = 0.8
+    
+    # Add chamber_intrinsics from initial_performance (contains is_choked, etc.)
+    if "chamber_intrinsics" in initial_performance:
+        final_performance["chamber_intrinsics"] = initial_performance["chamber_intrinsics"]
+    
+    # Calculate and add effective_injector_area_ratio
+    # This is the ratio of (effective injector area) / (throat area)
+    # Effective injector area = max(A_lox_injector, A_fuel_injector) with Cd weighting
+    try:
+        from engine.pipeline.config_schemas import ensure_chamber_geometry
+        cg = ensure_chamber_geometry(optimized_config)
+        A_throat_final = float(cg.A_throat) if cg.A_throat and cg.A_throat > 0 else None
+        
+        inj = getattr(optimized_config, 'injector', None)
+        inj_geom = getattr(inj, 'geometry', None) if inj else None
+        is_pintle = getattr(inj, 'type', None) == 'pintle' if inj else False
+        
+        if is_pintle and inj_geom and A_throat_final:
+            # LOX injector area (discrete orifices)
+            lox_geom = getattr(inj_geom, 'lox', None)
+            fuel_geom = getattr(inj_geom, 'fuel', None)
+            
+            if lox_geom and fuel_geom:
+                n_orifices = float(getattr(lox_geom, 'n_orifices', 0))
+                d_orifice = float(getattr(lox_geom, 'd_orifice', 0))
+                d_pintle_tip = float(getattr(fuel_geom, 'd_pintle_tip', 0))
+                h_gap = float(getattr(fuel_geom, 'h_gap', 0))
+                Cd_lox = float(getattr(lox_geom, 'Cd', 0.65))
+                Cd_fuel = float(getattr(fuel_geom, 'Cd', 0.4))
+                
+                A_lox_injector = n_orifices * np.pi * (d_orifice / 2) ** 2 if d_orifice > 0 else 0.0
+                R_inner = d_pintle_tip / 2
+                R_outer = R_inner + h_gap
+                A_fuel_injector = np.pi * (R_outer ** 2 - R_inner ** 2) if h_gap > 0 else 0.0
+                
+                # Effective areas (Cd-weighted geometric areas)
+                A_lox_effective = Cd_lox * A_lox_injector
+                A_fuel_effective = Cd_fuel * A_fuel_injector
+                
+                # Total effective injector area (sum of both propellants)
+                A_injector_total_effective = A_lox_effective + A_fuel_effective
+                
+                # Ratio of total effective injector area to throat area
+                effective_injector_area_ratio = A_injector_total_effective / A_throat_final
+                final_performance["effective_injector_area_ratio"] = float(effective_injector_area_ratio)
+    except Exception as e:
+        layer1_logger.debug(f"Could not calculate effective_injector_area_ratio: {e}")
     
     # Build results dict
     results = {
