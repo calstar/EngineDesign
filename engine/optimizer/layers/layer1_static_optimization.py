@@ -1624,7 +1624,7 @@ def run_layer1_optimization(
                 excess = rel - deadband
                 exit_pressure_sq_term = (1.0 * excess) ** 2
         
-        # Injector pressure drop constraint: ΔP should be 0.2-0.7 × Pc
+        # Injector pressure drop constraint: ΔP should be 0.2-0.5 × Pc
         # This ensures good atomization (ΔP not too low) without excessive pressure waste (ΔP not too high)
         injector_dp_penalty = 0.0
         if eval_success and np.isfinite(Pc_actual) and Pc_actual > 0:
@@ -1650,21 +1650,21 @@ def run_layer1_optimization(
             if np.isfinite(P_injector_O):
                 delta_P_O = P_injector_O - Pc_actual
                 delta_P_O_norm = delta_P_O / Pc_actual  # Normalized by Pc
-                # Quadratic penalty outside [0.2, 0.7] deadband
+                # Quadratic penalty outside [0.2, 0.5] deadband
                 if delta_P_O_norm < 0.2:
                     injector_dp_penalty += (0.2 - delta_P_O_norm) ** 2
-                elif delta_P_O_norm > 0.7:
-                    injector_dp_penalty += (delta_P_O_norm - 0.7) ** 2
+                elif delta_P_O_norm > 0.5:
+                    injector_dp_penalty += (delta_P_O_norm - 0.5) ** 2
             
             # Fuel injector pressure drop
             if np.isfinite(P_injector_F):
                 delta_P_F = P_injector_F - Pc_actual
                 delta_P_F_norm = delta_P_F / Pc_actual  # Normalized by Pc
-                # Quadratic penalty outside [0.2, 0.7] deadband
+                # Quadratic penalty outside [0.2, 0.5] deadband
                 if delta_P_F_norm < 0.2:
                     injector_dp_penalty += (0.2 - delta_P_F_norm) ** 2
-                elif delta_P_F_norm > 0.7:
-                    injector_dp_penalty += (delta_P_F_norm - 0.7) ** 2
+                elif delta_P_F_norm > 0.5:
+                    injector_dp_penalty += (delta_P_F_norm - 0.5) ** 2
         
         # Stability gates contribute to feasibility (lexicographic stage 1)
         stability_state = stability.get("stability_state", "unstable")
@@ -1888,6 +1888,19 @@ def run_layer1_optimization(
             opt_state["best_objective"] = obj
             opt_state["best_x"] = x_clipped.copy()
             opt_state["last_best_eval"] = opt_state["function_evaluations"]
+            
+            # Store objective component breakdown for diagnostics
+            opt_state["best_objective_breakdown"] = {
+                "thrust_penalty": float(W_THRUST * thrust_penalty_sq_term),
+                "of_penalty": float(W_OF * (of_error ** 2)),
+                "cf_penalty": float(W_CF * cf_hinge),
+                "exit_pressure_penalty": float(W_EXIT * exit_pressure_sq_term),
+                "injector_dp_penalty": float(W_INJECTOR_DP * injector_dp_penalty),
+                "length_penalty": float(W_LEN * length_term),
+                "infeasibility_penalty": float(BASE_INFEAS + W_INFEAS * infeasibility_score) if infeasibility_score > 0 or length_violation else 0.0,
+                "length_violation": bool(length_violation),
+                "is_infeasible": bool(infeasibility_score > 0 or length_violation),
+            }
             
             # If we were in a valley escape mode, exit it
             if opt_state.get("valley_escape_tier", 0) > 0:
@@ -2758,6 +2771,45 @@ def run_layer1_optimization(
     if final_performance.get("P_F_start_psi") is not None:
         layer1_logger.info(f"Fuel initial pressure: {final_performance['P_F_start_psi']:.1f} psi")
     layer1_logger.info(f"Validation: {'VALID' if pressure_candidate_valid else 'INVALID'}")
+    
+    # Log objective function breakdown if objective > 1e0 (indicates non-ideal convergence)
+    best_obj_value = opt_state.get("best_objective", float('inf'))
+    if best_obj_value > 1.0:
+        layer1_logger.info("")
+        layer1_logger.info("-"*70)
+        layer1_logger.info(f"⚠ Objective Function Breakdown (objective = {best_obj_value:.6f} > 1.0)")
+        layer1_logger.info("-"*70)
+        breakdown = opt_state.get("best_objective_breakdown", {})
+        if breakdown:
+            if breakdown.get("is_infeasible", False):
+                layer1_logger.info("Solution is INFEASIBLE:")
+                if breakdown.get("length_violation", False):
+                    layer1_logger.info(f"  • Chamber length violation penalty: {breakdown.get('infeasibility_penalty', 0):.6f}")
+                else:
+                    layer1_logger.info(f"  • Infeasibility penalty (constraints violated): {breakdown.get('infeasibility_penalty', 0):.6f}")
+            else:
+                layer1_logger.info("Objective component contributions:")
+                # Sort by contribution (largest first)
+                components = [
+                    ("Thrust penalty", breakdown.get("thrust_penalty", 0)),
+                    ("O/F ratio penalty", breakdown.get("of_penalty", 0)),
+                    ("Cf band penalty", breakdown.get("cf_penalty", 0)),
+                    ("Exit pressure penalty", breakdown.get("exit_pressure_penalty", 0)),
+                    ("Injector ΔP penalty", breakdown.get("injector_dp_penalty", 0)),
+                    ("Chamber length penalty", breakdown.get("length_penalty", 0)),
+                ]
+                # Sort by value descending
+                components.sort(key=lambda x: x[1], reverse=True)
+                total = sum(c[1] for c in components)
+                for name, value in components:
+                    if value > 0 or total > 0:
+                        pct = (value / total * 100) if total > 0 else 0.0
+                        layer1_logger.info(f"  • {name}: {value:.6f} ({pct:.1f}%)")
+                layer1_logger.info(f"  Total: {total:.6f}")
+        else:
+            layer1_logger.info("  (component breakdown not available)")
+        layer1_logger.info("-"*70)
+    
     layer1_logger.info("="*70)
     layer1_logger.info("")
     layer1_logger.info(f"Layer 1 optimization complete. Log saved to: {log_file_path}")
