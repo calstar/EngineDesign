@@ -719,6 +719,9 @@ export interface Layer1Results {
     mdot_O?: number;      // Oxidizer mass flow [kg/s]
     mdot_F?: number;      // Fuel mass flow [kg/s]
 
+    // Injector metrics
+    effective_injector_area_ratio?: number;  // Effective injector area / throat area ratio
+
     // Tank pressures
     P_O_start_psi?: number;  // LOX tank pressure [psi]
     P_F_start_psi?: number;  // Fuel tank pressure [psi]

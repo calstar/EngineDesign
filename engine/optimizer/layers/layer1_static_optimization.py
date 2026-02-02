@@ -1082,7 +1082,7 @@ def run_layer1_optimization(
     max_n_orifices = 14  # Restrict to exactly 14 orifices
     max_d_orifice = 0.003  # 1-3mm range for better atomization flexibility
     max_LOX_area = max_n_orifices * np.pi * (max_d_orifice / 2) ** 2
-    max_d_pintle = 0.030  # 6-30mm range
+    max_d_pintle = 0.040  # 6-40mm range
     max_h_gap = 0.0015  # 0.3-1.5mm range for stability and manufacturability
     R_inner_max = max_d_pintle / 2
     R_outer_max = R_inner_max + max_h_gap
@@ -1102,7 +1102,7 @@ def run_layer1_optimization(
         (min_Lstar, max_Lstar),     # [1] Lstar
         (6.0, 12.0),                # [2] expansion_ratio - good range for sea level Cf≈1.6
         (min_outer_diameter, max_chamber_od),  # [3] outer diameter
-        (0.006, 0.030),             # [4] d_pintle_tip - RELAXED: 6-30mm for better exploration
+        (0.006, 0.040),             # [4] d_pintle_tip - RELAXED: 6-40mm for better exploration
         (0.0003, 0.0015),           # [5] h_gap - RELAXED: 0.3-1.5mm for stability
         (14, 14.1),                 # [6] n_orifices - FIXED: ~14 orifices
         (0.001, 0.004),             # [7] d_orifice - RELAXED: 1-4mm for atomization control
@@ -1877,8 +1877,8 @@ def run_layer1_optimization(
     layer1_logger.info("Using CMA-ES with random restart strategy for robust optimization.")
     update_progress("Layer 1: CMA-ES", 0.45, "Running CMA-ES global solver...")
     
-    # IMPROVED: Larger initial step size for better global exploration (25% instead of 15%)
-    target_fraction_of_range = 0.25  # 25% of range per sigma for aggressive exploration
+    # IMPROVED: Initial step size fraction (reduced to 0.15 for better convergence with wide bounds)
+    target_fraction_of_range = 0.15  # 15% of range per sigma for reliable convergence
     
     # Calculate base sigma0 from 25th percentile span (less sensitive to large diameter bounds)
     # Using percentile instead of median prevents large bound changes from dominating step size

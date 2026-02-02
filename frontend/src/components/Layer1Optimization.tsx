@@ -428,10 +428,10 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
         eventSourceRef.close();
         setEventSourceRef(null);
       }
-      
+
       // Call the stop API
       await stopLayer1Optimization();
-      
+
       // Update UI state
       setIsRunning(false);
       setMessage('Stopping optimization...');
@@ -727,6 +727,20 @@ export function Layer1Optimization({ requirements }: Layer1OptimizationProps) {
                 value={results.performance.chamber_intrinsics?.is_choked === true ? 'Yes' : results.performance.chamber_intrinsics?.is_choked === false ? 'No' : '—'}
                 isText={true}
                 color={results.performance.chamber_intrinsics?.is_choked === true ? 'green' : results.performance.chamber_intrinsics?.is_choked === false ? 'red' : 'blue'}
+              />
+              <ResultCard
+                label="Effective Injector Area / Throat Area"
+                value={results.performance.effective_injector_area_ratio}
+                decimals={3}
+                color={
+                  results.performance.effective_injector_area_ratio !== undefined
+                    ? (results.performance.effective_injector_area_ratio >= 0.25 && results.performance.effective_injector_area_ratio <= 0.6)
+                      ? 'green'
+                      : results.performance.effective_injector_area_ratio < 0.25
+                        ? 'yellow'
+                        : 'red'
+                    : 'blue'
+                }
               />
             </div>
           </div>
