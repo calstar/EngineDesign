@@ -16,16 +16,117 @@ import type { ChamberGeometryResponse } from '../api/client';
 const M_TO_MM = 1000;
 const MM_TO_INCH = 1 / 25.4;
 
-// Generate a minimal DXF file with a polyline contour
+// Generate a minimal DXF file with a single contour polyline
+// Exports the upper half contour only (for CAD revolve operations)
+// With proper vertex deduplication, simplification, and coordinate quantization
 function generateDxfContent(xCoords: number[], yCoords: number[], unit: 'mm' | 'inch'): string {
   // Convert coordinates to selected unit
   const unitMultiplier = unit === 'mm' ? M_TO_MM : M_TO_MM * MM_TO_INCH;
-  const points = xCoords.map((x, i) => ({
-    x: x * unitMultiplier,
-    y: yCoords[i] * unitMultiplier
-  }));
 
-  // DXF header section
+  // Create points with unit conversion and proper precision
+  const PRECISION = 6;  // 6 decimal places for CAD compatibility
+  const EPSILON = 1e-9; // Threshold for duplicate vertex detection
+  const TARGET_POINTS = 150; // Target number of points for CAD performance
+
+  // Build upper half contour only (this is what CAD software revolves)
+  const rawPoints: { x: number; y: number }[] = [];
+  for (let i = 0; i < xCoords.length; i++) {
+    rawPoints.push({
+      x: Number((xCoords[i] * unitMultiplier).toFixed(PRECISION)),
+      y: Number((yCoords[i] * unitMultiplier).toFixed(PRECISION))
+    });
+  }
+
+  // Deduplicate consecutive vertices (removes zero-length segments)
+  let points: { x: number; y: number }[] = [];
+  for (const pt of rawPoints) {
+    if (points.length === 0) {
+      points.push(pt);
+    } else {
+      const last = points[points.length - 1];
+      const dx = Math.abs(pt.x - last.x);
+      const dy = Math.abs(pt.y - last.y);
+      // Only add if not a duplicate (distance > epsilon)
+      if (dx > EPSILON || dy > EPSILON) {
+        points.push(pt);
+      }
+    }
+  }
+
+  // Ramer-Douglas-Peucker line simplification algorithm
+  // Reduces vertices while preserving contour shape
+  function perpendicularDistance(
+    point: { x: number; y: number },
+    lineStart: { x: number; y: number },
+    lineEnd: { x: number; y: number }
+  ): number {
+    const dx = lineEnd.x - lineStart.x;
+    const dy = lineEnd.y - lineStart.y;
+    const lineLengthSq = dx * dx + dy * dy;
+
+    if (lineLengthSq === 0) {
+      // Line start and end are the same point
+      return Math.sqrt((point.x - lineStart.x) ** 2 + (point.y - lineStart.y) ** 2);
+    }
+
+    // Calculate perpendicular distance using cross product
+    const t = Math.abs(dy * point.x - dx * point.y + lineEnd.x * lineStart.y - lineEnd.y * lineStart.x);
+    return t / Math.sqrt(lineLengthSq);
+  }
+
+  function douglasPeucker(
+    pts: { x: number; y: number }[],
+    tolerance: number
+  ): { x: number; y: number }[] {
+    if (pts.length <= 2) return pts;
+
+    // Find the point with maximum distance from the line
+    let maxDist = 0;
+    let maxIdx = 0;
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+
+    for (let i = 1; i < pts.length - 1; i++) {
+      const dist = perpendicularDistance(pts[i], first, last);
+      if (dist > maxDist) {
+        maxDist = dist;
+        maxIdx = i;
+      }
+    }
+
+    // If max distance is greater than tolerance, recursively simplify
+    if (maxDist > tolerance) {
+      const left = douglasPeucker(pts.slice(0, maxIdx + 1), tolerance);
+      const right = douglasPeucker(pts.slice(maxIdx), tolerance);
+      return [...left.slice(0, -1), ...right];
+    } else {
+      // Return just the endpoints
+      return [first, last];
+    }
+  }
+
+  // Apply simplification if we have too many points
+  if (points.length > TARGET_POINTS) {
+    // Calculate initial tolerance based on geometry size
+    const xRange = Math.max(...points.map(p => p.x)) - Math.min(...points.map(p => p.x));
+    const yRange = Math.max(...points.map(p => p.y)) - Math.min(...points.map(p => p.y));
+    const size = Math.max(xRange, yRange);
+
+    // Start with a small tolerance and increase until we hit target
+    let tolerance = size * 0.0001;
+    let simplified = douglasPeucker(points, tolerance);
+
+    // Iteratively increase tolerance until we're at or below target
+    while (simplified.length > TARGET_POINTS && tolerance < size * 0.1) {
+      tolerance *= 1.5;
+      simplified = douglasPeucker(points, tolerance);
+    }
+
+    points = simplified;
+  }
+
+  // DXF R12 (AC1009) - Most universally compatible format
+  // R12 doesn't require BLOCKS, OBJECTS, or CLASSES sections
   const header = `0
 SECTION
 2
@@ -33,7 +134,7 @@ HEADER
 9
 $ACADVER
 1
-AC1015
+AC1009
 9
 $INSUNITS
 70
@@ -42,7 +143,7 @@ ${unit === 'mm' ? '4' : '1'}
 ENDSEC
 `;
 
-  // DXF tables section (minimal)
+  // Minimal TABLES section for R12
   const tables = `0
 SECTION
 2
@@ -74,7 +175,7 @@ TABLE
 2
 LAYER
 70
-2
+3
 0
 LAYER
 2
@@ -96,68 +197,73 @@ CONTOUR
 6
 CONTINUOUS
 0
+LAYER
+2
+CENTERLINE
+70
+0
+62
+1
+6
+CONTINUOUS
+0
 ENDTAB
 0
 ENDSEC
 `;
 
-  // DXF entities section - upper contour polyline
+  // DXF entities section - single open polyline (upper half only)
+  // Using POLYLINE entity for R12 compatibility (not LWPOLYLINE)
   let entities = `0
 SECTION
 2
 ENTITIES
 0
-LWPOLYLINE
+POLYLINE
 8
 CONTOUR
-90
-${points.length}
+66
+1
 70
 0
 `;
 
-  // Add each vertex
+  // Add each vertex as VERTEX entity (R12 format)
   for (const pt of points) {
-    entities += `10
-${pt.x.toFixed(6)}
-20
-${pt.y.toFixed(6)}
-`;
-  }
-
-  // Add lower contour (mirrored) as separate polyline
-  entities += `0
-LWPOLYLINE
+    entities += `0
+VERTEX
 8
 CONTOUR
-90
-${points.length}
-70
-0
-`;
-
-  // Add mirrored vertices (in reverse order for proper direction)
-  for (let i = points.length - 1; i >= 0; i--) {
-    entities += `10
-${points[i].x.toFixed(6)}
+10
+${pt.x.toFixed(PRECISION)}
 20
-${(-points[i].y).toFixed(6)}
+${pt.y.toFixed(PRECISION)}
+30
+0.0
 `;
   }
 
-  // Add centerline
+  // End the polyline
+  entities += `0
+SEQEND
+8
+CONTOUR
+`;
+
+  // Add centerline (for revolve axis reference)
   const xMin = Math.min(...points.map(p => p.x));
   const xMax = Math.max(...points.map(p => p.x));
+  const margin = (xMax - xMin) * 0.05;  // 5% margin
   entities += `0
 LINE
 8
-0
+CENTERLINE
 10
-${xMin.toFixed(6)}
+${(xMin - margin).toFixed(PRECISION)}
 20
 0.0
 11
-${xMax.toFixed(6)}
+${(xMax + margin).toFixed(PRECISION)}
 21
 0.0
 `;
@@ -173,6 +279,7 @@ EOF
 
   return header + tables + entities + eof;
 }
+
 
 // Helper function to get nice step size for a given range
 function getNiceStep(range: number): number {

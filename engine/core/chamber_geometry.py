@@ -314,34 +314,8 @@ def chamber_geometry_calc(pc_design,
     
     # Export to DXF if requested
     if export_dxf is not None:
-        if not HAS_EZDXF:
-            raise ImportError(
-                "ezdxf library is required for DXF export. "
-                "Install it with: pip install ezdxf"
-            )
-        
-        # Ensure directory exists before saving
-        dxf_path = Path(export_dxf)
-        dxf_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Create a new DXF document
-        doc = ezdxf.new('R2010')  # Use AutoCAD 2010 format
-        msp = doc.modelspace()
-        
-        # Create polyline points (x, y) for the upper half contour only
-        points = [(pt[0], pt[1]) for pt in chamber_pts]
-        
-        # Create polyline for the contour
-        msp.add_lwpolyline(points)
-        
-        # Add centerline (x-axis) as a reference
-        x_min = chamber_pts[:, 0].min()
-        x_max = chamber_pts[:, 0].max()
-        msp.add_line((x_min, 0), (x_max, 0))
-        
-        # Save the DXF file
-        doc.saveas(str(dxf_path))
-        print(f"Chamber contour exported to {export_dxf}")
+        from engine.core.dxf_export import export_chamber_dxf
+        export_chamber_dxf(chamber_pts, export_dxf)
     
     # Also return the lengths as a separate dictionary for easy access
     lengths = {
