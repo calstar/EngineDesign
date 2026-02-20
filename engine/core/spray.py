@@ -1,6 +1,9 @@
 """Spray and mixing models (J, TMR, θ, We, SMD, x*)"""
 
+from __future__ import annotations
+
 import numpy as np
+from typing import Tuple, List
 from engine.pipeline.config_schemas import SprayConfig
 
 
@@ -294,7 +297,7 @@ def check_spray_constraints(
     We_F: float,
     x_star: float,
     config: SprayConfig
-) -> tuple[bool, list[str]]:
+) -> Tuple[bool, List[str]]:
     """
     Check if spray constraints are satisfied.
     

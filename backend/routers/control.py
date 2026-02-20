@@ -1,7 +1,7 @@
 """Controller endpoints for robust DDP thrust control."""
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 import numpy as np
@@ -45,14 +45,31 @@ def safe_float(val):
 
 def convert_numpy(obj):
     """Recursively convert numpy types to Python native types, handling NaN and Inf."""
+    # Handle dataclasses and objects with __dict__
+    if hasattr(obj, '__dict__') and not isinstance(obj, (dict, list, tuple, str, bytes)):
+        try:
+            # Try to convert to dict first
+            if hasattr(obj, '__dataclass_fields__'):
+                # It's a dataclass
+                return {k: convert_numpy(getattr(obj, k, None)) for k in obj.__dataclass_fields__.keys()}
+            else:
+                # Regular object with __dict__
+                return {k: convert_numpy(v) for k, v in obj.__dict__.items()}
+        except Exception:
+            # If conversion fails, return string representation
+            return str(obj)
+    
     if isinstance(obj, dict):
         return {k: convert_numpy(v) for k, v in obj.items()}
     elif isinstance(obj, (list, tuple)):
         return [convert_numpy(item) for item in obj]
     elif isinstance(obj, np.ndarray):
         # Convert array, replacing NaN/Inf with None
-        arr_list = obj.tolist()
-        return convert_numpy(arr_list)  # Recursively handle NaN in list
+        try:
+            arr_list = obj.tolist()
+            return convert_numpy(arr_list)  # Recursively handle NaN in list
+        except Exception:
+            return str(obj)
     elif isinstance(obj, (np.integer, np.floating)):
         val = obj.item()
         # Replace NaN and Inf with None (JSON-safe)
@@ -66,8 +83,14 @@ def convert_numpy(obj):
         if np.isnan(obj) or np.isinf(obj):
             return None
         return obj
-    else:
+    elif isinstance(obj, (int, str, bool, type(None))):
         return obj
+    else:
+        # For any other type, try to convert to string
+        try:
+            return str(obj)
+        except Exception:
+            return None
 
 
 # ============================================================================
@@ -262,14 +285,71 @@ async def controller_step(request: ControllerStepRequest):
         # Run controller step
         actuation_cmd, diagnostics = _controller.step(measurement, nav_state, command)
         
+        # Extract only primitive values - avoid any numpy arrays or complex objects
+        def safe_float_val(val, default=0.0):
+            try:
+                if isinstance(val, (int, float)):
+                    fval = float(val)
+                    return fval if not (np.isnan(fval) or np.isinf(fval)) else default
+                elif isinstance(val, np.number):
+                    fval = float(val)
+                    return fval if not (np.isnan(fval) or np.isinf(fval)) else default
+                elif isinstance(val, np.ndarray):
+                    # Skip arrays entirely
+                    return default
+                return default
+            except Exception:
+                return default
+        
+        # Build diagnostics dict with ONLY primitive types
+        diagnostics_dict = {}
+        try:
+            diagnostics_dict["F_ref"] = safe_float_val(diagnostics.get("F_ref", 0.0))
+            diagnostics_dict["MR_ref"] = safe_float_val(diagnostics.get("MR_ref", 0.0))
+            diagnostics_dict["F_estimated"] = safe_float_val(diagnostics.get("F_hat", 0.0))
+            diagnostics_dict["MR_estimated"] = safe_float_val(diagnostics.get("MR_hat", 0.0))
+            diagnostics_dict["P_ch"] = safe_float_val(diagnostics.get("P_ch", 0.0))
+            diagnostics_dict["cost"] = 0.0
+            diagnostics_dict["solver_iters"] = 0
+            diagnostics_dict["safety_filtered"] = False
+            diagnostics_dict["cutoff_active"] = False
+            
+            # Try to add solution info if available (safely)
+            solution = diagnostics.get("solution")
+            if solution:
+                if hasattr(solution, 'objective'):
+                    try:
+                        obj_val = solution.objective
+                        if isinstance(obj_val, (int, float)) and not isinstance(obj_val, np.ndarray):
+                            diagnostics_dict["cost"] = safe_float_val(obj_val)
+                    except Exception:
+                        pass
+                if hasattr(solution, 'iterations'):
+                    try:
+                        iter_val = solution.iterations
+                        if isinstance(iter_val, (int, np.integer)):
+                            diagnostics_dict["solver_iters"] = int(iter_val)
+                    except Exception:
+                        pass
+        except Exception as e:
+            # If diagnostics extraction fails, use defaults
+            diagnostics_dict = {
+                "F_ref": 0.0, "MR_ref": 0.0, "F_estimated": 0.0, "MR_estimated": 0.0,
+                "P_ch": 0.0, "cost": 0.0, "solver_iters": 0, "safety_filtered": False, "cutoff_active": False
+            }
+        
+        # Extract primitive values from actuation_cmd
+        actuation_dict = {
+            "duty_F": float(getattr(actuation_cmd, 'duty_F', 0.0)),
+            "duty_O": float(getattr(actuation_cmd, 'duty_O', 0.0)),
+            "u_F_onoff": bool(getattr(actuation_cmd, 'u_F_onoff', False)),
+            "u_O_onoff": bool(getattr(actuation_cmd, 'u_O_onoff', False)),
+        }
+        
+        # Return plain dict - FastAPI will serialize it
         return {
-            "actuation": {
-                "duty_F": float(actuation_cmd.duty_F),
-                "duty_O": float(actuation_cmd.duty_O),
-                "u_F_onoff": bool(actuation_cmd.u_F_onoff),
-                "u_O_onoff": bool(actuation_cmd.u_O_onoff),
-            },
-            "diagnostics": convert_numpy(diagnostics),
+            "actuation": actuation_dict,
+            "diagnostics": diagnostics_dict,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

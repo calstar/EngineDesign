@@ -1,12 +1,14 @@
 """Configuration loading and result saving"""
 
+from __future__ import annotations
+
 import yaml
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Union
 from .config_schemas import PintleEngineConfig
 
 
-def load_config(config_path: str | Path) -> PintleEngineConfig:
+def load_config(config_path: Union[str, Path]) -> PintleEngineConfig:
     """
     Load pintle engine configuration from YAML file.
     
@@ -33,7 +35,7 @@ def load_config(config_path: str | Path) -> PintleEngineConfig:
     return config
 
 
-def save_results(results: Dict[str, Any], output_path: str | Path) -> None:
+def save_results(results: Dict[str, Any], output_path: Union[str, Path]) -> None:
     """
     Save pipeline results to file (JSON or CSV).
     

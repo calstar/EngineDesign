@@ -1,7 +1,9 @@
 """Pydantic schemas for YAML/JSON configuration validation"""
 
+from __future__ import annotations
+
 from pydantic import BaseModel, Field, field_validator, ConfigDict
-from typing import Literal, Optional, Union
+from typing import Literal, Optional, Union, List, Dict, Tuple, Set
 import numpy as np
 
 
@@ -333,15 +335,15 @@ class CEAConfig(BaseModel):
     fuel_name: str = Field(default="RP-1", description="Fuel name")
     expansion_ratio: float = Field(gt=1, description="Nozzle expansion ratio (initial/default value)")
     cache_file: str = Field(default="cea_cache_LOX_RP1.npz", description="Cache filename")
-    Pc_range: list[float] = Field(
+    Pc_range: List[float] = Field(
         default=[2.0e6, 9.0e6],
         description="Chamber pressure range [Pa]"
     )
-    MR_range: list[float] = Field(
+    MR_range: List[float] = Field(
         default=[2.0, 2.8],
         description="Mixture ratio range"
     )
-    eps_range: Optional[list[float]] = Field(
+    eps_range: Optional[List[float]] = Field(
         default=None,
         description="Expansion ratio range for 3D cache [min, max]. If None, uses 2D cache with fixed expansion_ratio"
     )
@@ -587,7 +589,7 @@ class SolverConfig(BaseModel):
         default="brentq",
         description="Root finding method"
     )
-    Pc_bounds: list[float] = Field(
+    Pc_bounds: List[float] = Field(
         default=[100000.0, 8000000.0],
         description="Chamber pressure bounds [Pa]"
     )
@@ -649,7 +651,7 @@ class FinsConfig(BaseModel):
 class MotorConfig(BaseModel):
     """Motor configuration for flight simulation (LEGACY - use propulsion_dry_mass instead)"""
     dry_mass: float = Field(gt=0, description="Motor dry mass [kg]")
-    inertia: list[float] = Field(description="Motor inertia [kg·m²]")
+    inertia: List[float] = Field(description="Motor inertia [kg·m²]")
 
 
 class RocketConfig(BaseModel):
@@ -686,7 +688,7 @@ class RocketConfig(BaseModel):
     copv_dry_mass: Optional[float] = Field(default=None, gt=0, description="COPV tank structure mass (tank walls only, no pressurant gas) [kg]")
     
     # Common parameters
-    inertia: list[float] = Field(description="AIRFRAME inertia only (without motor/propulsion), relative to airframe CM [Ixx, Iyy, Izz] [kg·m²]. Motor inertia is added separately by RocketPy from propulsion_dry_mass.")
+    inertia: List[float] = Field(description="AIRFRAME inertia only (without motor/propulsion), relative to airframe CM [Ixx, Iyy, Izz] [kg·m²]. Motor inertia is added separately by RocketPy from propulsion_dry_mass.")
     radius: float = Field(gt=0, description="Rocket body radius (outer diameter / 2) [m]")
     rocket_length: Optional[float] = Field(default=None, gt=0, description="Total rocket length from tail to nose tip [m]. Used for MoI estimation.")
     motor_position: float = Field(default=0.0, description="Nozzle exit position from rocket tail (z=0 at tail, positive toward nose) [m]")
@@ -696,13 +698,13 @@ class RocketConfig(BaseModel):
     mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Airframe mass. Use airframe_mass instead.")
     cm_wo_motor: Optional[float] = Field(default=None, description="LEGACY: CM without motor. Now auto-calculated from airframe_mass and propulsion positions.")
     dry_mass: Optional[float] = Field(default=None, gt=0, description="LEGACY: Unused field.")
-    motor_inertia: Optional[list[float]] = Field(default=None, description="LEGACY: Motor inertia. Now estimated from propulsion_dry_mass.")
+    motor_inertia: Optional[List[float]] = Field(default=None, description="LEGACY: Motor inertia. Now estimated from propulsion_dry_mass.")
     motor: Optional[MotorConfig] = Field(default=None, description="LEGACY: Motor config. Use propulsion_dry_mass instead.")
 
 
 class EnvironmentConfig(BaseModel):
     """Environment configuration for flight simulation"""
-    date: list[int] = Field(description="Launch date and time [year, month, day, hour (0-23 UTC)]")
+    date: List[int] = Field(description="Launch date and time [year, month, day, hour (0-23 UTC)]")
     latitude: float = Field(ge=-90, le=90, description="Launch site latitude (positive = North, negative = South) [deg]")
     longitude: float = Field(ge=-180, le=180, description="Launch site longitude (positive = East, negative = West) [deg]")
     elevation: float = Field(description="Launch site elevation above sea level (ground level) [m]")
@@ -841,21 +843,21 @@ class PressureCurvesConfig(BaseModel):
     target_burn_time_s: float = Field(gt=0, description="Target burn time [s] used for optimization")
     initial_lox_pressure_pa: float = Field(gt=0, description="Initial LOX tank pressure [Pa]")
     initial_fuel_pressure_pa: float = Field(gt=0, description="Initial fuel tank pressure [Pa]")
-    lox_segments: list[PressureSegmentConfig] = Field(description="LOX tank pressure curve segments")
-    fuel_segments: list[PressureSegmentConfig] = Field(description="Fuel tank pressure curve segments")
+    lox_segments: List[PressureSegmentConfig] = Field(description="LOX tank pressure curve segments")
+    fuel_segments: List[PressureSegmentConfig] = Field(description="Fuel tank pressure curve segments")
 
 
 class PintleEngineConfig(BaseModel):
     """Complete pintle engine configuration"""
-    fluids: dict[str, FluidConfig]
+    fluids: Dict[str, FluidConfig]
     injector: InjectorConfig
-    feed_system: dict[str, FeedSystemConfig]  # "oxidizer" and "fuel"
+    feed_system: Dict[str, FeedSystemConfig]  # "oxidizer" and "fuel"
     regen_cooling: Optional[RegenCoolingConfig] = Field(default=None, description="Regenerative cooling configuration (fuel only)")
     film_cooling: Optional[FilmCoolingConfig] = Field(default=None, description="Film cooling configuration")
     ablative_cooling: Optional[AblativeCoolingConfig] = Field(default=None, description="Ablative cooling configuration for chamber liner")
     graphite_insert: Optional[GraphiteInsertConfig] = Field(default=None, description="Graphite throat insert configuration (separate from chamber ablator)")
     stainless_steel_case: Optional[StainlessSteelCaseConfig] = Field(default=None, description="Stainless steel case configuration (structural wall behind ablative/graphite)")
-    discharge: dict[str, DischargeConfig]  # "oxidizer" and "fuel"
+    discharge: Dict[str, DischargeConfig]  # "oxidizer" and "fuel"
     spray: SprayConfig = Field(default_factory=SprayConfig)
     combustion: CombustionConfig = Field(default_factory=CombustionConfig)
     # Chamber geometry - unified section for solve_chamber_geometry_with_cea
