@@ -13,6 +13,7 @@ import {
 import {
   runFlightSimulation,
   checkRocketPy,
+  updateConfig,
   type EngineConfig,
   type FlightSimRequest,
   type FlightSimResponse,
@@ -26,6 +27,7 @@ import {
 interface FlightSimulationProps {
   config: EngineConfig | null;
   isVisible?: boolean;
+  onConfigUpdated?: (config: EngineConfig) => void;
 }
 
 // Session storage key (same as TimeSeriesMode)
@@ -164,7 +166,7 @@ function MetricCard({
   );
 }
 
-export function FlightSimulation({ config, isVisible = true }: FlightSimulationProps) {
+export function FlightSimulation({ config, isVisible = true, onConfigUpdated }: FlightSimulationProps) {
   // RocketPy availability
   const [rocketPyAvailable, setRocketPyAvailable] = useState<boolean | null>(null);
   const [rocketPyMessage, setRocketPyMessage] = useState<string>('');
@@ -210,6 +212,7 @@ export function FlightSimulation({ config, isVisible = true }: FlightSimulationP
   // Results
   const [results, setResults] = useState<FlightSimResponse | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Time-series data from session
@@ -417,6 +420,70 @@ export function FlightSimulation({ config, isVisible = true }: FlightSimulationP
     timeSeriesData,
   ]);
 
+  // Save config back to yaml
+  const handleSaveConfig = useCallback(async () => {
+    setIsSaving(true);
+    setError(null);
+    try {
+      // Build partial config tree
+      const updates: Partial<EngineConfig> = {
+        lox_tank: {
+          ...(config?.lox_tank as Record<string, unknown> || {}),
+          mass: parseFloat(loxMass),
+        },
+        fuel_tank: {
+          ...(config?.fuel_tank as Record<string, unknown> || {}),
+          mass: parseFloat(fuelMass),
+        },
+        environment: {
+          ...(config?.environment as Record<string, unknown> || {}),
+          latitude: parseFloat(latitude),
+          longitude: parseFloat(longitude),
+          elevation: parseFloat(elevation),
+          date: [parseInt(launchYear), parseInt(launchMonth), parseInt(launchDay), parseInt(launchHour)],
+        },
+        rocket: {
+          ...(config?.rocket as Record<string, unknown> || {}),
+          airframe_mass: parseFloat(airframeMass),
+          engine_mass: parseFloat(engineMass),
+          lox_tank_structure_mass: parseFloat(loxTankMass),
+          fuel_tank_structure_mass: parseFloat(fuelTankMass),
+          radius: parseFloat(rocketRadius),
+          rocket_length: parseFloat(rocketLength),
+          motor_position: parseFloat(motorPosition),
+          inertia: [parseFloat(inertiaX), parseFloat(inertiaY), parseFloat(inertiaZ)],
+          fins: {
+            no_fins: parseInt(finCount),
+            root_chord: parseFloat(rootChord),
+            tip_chord: parseFloat(tipChord),
+            fin_span: parseFloat(finSpan),
+            fin_position: parseFloat(finPosition),
+          },
+        },
+      };
+
+      const result = await updateConfig(updates);
+      if (result.error) {
+        setError(result.error);
+      } else if (result.data?.config && onConfigUpdated) {
+        onConfigUpdated(result.data.config);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save config');
+    } finally {
+      setIsSaving(false);
+    }
+  }, [
+    config, onConfigUpdated,
+    loxMass, fuelMass,
+    latitude, longitude, elevation, launchYear, launchMonth, launchDay, launchHour,
+    airframeMass, engineMass, loxTankMass, fuelTankMass,
+    rocketRadius, rocketLength, motorPosition,
+    inertiaX, inertiaY, inertiaZ,
+    finCount, rootChord, tipChord, finSpan, finPosition
+  ]);
+
+
   // Chart data
   const trajectoryData = useMemo(() => {
     if (!results?.trajectory) return [];
@@ -614,6 +681,26 @@ export function FlightSimulation({ config, isVisible = true }: FlightSimulationP
               RocketPy-based trajectory simulation
             </p>
           </div>
+        </div>
+
+        <div className="flex justify-end gap-3 mb-4">
+          <button
+            onClick={handleSaveConfig}
+            disabled={isSaving}
+            className="px-4 py-2 bg-[var(--color-bg-tertiary)] hover:bg-[var(--color-bg-hover)] text-[var(--color-text-primary)] border border-[var(--color-border)] rounded-lg disabled:opacity-50 transition-colors flex items-center gap-2"
+          >
+            {isSaving ? (
+              <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            ) : (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+              </svg>
+            )}
+            Save Configuration
+          </button>
         </div>
 
         {/* Time-series data status */}
