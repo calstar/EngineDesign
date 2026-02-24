@@ -25,6 +25,7 @@ import {
 
 interface FlightSimulationProps {
   config: EngineConfig | null;
+  isVisible?: boolean;
 }
 
 // Session storage key (same as TimeSeriesMode)
@@ -163,7 +164,7 @@ function MetricCard({
   );
 }
 
-export function FlightSimulation({ config }: FlightSimulationProps) {
+export function FlightSimulation({ config, isVisible = true }: FlightSimulationProps) {
   // RocketPy availability
   const [rocketPyAvailable, setRocketPyAvailable] = useState<boolean | null>(null);
   const [rocketPyMessage, setRocketPyMessage] = useState<string>('');
@@ -212,7 +213,7 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
   const [error, setError] = useState<string | null>(null);
 
   // Time-series data from session
-  const timeSeriesData = useMemo(() => loadTimeSeriesFromSession(), []);
+  const timeSeriesData = useMemo(() => loadTimeSeriesFromSession(), [isVisible]);
   const hasTimeSeriesData = timeSeriesData !== null && timeSeriesData.time.length > 0;
 
   // Check RocketPy availability on mount
@@ -259,7 +260,7 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
       if (typeof rocket.radius === 'number') setRocketRadius(String(rocket.radius));
       if (typeof rocket.rocket_length === 'number') setRocketLength(String(rocket.rocket_length));
       if (typeof rocket.motor_position === 'number') setMotorPosition(String(rocket.motor_position));
-      
+
       const inertia = rocket.inertia as number[] | undefined;
       if (Array.isArray(inertia) && inertia.length >= 3) {
         setInertiaX(String(inertia[0]));
@@ -354,7 +355,7 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
         setIsLoading(false);
         return;
       }
-      
+
       // Convert thrust from kN to N
       const thrustN = timeSeriesData.thrust_kN.map((t) => t * 1000);
 
@@ -441,7 +442,7 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
     const cutoff = (results?.truncation?.truncated && results?.truncation?.cutoff_time != null)
       ? results.truncation.cutoff_time
       : null;
-    
+
     // Prefer thrust_curve from results if available
     if (results?.thrust_curve?.time && results.thrust_curve.thrust_N) {
       const { time, thrust_N } = results.thrust_curve;
@@ -479,13 +480,13 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
     const cutoff = (results?.truncation?.truncated && results?.truncation?.cutoff_time != null)
       ? results.truncation.cutoff_time
       : null;
-    
+
     const data = timeSeriesData.time.map((t, i) => ({
       time: t,
       lox_pressure: timeSeriesData.P_tank_O_psi[i],
       fuel_pressure: timeSeriesData.P_tank_F_psi[i],
     }));
-    
+
     if (cutoff !== null) {
       return data.filter((point) => point.time <= cutoff);
     }
@@ -497,44 +498,44 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
     if (!timeSeriesData?.time || !timeSeriesData?.mdot_O_kg_s || !timeSeriesData?.mdot_F_kg_s) {
       return [];
     }
-    
+
     const initialLoxMass = parseFloat(loxMass) || 0;
     const initialFuelMass = parseFloat(fuelMass) || 0;
-    
+
     if (initialLoxMass <= 0 || initialFuelMass <= 0) {
       return [];
     }
-    
+
     // Get cutoff directly from results
     const cutoff = (results?.truncation?.truncated && results?.truncation?.cutoff_time != null)
       ? results.truncation.cutoff_time
       : null;
-    
+
     const times = timeSeriesData.time;
     const mdotO = timeSeriesData.mdot_O_kg_s;
     const mdotF = timeSeriesData.mdot_F_kg_s;
-    
+
     // Calculate cumulative mass consumed using trapezoidal integration
     const data: { time: number; lox_fill: number; fuel_fill: number; lox_mass: number; fuel_mass: number }[] = [];
     let cumulativeLoxMass = 0;
     let cumulativeFuelMass = 0;
-    
+
     for (let i = 0; i < times.length; i++) {
       // Apply cutoff filter early
       if (cutoff !== null && times[i] > cutoff) {
         break;
       }
-      
+
       if (i > 0) {
         const dt = times[i] - times[i - 1];
         // Trapezoidal integration: average of mdot at i-1 and i, times dt
         cumulativeLoxMass += ((mdotO[i - 1] + mdotO[i]) / 2) * dt;
         cumulativeFuelMass += ((mdotF[i - 1] + mdotF[i]) / 2) * dt;
       }
-      
+
       const remainingLox = Math.max(0, initialLoxMass - cumulativeLoxMass);
       const remainingFuel = Math.max(0, initialFuelMass - cumulativeFuelMass);
-      
+
       data.push({
         time: times[i],
         lox_fill: (remainingLox / initialLoxMass) * 100,
@@ -543,7 +544,7 @@ export function FlightSimulation({ config }: FlightSimulationProps) {
         fuel_mass: remainingFuel,
       });
     }
-    
+
     return data;
   }, [timeSeriesData, results, loxMass, fuelMass]);
 

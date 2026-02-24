@@ -9,7 +9,6 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
-  ReferenceLine,
 } from 'recharts';
 import type { TimeSeriesData, TimeSeriesSummary } from '../api/client';
 
@@ -81,7 +80,7 @@ function loadResultsFromSession(): { data: TimeSeriesData; summary: TimeSeriesSu
 function getAvailableFields(data: TimeSeriesData): string[] {
   const fields: string[] = [];
   for (const key of Object.keys(data)) {
-    const value = (data as Record<string, unknown>)[key];
+    const value = (data as unknown as Record<string, unknown>)[key];
     if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'number') {
       fields.push(key);
     }
@@ -102,8 +101,8 @@ function formatValue(value: number, decimals: number = 3): string {
 }
 
 export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
-  const results = useMemo(() => loadResultsFromSession(), []);
-  
+  const results = useMemo(() => loadResultsFromSession(), [isVisible]);
+
   // Available fields
   const availableFields = useMemo(() => {
     if (!results) return [];
@@ -131,11 +130,11 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
     const data = results.data;
     const length = data.time.length;
     const points: Record<string, number>[] = [];
-    
+
     for (let i = 0; i < length; i++) {
       const point: Record<string, number> = {};
       for (const field of availableFields) {
-        const arr = (data as Record<string, number[]>)[field];
+        const arr = (data as unknown as Record<string, number[]>)[field];
         if (arr && arr[i] !== undefined) {
           point[field] = arr[i];
         }
@@ -148,20 +147,20 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
   // Calculate time axis ticks (integer seconds) when x-axis is time
   const timeAxisConfig = useMemo(() => {
     if (xAxis !== 'time' || chartData.length === 0) return null;
-    
+
     const times = chartData.map(p => p.time).filter(t => t !== undefined);
     if (times.length === 0) return null;
-    
+
     const minTime = Math.min(...times);
     const maxTime = Math.max(...times);
     const maxTimeInt = Math.ceil(maxTime);
-    
+
     // Generate integer ticks from 0 to maxTimeInt
     const integerTicks: number[] = [];
     for (let i = 0; i <= maxTimeInt; i++) {
       integerTicks.push(i);
     }
-    
+
     return {
       minTime,
       maxTimeInt,
@@ -214,9 +213,9 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
   // Custom tooltip
   const CustomTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload || !payload.length) return null;
-    
+
     const xInfo = getFieldInfo(xAxis);
-    
+
     return (
       <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-border)] rounded-lg p-3 shadow-xl">
         <p className="text-sm font-medium text-[var(--color-text-primary)] mb-2">
@@ -227,8 +226,8 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
             const info = getFieldInfo(entry.dataKey);
             return (
               <p key={idx} className="text-xs flex items-center gap-2">
-                <span 
-                  className="w-3 h-3 rounded-full" 
+                <span
+                  className="w-3 h-3 rounded-full"
                   style={{ backgroundColor: entry.color }}
                 />
                 <span style={{ color: entry.color }}>
@@ -245,16 +244,16 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
   // Download CSV
   const handleDownloadCSV = useCallback(() => {
     if (!results) return;
-    
+
     const headers = availableFields.map(f => {
       const info = getFieldInfo(f);
       return `${info.label} (${info.unit})`;
     });
-    
-    const rows = chartData.map(point => 
+
+    const rows = chartData.map(point =>
       availableFields.map(f => point[f]?.toString() ?? '').join(',')
     );
-    
+
     const csv = [headers.join(','), ...rows].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -341,26 +340,26 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
   }
 
   const xInfo = getFieldInfo(xAxis);
-  
+
   // Helper to format field label with unit
   const formatFieldLabel = (field: string) => {
     const info = getFieldInfo(field);
     return info.unit ? `${info.label} (${info.unit})` : info.label;
   };
-  
-  const primaryLabel = primaryYAxes.length <= 2 
+
+  const primaryLabel = primaryYAxes.length <= 2
     ? primaryYAxes.map(f => formatFieldLabel(f)).join(', ')
     : `${primaryYAxes.length} series`;
-  const secondaryLabel = secondaryYAxes.length <= 2 
+  const secondaryLabel = secondaryYAxes.length <= 2
     ? secondaryYAxes.map(f => formatFieldLabel(f)).join(', ')
     : `${secondaryYAxes.length} series`;
-  
+
   // For single axis mode, use the same label format
-  const singleYAxisLabel = yAxes.length === 1 
+  const singleYAxisLabel = yAxes.length === 1
     ? formatFieldLabel(yAxes[0])
     : yAxes.length <= 2
-    ? yAxes.map(f => formatFieldLabel(f)).join(', ')
-    : `${yAxes.length} series`;
+      ? yAxes.map(f => formatFieldLabel(f)).join(', ')
+      : `${yAxes.length} series`;
 
   return (
     <div className="space-y-6">
@@ -388,21 +387,19 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
             <div className="flex gap-2">
               <button
                 onClick={() => setPlotType('line')}
-                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                  plotType === 'line'
-                    ? 'bg-emerald-600 border-emerald-600 text-white'
-                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-emerald-500'
-                }`}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${plotType === 'line'
+                  ? 'bg-emerald-600 border-emerald-600 text-white'
+                  : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-emerald-500'
+                  }`}
               >
                 Line
               </button>
               <button
                 onClick={() => setPlotType('scatter')}
-                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                  plotType === 'scatter'
-                    ? 'bg-emerald-600 border-emerald-600 text-white'
-                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-emerald-500'
-                }`}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${plotType === 'scatter'
+                  ? 'bg-emerald-600 border-emerald-600 text-white'
+                  : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-emerald-500'
+                  }`}
               >
                 Scatter
               </button>
@@ -431,21 +428,19 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
             <div className="flex gap-2">
               <button
                 onClick={() => setXScale('linear')}
-                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                  xScale === 'linear'
-                    ? 'bg-blue-600 border-blue-600 text-white'
-                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
-                }`}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${xScale === 'linear'
+                  ? 'bg-blue-600 border-blue-600 text-white'
+                  : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
+                  }`}
               >
                 Linear
               </button>
               <button
                 onClick={() => setXScale('log')}
-                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                  xScale === 'log'
-                    ? 'bg-blue-600 border-blue-600 text-white'
-                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
-                }`}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${xScale === 'log'
+                  ? 'bg-blue-600 border-blue-600 text-white'
+                  : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
+                  }`}
               >
                 Log
               </button>
@@ -458,21 +453,19 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
             <div className="flex gap-2">
               <button
                 onClick={() => setYScale('linear')}
-                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                  yScale === 'linear'
-                    ? 'bg-blue-600 border-blue-600 text-white'
-                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
-                }`}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${yScale === 'linear'
+                  ? 'bg-blue-600 border-blue-600 text-white'
+                  : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
+                  }`}
               >
                 Linear
               </button>
               <button
                 onClick={() => setYScale('log')}
-                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                  yScale === 'log'
-                    ? 'bg-blue-600 border-blue-600 text-white'
-                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
-                }`}
+                className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${yScale === 'log'
+                  ? 'bg-blue-600 border-blue-600 text-white'
+                  : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-blue-500'
+                  }`}
               >
                 Log
               </button>
@@ -521,22 +514,21 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
               )}
             </div>
           </div>
-          
+
           <div className="flex flex-wrap gap-2">
             {availableFields.filter(f => f !== xAxis).map((field, idx) => {
               const info = getFieldInfo(field);
               const isSelected = yAxes.includes(field);
               const isSecondary = secondaryYAxes.includes(field);
-              
+
               return (
                 <button
                   key={field}
                   onClick={() => handleYAxisChange(field)}
-                  className={`px-3 py-1.5 text-xs rounded-lg border transition-all flex items-center gap-2 ${
-                    isSelected
-                      ? 'border-emerald-500 bg-emerald-500/20 text-emerald-400'
-                      : 'border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:border-emerald-500/50'
-                  }`}
+                  className={`px-3 py-1.5 text-xs rounded-lg border transition-all flex items-center gap-2 ${isSelected
+                    ? 'border-emerald-500 bg-emerald-500/20 text-emerald-400'
+                    : 'border-[var(--color-border)] bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] hover:border-emerald-500/50'
+                    }`}
                 >
                   <span
                     className="w-2 h-2 rounded-full"
@@ -544,16 +536,15 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
                   />
                   {info.label}
                   {isSelected && useSecondaryAxis && (
-                    <span 
+                    <span
                       onClick={(e) => {
                         e.stopPropagation();
                         toggleAxisAssignment(field);
                       }}
-                      className={`ml-1 px-1.5 py-0.5 text-[10px] rounded cursor-pointer ${
-                        isSecondary 
-                          ? 'bg-purple-500/30 text-purple-400' 
-                          : 'bg-blue-500/30 text-blue-400'
-                      }`}
+                      className={`ml-1 px-1.5 py-0.5 text-[10px] rounded cursor-pointer ${isSecondary
+                        ? 'bg-purple-500/30 text-purple-400'
+                        : 'bg-blue-500/30 text-blue-400'
+                        }`}
                     >
                       {isSecondary ? 'R' : 'L'}
                     </span>
@@ -572,21 +563,19 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
               <div className="flex gap-2 w-48">
                 <button
                   onClick={() => setY2Scale('linear')}
-                  className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                    y2Scale === 'linear'
-                      ? 'bg-purple-600 border-purple-600 text-white'
-                      : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-purple-500'
-                  }`}
+                  className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${y2Scale === 'linear'
+                    ? 'bg-purple-600 border-purple-600 text-white'
+                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-purple-500'
+                    }`}
                 >
                   Linear
                 </button>
                 <button
                   onClick={() => setY2Scale('log')}
-                  className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${
-                    y2Scale === 'log'
-                      ? 'bg-purple-600 border-purple-600 text-white'
-                      : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-purple-500'
-                  }`}
+                  className={`flex-1 px-3 py-2 text-sm rounded-lg border transition-colors ${y2Scale === 'log'
+                    ? 'bg-purple-600 border-purple-600 text-white'
+                    : 'bg-[var(--color-bg-primary)] border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-purple-500'
+                    }`}
                 >
                   Log
                 </button>
@@ -610,7 +599,7 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
         <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
           <div className="flex items-center justify-between mb-4">
             <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">
-              {yAxes.length === 1 
+              {yAxes.length === 1
                 ? `${getFieldInfo(yAxes[0]).label} vs ${xInfo.label}`
                 : `Multi-Series Plot`
               }
@@ -624,7 +613,7 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
               )}
             </div>
           </div>
-          
+
           <ResponsiveContainer width="100%" height={400}>
             <ComposedChart data={chartData} margin={{ top: 5, right: 60, left: 20, bottom: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.5} />
@@ -632,22 +621,22 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
                 dataKey={xAxis}
                 type="number"
                 scale={xScale}
-                domain={timeAxisConfig && xScale !== 'log' 
-                  ? [timeAxisConfig.minTime, timeAxisConfig.maxTimeInt] 
+                domain={timeAxisConfig && xScale !== 'log'
+                  ? [timeAxisConfig.minTime, timeAxisConfig.maxTimeInt]
                   : ['auto', 'auto']}
                 ticks={timeAxisConfig && xScale !== 'log' ? timeAxisConfig.integerTicks : undefined}
                 tickFormatter={timeAxisConfig ? timeAxisConfig.formatTick : undefined}
                 allowDecimals={!timeAxisConfig}
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                label={{ 
-                  value: xInfo.unit ? `${xInfo.label} (${xInfo.unit})` : xInfo.label, 
-                  position: 'insideBottom', 
-                  offset: -5, 
-                  fill: 'var(--color-text-secondary)' 
+                label={{
+                  value: xInfo.unit ? `${xInfo.label} (${xInfo.unit})` : xInfo.label,
+                  position: 'insideBottom',
+                  offset: -5,
+                  fill: 'var(--color-text-secondary)'
                 }}
               />
-              
+
               {/* Primary Y-Axis */}
               <YAxis
                 yAxisId="left"
@@ -655,14 +644,14 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
                 domain={yScale === 'log' || yAutoRange ? ['auto', 'auto'] : [0, 'auto']}
                 stroke={useSecondaryAxis ? '#3b82f6' : 'var(--color-text-secondary)'}
                 tick={{ fill: useSecondaryAxis ? '#3b82f6' : 'var(--color-text-secondary)', fontSize: 11 }}
-                label={{ 
-                  value: useSecondaryAxis ? primaryLabel : singleYAxisLabel, 
-                  angle: -90, 
-                  position: 'insideLeft', 
+                label={{
+                  value: useSecondaryAxis ? primaryLabel : singleYAxisLabel,
+                  angle: -90,
+                  position: 'insideLeft',
                   fill: useSecondaryAxis ? '#3b82f6' : 'var(--color-text-secondary)'
                 }}
               />
-              
+
               {/* Secondary Y-Axis */}
               {useSecondaryAxis && secondaryYAxes.length > 0 && (
                 <YAxis
@@ -672,25 +661,25 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
                   domain={y2Scale === 'log' || y2AutoRange ? ['auto', 'auto'] : [0, 'auto']}
                   stroke="#a855f7"
                   tick={{ fill: '#a855f7', fontSize: 11 }}
-                  label={{ 
-                    value: secondaryLabel, 
-                    angle: 90, 
-                    position: 'insideRight', 
-                    fill: '#a855f7' 
+                  label={{
+                    value: secondaryLabel,
+                    angle: 90,
+                    position: 'insideRight',
+                    fill: '#a855f7'
                   }}
                 />
               )}
-              
+
               <Tooltip content={<CustomTooltip />} />
               <Legend />
-              
+
               {/* Render series */}
               {yAxes.map((field, idx) => {
                 const color = getSeriesColor(field, idx);
                 const info = getFieldInfo(field);
                 const isSecondary = useSecondaryAxis && secondaryYAxes.includes(field);
                 const yAxisId = isSecondary ? 'right' : 'left';
-                
+
                 if (plotType === 'scatter') {
                   return (
                     <Scatter
@@ -702,7 +691,7 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
                     />
                   );
                 }
-                
+
                 return (
                   <Line
                     key={field}
@@ -744,16 +733,16 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
               </svg>
               Data Preview ({chartData.length} rows, {availableFields.length} columns)
             </span>
-            <svg 
-              className={`w-4 h-4 transition-transform ${showDataPreview ? 'rotate-180' : ''}`} 
-              fill="none" 
-              stroke="currentColor" 
+            <svg
+              className={`w-4 h-4 transition-transform ${showDataPreview ? 'rotate-180' : ''}`}
+              fill="none"
+              stroke="currentColor"
               viewBox="0 0 24 24"
             >
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
           </button>
-          
+
           {showDataPreview && (
             <div className="border-t border-[var(--color-border)]">
               <div className="p-3 flex justify-end gap-2 border-b border-[var(--color-border)]">
@@ -777,7 +766,7 @@ export function CustomPlotter({ isVisible = true }: CustomPlotterProps) {
                   Download CSV
                 </button>
               </div>
-              
+
               <div className="overflow-x-auto max-h-64 overflow-y-auto">
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 bg-[var(--color-bg-secondary)]">

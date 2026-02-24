@@ -76,13 +76,12 @@ function App() {
 
             {/* Connection status */}
             <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${
-                isConnected === null ? 'bg-yellow-500 animate-pulse' :
-                isConnected ? 'bg-green-500' : 'bg-red-500'
-              }`} />
+              <div className={`w-2 h-2 rounded-full ${isConnected === null ? 'bg-yellow-500 animate-pulse' :
+                  isConnected ? 'bg-green-500' : 'bg-red-500'
+                }`} />
               <span className="text-sm text-[var(--color-text-secondary)]">
                 {isConnected === null ? 'Connecting...' :
-                 isConnected ? 'Connected' : 'Disconnected'}
+                  isConnected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
           </div>
@@ -91,91 +90,82 @@ function App() {
           <nav className="flex gap-1 -mb-px">
             <button
               onClick={() => setActiveTab('forward')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'forward'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'forward'
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Forward Mode
             </button>
             <button
               onClick={() => setActiveTab('timeseries')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'timeseries'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'timeseries'
                   ? 'border-purple-500 text-purple-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Time-Series Analysis
             </button>
             <button
               onClick={() => setActiveTab('plotter')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'plotter'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'plotter'
                   ? 'border-emerald-500 text-emerald-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Custom Plotter
             </button>
             <button
               onClick={() => setActiveTab('flight')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'flight'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'flight'
                   ? 'border-orange-500 text-orange-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Flight Simulation
             </button>
             <button
               onClick={() => setActiveTab('geometry')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'geometry'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'geometry'
                   ? 'border-rose-500 text-rose-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Chamber Geometry
             </button>
             <button
               onClick={() => setActiveTab('optimizer')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'optimizer'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'optimizer'
                   ? 'border-yellow-500 text-yellow-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Optimizer
             </button>
             <button
               onClick={() => setActiveTab('controller')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'controller'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'controller'
                   ? 'border-teal-500 text-teal-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Controller
             </button>
             <button
               onClick={() => setActiveTab('demo')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'demo'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'demo'
                   ? 'border-cyan-500 text-cyan-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Demo
             </button>
             <button
               onClick={() => setActiveTab('config')}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                activeTab === 'config'
+              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'config'
                   ? 'border-blue-500 text-blue-400'
                   : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] hover:border-[var(--color-border)]'
-              }`}
+                }`}
             >
               Configuration
             </button>
@@ -237,7 +227,7 @@ function App() {
                 <ConfigUpload onConfigLoaded={handleConfigLoaded} />
               </div>
             )}
-            <FlightSimulation config={config} />
+            <FlightSimulation config={config} isVisible={activeTab === 'flight'} />
           </div>
         </div>
 
