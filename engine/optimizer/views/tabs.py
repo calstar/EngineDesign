@@ -267,27 +267,6 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         with colF3:
             fins["fin_position"] = float(st.number_input("Fin position [m]", value=float(fin_position_val), key="opt_fins_pos"))
 
-        # Strakes
-        st.markdown("##### Strakes")
-        strakes = rocket.get("strakes") if rocket.get("strakes") is not None else {}
-        s_no_fins_val = strakes.get("no_fins") or 3
-        s_root_chord_val = strakes.get("root_chord") or 0.2
-        s_tip_chord_val = strakes.get("tip_chord") or 0.1
-        s_fin_span_val = strakes.get("fin_span") or 0.3
-        s_fin_position_val = strakes.get("fin_position")
-        if s_fin_position_val is None:
-            s_fin_position_val = 0.0
-        
-        colS1, colS2, colS3 = st.columns(3)
-        with colS1:
-            strakes["no_fins"] = int(st.number_input("Strake count", value=int(s_no_fins_val), min_value=1, step=1, key="opt_strakes_count"))
-            strakes["root_chord"] = float(st.number_input("Root chord [m]", value=float(s_root_chord_val), key="opt_strakes_root"))
-        with colS2:
-            strakes["tip_chord"] = float(st.number_input("Tip chord [m]", value=float(s_tip_chord_val), key="opt_strakes_tip"))
-            strakes["fin_span"] = float(st.number_input("Fin span [m]", value=float(s_fin_span_val), key="opt_strakes_span"))
-        with colS3:
-            strakes["fin_position"] = float(st.number_input("Fin position [m]", value=float(s_fin_position_val), key="opt_strakes_pos"))
-
         # Store rocket config
         rocket["airframe_mass"] = float(airframe)
         rocket["engine_mass"] = float(engine_mass)
@@ -302,7 +281,6 @@ def _design_requirements_tab(config_obj: PintleEngineConfig) -> PintleEngineConf
         rocket["rocket_length"] = float(rocket_length)
         rocket["inertia"] = [float(i_xx), float(i_yy), float(i_zz)]
         rocket["fins"] = fins
-        rocket["strakes"] = strakes
         working["rocket"] = rocket
     
     # --- Tanks Expander ---

@@ -30,7 +30,7 @@ async def lifespan(app: FastAPI):
     if default_config_path.exists():
         try:
             config_obj = load_config(str(default_config_path))
-            app_state.set_config(config_obj)
+            app_state.set_config(config_obj, str(default_config_path))
             print(f"Loaded default config from {default_config_path}")
         except Exception as e:
             print(f"Warning: Could not load default config: {e}")

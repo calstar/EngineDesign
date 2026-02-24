@@ -138,7 +138,6 @@ const FIELD_LABELS: Record<string, string> = {
   inertia: 'Inertia (kg·m²)',
   // Fins
   fins: 'Fins',
-  strakes: 'Strakes',
   no_fins: 'Number of Fins',
   root_chord: 'Root Chord (m)',
   tip_chord: 'Tip Chord (m)',
@@ -166,7 +165,7 @@ function InputField({ label, value, onChange }: InputFieldProps) {
 
   const handleBlur = () => {
     if (value === null && localValue === '') return;
-    
+
     // Try to parse as number
     if (typeof value === 'number' || (!isNaN(Number(localValue)) && localValue !== '')) {
       const num = Number(localValue);
@@ -175,7 +174,7 @@ function InputField({ label, value, onChange }: InputFieldProps) {
         return;
       }
     }
-    
+
     // Handle boolean
     if (localValue.toLowerCase() === 'true') {
       onChange(true);
@@ -185,13 +184,13 @@ function InputField({ label, value, onChange }: InputFieldProps) {
       onChange(false);
       return;
     }
-    
+
     // Handle null
     if (localValue === '' || localValue.toLowerCase() === 'null') {
       onChange(null);
       return;
     }
-    
+
     onChange(localValue);
   };
 
@@ -202,14 +201,12 @@ function InputField({ label, value, onChange }: InputFieldProps) {
         <label className="text-sm text-[var(--color-text-secondary)]">{label}</label>
         <button
           onClick={() => onChange(!value)}
-          className={`relative w-12 h-6 rounded-full transition-colors ${
-            value ? 'bg-blue-500' : 'bg-gray-600'
-          }`}
+          className={`relative w-12 h-6 rounded-full transition-colors ${value ? 'bg-blue-500' : 'bg-gray-600'
+            }`}
         >
           <span
-            className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${
-              value ? 'left-7' : 'left-1'
-            }`}
+            className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-transform ${value ? 'left-7' : 'left-1'
+              }`}
           />
         </button>
       </div>
@@ -242,9 +239,8 @@ function InputField({ label, value, onChange }: InputFieldProps) {
         onChange={(e) => setLocalValue(e.target.value)}
         onBlur={handleBlur}
         placeholder={value === null ? 'null' : ''}
-        className={`w-40 px-3 py-1.5 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-colors ${
-          value === null ? 'text-gray-500 italic' : 'text-[var(--color-text-primary)]'
-        }`}
+        className={`w-40 px-3 py-1.5 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500/50 transition-colors ${value === null ? 'text-gray-500 italic' : 'text-[var(--color-text-primary)]'
+          }`}
       />
     </div>
   );
@@ -460,7 +456,7 @@ function SectionCard({ sectionKey, data, onEdit }: SectionCardProps) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
-      
+
       {isExpanded && (
         <div className="px-4 pb-4 border-t border-[var(--color-border)]">
           <div className="pt-3 space-y-1">
@@ -535,7 +531,7 @@ export function ConfigEditor({ config, onConfigUpdated }: ConfigEditorProps) {
 
   const filteredSections = useMemo(() => {
     if (!config) return [];
-    
+
     const sections = sectionOrder.filter(key => key in config);
     // Add any remaining sections not in the predefined order
     Object.keys(config).forEach(key => {
@@ -548,7 +544,7 @@ export function ConfigEditor({ config, onConfigUpdated }: ConfigEditorProps) {
       const meta = SECTION_META[key];
       const label = meta?.label || key;
       return label.toLowerCase().includes(searchQuery.toLowerCase()) ||
-             key.toLowerCase().includes(searchQuery.toLowerCase());
+        key.toLowerCase().includes(searchQuery.toLowerCase());
     });
   }, [config, searchQuery]);
 
@@ -597,7 +593,7 @@ export function ConfigEditor({ config, onConfigUpdated }: ConfigEditorProps) {
             </div>
           )}
         </div>
-        
+
         {/* Search bar */}
         <div className="relative">
           <svg
@@ -638,7 +634,7 @@ export function ConfigEditor({ config, onConfigUpdated }: ConfigEditorProps) {
             onEdit={handleEdit}
           />
         ))}
-        
+
         {filteredSections.length === 0 && searchQuery && (
           <div className="text-center py-8 text-[var(--color-text-secondary)]">
             <p>No sections match "{searchQuery}"</p>

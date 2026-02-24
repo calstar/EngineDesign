@@ -358,12 +358,6 @@ rocket:
     tip_chord: 0.20066
     fin_span: 0.20066
     fin_position: 1.054535
-  strakes:
-    no_fins: 4
-    root_chord: 0.305
-    tip_chord: 0.152
-    fin_span: 0.152
-    fin_position: 3.58
 environment:
   date:
   - 2026

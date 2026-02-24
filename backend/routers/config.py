@@ -1,6 +1,8 @@
 """Config management endpoints."""
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
+import os
+from pathlib import Path
 from pydantic import ValidationError
 import yaml
 
@@ -23,9 +25,19 @@ async def upload_config(file: UploadFile = File(...)):
     
     try:
         content = await file.read()
+        
+        # Save to configs directory
+        from backend.main import project_root
+        configs_dir = project_root / "configs"
+        configs_dir.mkdir(exist_ok=True)
+        save_path = configs_dir / file.filename
+        
+        with open(save_path, "wb") as f:
+            f.write(content)
+            
         data = yaml.safe_load(content.decode("utf-8"))
         config = PintleEngineConfig(**data)
-        app_state.set_config(config)
+        app_state.set_config(config, str(save_path))
         return {
             "status": "success",
             "message": f"Config loaded from {file.filename}",
@@ -74,7 +86,14 @@ async def update_config(updates: dict):
         
         # Validate and create new config
         new_config = PintleEngineConfig(**merged)
-        app_state.set_config(new_config)
+        
+        # Save to disk if we have a path
+        if app_state.config_path:
+            with open(app_state.config_path, "w", encoding="utf-8") as f:
+                # Use clean dict (exclude unset/none if desired, but here we just dump the model)
+                yaml.dump(config_to_dict(new_config), f, default_flow_style=False, sort_keys=False)
+                
+        app_state.set_config(new_config, app_state.config_path)
         
         return {
             "status": "success",

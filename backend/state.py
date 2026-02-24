@@ -11,11 +11,14 @@ class AppState:
     def __init__(self):
         self.config: Optional[PintleEngineConfig] = None
         self.runner: Optional[PintleEngineRunner] = None
+        self.config_path: Optional[str] = None
     
-    def set_config(self, config: PintleEngineConfig) -> None:
+    def set_config(self, config: PintleEngineConfig, config_path: Optional[str] = None) -> None:
         """Set config and create a new runner instance."""
         self.config = config
         self.runner = PintleEngineRunner(config)
+        if config_path is not None:
+            self.config_path = config_path
     
     def has_config(self) -> bool:
         """Check if a config is loaded."""

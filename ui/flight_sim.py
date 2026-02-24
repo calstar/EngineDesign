@@ -836,15 +836,6 @@ def setup_flight(config, thrust_curve, mdot_lox, mdot_fuel, plot_results=False):
         position=config.rocket.fins.fin_position,  # User-specified position from rocket tail
     )
 
-    # Add strakes 
-    rocket.add_trapezoidal_fins(
-        n=config.rocket.strakes.no_fins,
-        root_chord=config.rocket.strakes.root_chord,
-        tip_chord=config.rocket.strakes.tip_chord,
-        span=config.rocket.strakes.fin_span,
-        position=config.rocket.strakes.fin_position,  # User-specified position from rocket tail
-    )
-    
     # Motor above fins
     rocket.add_motor(liquid_motor, position=motor_position)
     
