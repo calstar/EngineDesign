@@ -265,11 +265,11 @@ graphite_insert:
 injector:
   geometry:
     fuel:
-      A_entry: 0.0006243142849960269
-      d_hydraulic: 0.001092199999999998
-      d_pintle_tip: 0.028194
-      d_reservoir_inner: 0.0292862
-      h_gap: 0.000546099999999999
+      A_entry: 0.0006269311525882157
+      d_hydraulic: 0.0009999999980027608
+      d_pintle_tip: 0.028253027011308197
+      d_reservoir_inner: 0.02925302700931096
+      h_gap: 0.0004999999990013804
     lox:
       A_entry: 5.8108495056721366e-06
       d_hydraulic: 0.0027200373856119215
