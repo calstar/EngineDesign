@@ -58,3 +58,11 @@ rho_O: 1140.0              # Oxidizer density (LOX)
 tau_line_F: 0.01           # Fuel feed line time constant
 tau_line_O: 0.01           # Oxidizer feed line time constant
 
+# Policy LUT (precomputed controller policy for fast runtime)
+use_policy_lut: false       # Set true to use LUT instead of online DDP
+policy_lut_path: null      # Path to policy_lut.npz (e.g. configs/policy_lut.npz)
+
+# Engine LUT (precomputed engine performance; stems from engine config + tank pressure range)
+# When set, DDP uses fast LUT lookups instead of physics. Speeds up both online DDP and policy generation.
+engine_lut_path: null      # Path to engine_performance.npz (e.g. output/lut/engine_performance.npz)
+

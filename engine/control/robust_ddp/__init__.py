@@ -39,6 +39,7 @@ from .safety_filter import filter_action
 from .controller import RobustDDPController
 from .logging import ControllerLogger
 from .identify import ParameterIdentifier, update_params
+from .policy_lut import PolicyLUT
 
 __all__ = [
     "Measurement",
@@ -82,5 +83,6 @@ __all__ = [
     "ControllerLogger",
     "ParameterIdentifier",
     "update_params",
+    "PolicyLUT",
 ]
 

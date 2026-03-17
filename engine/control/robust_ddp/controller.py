@@ -36,6 +36,8 @@ from .safety_filter import filter_action
 from .engine_wrapper import EngineWrapper
 from .logging import ControllerLogger
 from .constraints import constraint_values
+from .policy_lut import PolicyLUT
+from .engine_lut_wrapper import EngineLUTWrapper
 from engine.pipeline.config_schemas import PintleEngineConfig
 
 
@@ -64,9 +66,15 @@ class RobustDDPController:
         self.state = ControllerState()
         self.logger = logger
         
-        # Initialize engine wrapper if config provided
+        # Initialize engine wrapper: prefer EngineLUT (fast) when path provided
         self.engine_wrapper = None
-        if engine_config is not None:
+        if cfg.engine_lut_path:
+            try:
+                self.engine_wrapper = EngineLUTWrapper(cfg.engine_lut_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Failed to load engine LUT from {cfg.engine_lut_path}: {e}")
+        if self.engine_wrapper is None and engine_config is not None:
             self.engine_wrapper = EngineWrapper(engine_config)
         
         # Dynamics parameters
@@ -85,7 +93,16 @@ class RobustDDPController:
         
         # Tick counter for logging
         self.tick = 0
-    
+
+        # Policy LUT (lazy load when use_policy_lut is True)
+        self._policy_lut: Optional[PolicyLUT] = None
+        if cfg.use_policy_lut and cfg.policy_lut_path:
+            try:
+                self._policy_lut = PolicyLUT.load(cfg.policy_lut_path)
+            except Exception as e:
+                import warnings
+                warnings.warn(f"Failed to load policy LUT from {cfg.policy_lut_path}: {e}")
+
     def reset(self) -> None:
         """Reset controller state to initial values."""
         self.state.reset()
@@ -187,25 +204,39 @@ class RobustDDPController:
                 RuntimeWarning
             )
         
-        # Step 5: Seed DDP with shifted previous solution (warm start)
-        u_seq_init = self._get_warm_start_control_sequence()
-        
-        # Step 6: Run DDP to get relaxed u_seq, take first u_relaxed
         w_bar = get_w_bar_array(self.state)
-        
-        solution = solve_ddp(
-            x0=x,
-            u_seq_init=u_seq_init,
-            F_ref=ref.F_ref,
-            MR_ref=ref.MR_ref,
-            cfg=self.cfg,
-            dynamics_params=self.dynamics_params,
-            engine_wrapper=self.engine_wrapper,
-            w_bar=w_bar,
-            use_robustification=True,
-        )
-        
-        u_relaxed = solution.u_seq[0].copy()
+
+        # Step 5 & 6: Get u_relaxed from LUT or DDP
+        if self._policy_lut is not None:
+            u_relaxed = self._policy_lut.lookup(
+                x[IDX_P_U_F], x[IDX_P_U_O], F_ref_current, MR_ref_current
+            )
+            u_seq = np.tile(u_relaxed, (self.cfg.N, 1))
+            from .ddp_solver import DDPSolution
+            solution = DDPSolution(
+                u_seq=u_seq,
+                x_seq=np.tile(x, (self.cfg.N + 1, 1)),
+                eng_estimates=[],
+                objective=0.0,
+                iterations=0,
+                converged=True,
+                constraint_violations=[{}] * self.cfg.N,
+                diagnostics={"source": "policy_lut"},
+            )
+        else:
+            u_seq_init = self._get_warm_start_control_sequence()
+            solution = solve_ddp(
+                x0=x,
+                u_seq_init=u_seq_init,
+                F_ref=ref.F_ref,
+                MR_ref=ref.MR_ref,
+                cfg=self.cfg,
+                dynamics_params=self.dynamics_params,
+                engine_wrapper=self.engine_wrapper,
+                w_bar=w_bar,
+                use_robustification=True,
+            )
+            u_relaxed = solution.u_seq[0].copy()
         
         # CRITICAL: If controller isn't making changes, force it to respond to thrust errors
         # Check if we have a thrust deficit and controller isn't responding

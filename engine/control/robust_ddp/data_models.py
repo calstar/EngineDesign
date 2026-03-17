@@ -283,7 +283,14 @@ class ControllerConfig:
     # Initial ullage volumes [m³] (if not provided, computed from initial conditions)
     V_u_F_init: Optional[float] = None
     V_u_O_init: Optional[float] = None
-    
+
+    # Policy LUT (use precomputed LUT instead of online DDP when True)
+    use_policy_lut: bool = False
+    policy_lut_path: Optional[str] = None
+
+    # Engine LUT (use precomputed engine performance instead of physics; stems from engine config + tank pressure range)
+    engine_lut_path: Optional[str] = None
+
     def __post_init__(self):
         """Validate configuration."""
         if self.N <= 0:
