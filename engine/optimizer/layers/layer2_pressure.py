@@ -540,11 +540,11 @@ def run_layer2_pressure(
     optimized_config: PintleEngineConfig,
     initial_lox_pressure_pa: float,
     initial_fuel_pressure_pa: float,
-        peak_thrust: float,  # Initial/peak thrust target
-        target_apogee_m: float,  # Target apogee for impulse calculation
-        rocket_dry_mass_kg: float,  # Rocket dry mass (no propellant) = airframe + engine + lox_tank_structure + fuel_tank_structure + copv_structure
-        max_lox_tank_capacity_kg: float,  # Maximum LOX tank capacity [kg]
-        max_fuel_tank_capacity_kg: float,  # Maximum fuel tank capacity [kg]
+    peak_thrust: float,  # Initial/peak thrust target
+    target_apogee_m: float,  # Target apogee for impulse calculation
+    rocket_dry_mass_kg: float,  # Rocket dry mass (no propellant) = airframe + engine + lox_tank_structure + fuel_tank_structure + copv_structure
+    max_lox_tank_capacity_kg: float,  # Maximum LOX tank capacity [kg]
+    max_fuel_tank_capacity_kg: float,  # Maximum fuel tank capacity [kg]
     target_burn_time: float,
     n_time_points: int = 200,
     update_progress: Optional[Callable] = None,
@@ -564,7 +564,8 @@ def run_layer2_pressure(
     de_maxiter: int = 5,  # Reduced from 10 for faster execution
     de_popsize: int = 2,  # Reduced from 5 for faster execution
     de_n_time_points: int = 25,  # Reduced from 50 for faster execution
-
+    use_controller_simulation: bool = False,  # Toggle for robust DDP controller feasibility penalty
+    controller_config: Optional[Any] = None,  # ControllerConfig instance if available
 ) -> Tuple[PintleEngineConfig, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], bool]:
     """
     Run Layer 2: Pressure Curve Optimization.
@@ -1648,6 +1649,106 @@ def run_layer2_pressure(
                     layer2_logger.warning(f"    Full traceback:\n{traceback.format_exc()}")
                 layer2_logger.warning(f"    Applying large COPV penalty: {copv_penalty:.2f}")
             
+            # Check 7: Robust DDP Controller Simulation (Optional)
+            controller_penalty = 0.0
+            if use_controller_simulation and finite_thrust_ratio >= 0.5:
+                # Add controller tracking penalty
+                try:
+                    from engine.control.robust_ddp.controller import RobustDDPController
+                    from engine.control.robust_ddp.data_models import ControllerConfig, Measurement, NavState, Command, CommandType
+                    from engine.control.robust_ddp.dynamics import step, DynamicsParams
+                    
+                    cfg = controller_config if controller_config else ControllerConfig()
+                    dyn_params = DynamicsParams.from_config(cfg)
+                    ctrl = RobustDDPController(cfg, optimized_config)
+                    
+                    # Simulation settings
+                    sim_dt = cfg.dt
+                    num_steps = int(target_burn_time / sim_dt)
+                    if num_steps <= 0:
+                        num_steps = 1
+                    
+                    # Initial state for simulation
+                    x_sim = np.array([
+                        30e6,                      # P_copv (Pa)
+                        24e6,                      # P_reg (Pa)
+                        initial_fuel_pressure_pa,  # P_u_F (Pa)
+                        initial_lox_pressure_pa,   # P_u_O (Pa)
+                        initial_fuel_pressure_pa * 0.95, # P_d_F (Pa)
+                        initial_lox_pressure_pa * 0.95,  # P_d_O (Pa)
+                        0.01,                      # V_u_F (m^3)
+                        0.01,                      # V_u_O (m^3)
+                    ])
+                    
+                    nav = NavState(h=0.0, vz=0.0, theta=0.0, mass_estimate=100.0)
+                    total_controller_cost = 0.0
+                    
+                    import scipy.interpolate
+                    # Create interpolation functions for reference targets from layer2 candidate
+                    f_ref_interp = scipy.interpolate.interp1d(time_hist, thrust_hist, bounds_error=False, fill_value=(thrust_hist[0], thrust_hist[-1]))
+                    mr_ref_interp = scipy.interpolate.interp1d(time_hist, MR_hist, bounds_error=False, fill_value=(MR_hist[0], MR_hist[-1]))
+                    
+                    max_obj_min = 0.0
+                    
+                    for k_sim in range(num_steps):
+                        t_sim = k_sim * sim_dt
+                        # Current references
+                        curr_f_ref = float(f_ref_interp(t_sim))
+                        curr_mr_ref = float(mr_ref_interp(t_sim))
+                        
+                        cmd = Command(
+                            command_type=CommandType.THRUST_DESIRED,
+                            thrust_desired=curr_f_ref,
+                        )
+                        # We could also pass mr_ref but the controller might use its fixed target inside command. 
+                        # Assuming the controller uses cmd.thrust_desired
+                        
+                        meas = Measurement(
+                            P_copv=x_sim[0],
+                            P_reg=x_sim[1],
+                            P_u_fuel=x_sim[2],
+                            P_u_ox=x_sim[3],
+                            P_d_fuel=x_sim[4],
+                            P_d_ox=x_sim[5]
+                        )
+                        
+                        actuation_cmd, diagnostics = ctrl.step(meas, nav, cmd)
+                        
+                        # Extract the DDP objective cost or tracking error
+                        # Diagnostics returns 'cost' or 'objective' if implemented
+                        step_cost = float(diagnostics.get("cost", 0.0))
+                        total_controller_cost += step_cost
+                        
+                        # Track the "max of the min" (max cost step = worst tracking point)
+                        if step_cost > max_obj_min:
+                            max_obj_min = step_cost
+                            
+                        # Step forward
+                        u_act = np.array([actuation_cmd.duty_F, actuation_cmd.duty_O])
+                        
+                        # Simple mass flow estimate for dynamics
+                        try:
+                            eng_est = ctrl.engine_wrapper.estimate_from_pressures(x_sim[4], x_sim[5])
+                            sim_mdot_F = eng_est.mdot_F if np.isfinite(eng_est.mdot_F) else 0.0
+                            sim_mdot_O = eng_est.mdot_O if np.isfinite(eng_est.mdot_O) else 0.0
+                        except Exception:
+                            sim_mdot_F = 0.0
+                            sim_mdot_O = 0.0
+                            
+                        x_sim = step(x_sim, u_act, sim_dt, dyn_params, sim_mdot_F, sim_mdot_O)
+                    
+                    # Add penalty proportional to the worst-case (max) step cost across the trajectory
+                    controller_penalty = max_obj_min * 10.0 + (total_controller_cost / max(num_steps, 1)) * 5.0
+                    
+                    if np.isfinite(controller_penalty):
+                        layer2_logger.info(f"    Controller penalty: {controller_penalty:.2f} (max step cost: {max_obj_min:.2f})")
+                    else:
+                        controller_penalty = 1000.0  # Safe clamp
+                    
+                except Exception as e:
+                    layer2_logger.warning(f"    Controller simulation failed for eval #{eval_num}: {type(e).__name__}: {str(e)}")
+                    controller_penalty = 1000.0
+            
             # Objective: minimize penalties (no initial thrust penalty - it's fixed from Layer 1)
             components = [
                 impulse_penalty,
@@ -1657,6 +1758,7 @@ def run_layer2_pressure(
                 of_penalty,
                 pc_penalty,
                 copv_penalty,
+                controller_penalty,
             ]
             if not all(np.isfinite(c) for c in components):
                 # If any penalty component is non-finite, treat this evaluation
