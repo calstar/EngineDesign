@@ -295,7 +295,7 @@ class EngineWrapper:
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         if not hasattr(self, '_result_cache'):
-            return {"size": 0, "max_size": self.cache_size}
+            return {"size": 0, "max_size": self.cache_size, "usage": 0.0}
         
         return {
             "size": len(self._result_cache),

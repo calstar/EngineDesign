@@ -17,20 +17,36 @@ from engine.control.robust_ddp.dynamics import (
     IDX_P_D_O,
     IDX_V_U_F,
     IDX_V_U_O,
+    IDX_M_GAS_COPV,
+    IDX_M_GAS_F,
+    IDX_M_GAS_O,
 )
 from engine.control.robust_ddp.data_models import ControllerConfig
 
 
 class TestDynamics(unittest.TestCase):
     """Test dynamics model."""
-    
+
+    def tearDown(self):
+        """Reset step() function-level state to avoid test pollution."""
+        if hasattr(step, '_temp_initialized'):
+            del step._temp_initialized
+
     def setUp(self):
         """Set up test fixtures."""
         self.config = ControllerConfig()
         self.params = DynamicsParams.from_config(self.config)
         self.dt = 0.01  # 10 ms
-        
-        # Initial state: [P_copv, P_reg, P_u_F, P_u_O, P_d_F, P_d_O, V_u_F, V_u_O]
+
+        # Compute initial gas masses from ideal gas law (PV = mRT)
+        R = self.params.R_gas    # 296.8 J/(kg·K)
+        T_copv = self.params.T_gas_copv_initial  # 293.0 K
+        T_F = self.params.T_gas_F_initial        # 293.0 K
+        T_O = self.params.T_gas_O_initial        # 250.0 K
+        V_copv = self.params.V_copv              # 0.006 m³
+
+        # Initial state: [P_copv, P_reg, P_u_F, P_u_O, P_d_F, P_d_O, V_u_F, V_u_O,
+        #                  m_gas_copv, m_gas_F, m_gas_O]
         self.x0 = np.array([
             30e6,    # P_copv: 30 MPa (~4350 psi)
             24e6,    # P_reg: 24 MPa (~3480 psi)
@@ -40,6 +56,9 @@ class TestDynamics(unittest.TestCase):
             3e6,     # P_d_O: 3 MPa (~435 psi)
             0.01,    # V_u_F: 0.01 m³ (10 L)
             0.01,    # V_u_O: 0.01 m³ (10 L)
+            30e6 * V_copv / (R * T_copv),   # m_gas_copv [kg]
+            3e6 * 0.01 / (R * T_F),         # m_gas_F [kg]
+            3.5e6 * 0.01 / (R * T_O),       # m_gas_O [kg]
         ], dtype=np.float64)
         
         # Control: [u_F, u_O] in [0, 1]
@@ -166,12 +185,12 @@ class TestDynamics(unittest.TestCase):
         
         x_next_ratio = step(self.x0, self.u0, self.dt, params_ratio, self.mdot_F, self.mdot_O)
         P_reg_next_ratio = x_next_ratio[IDX_P_REG]
-        P_copv_next_ratio = x_next_ratio[IDX_P_COPV]
-        
-        # Should be approximately reg_ratio * P_copv
-        expected_P_reg = params_ratio.reg_ratio * P_copv_next_ratio
+
+        # Step function computes P_reg = reg_ratio * P_copv_CURRENT (pre-step COPV pressure)
+        P_copv_current = self.x0[IDX_P_COPV]
+        expected_P_reg = params_ratio.reg_ratio * P_copv_current
         self.assertAlmostEqual(P_reg_next_ratio, expected_P_reg, delta=1e3,
-                              msg=f"P_reg should be {params_ratio.reg_ratio} * P_copv: "
+                              msg=f"P_reg should be {params_ratio.reg_ratio} * current P_copv: "
                               f"{P_reg_next_ratio} ≈ {expected_P_reg}")
     
     def test_feed_pressure_lag(self):
@@ -203,21 +222,26 @@ class TestDynamics(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(B)))
     
     def test_linearize_accuracy(self):
-        """Test linearization accuracy."""
-        # Compute linearization
+        """Test linearization accuracy via first-order Taylor expansion."""
+        # Compute Jacobians at nominal point
         A, B = linearize(self.x0, self.u0, self.dt, self.params, self.mdot_F, self.mdot_O)
-        
+
         # Nominal next state
         x_nom = step(self.x0, self.u0, self.dt, self.params, self.mdot_F, self.mdot_O)
-        
-        # Linearized prediction
-        x_lin = A @ self.x0 + B @ self.u0
-        
-        # For small perturbations, linearization should be close
-        # Note: dynamics are nonlinear, so we don't expect exact match
-        # But should be within reasonable tolerance
-        error = np.linalg.norm(x_lin - x_nom)
-        self.assertLess(error, 1e6,  # Allow 1 MPa error
+
+        # Small perturbations to check Jacobian accuracy
+        # A and B satisfy: f(x+eps_x, u+eps_u) ≈ f(x,u) + A @ eps_x + B @ eps_u
+        eps_x = np.zeros(len(self.x0))
+        eps_x[:6] = 1e3  # 1 kPa perturbation for pressure states
+        eps_u = np.array([0.01, 0.01])  # 1% control perturbation
+
+        x_actual = step(self.x0 + eps_x, self.u0 + eps_u, self.dt, self.params,
+                        self.mdot_F, self.mdot_O)
+        x_lin = x_nom + A @ eps_x + B @ eps_u
+
+        # Linearization should be accurate for small perturbations
+        error = np.linalg.norm(x_lin - x_actual)
+        self.assertLess(error, 1e5,  # Allow 100 kPa error
                        f"Linearization error too large: {error}")
     
     def test_zero_mass_flow(self):

@@ -32,6 +32,44 @@ try:
     import cma
 except ImportError:  # pragma: no cover - optional dependency
     cma = None
+
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Layer1OptimizerConfig:
+    """Configuration for Layer 1 optimizer bounds and settings."""
+    # Pintle tip diameter bounds [m]
+    min_d_pintle_m: float = 0.025   # 25 mm
+    max_d_pintle_m: float = 0.080   # 80 mm
+    # Orifice diameter bounds [m]
+    min_d_orifice_m: float = 0.0005  # 0.5 mm
+    max_d_orifice_m: float = 0.005   # 5 mm
+    # Gap height bounds [m]
+    min_h_gap_m: float = 0.0005   # 0.5 mm
+    max_h_gap_m: float = 0.005    # 5 mm
+    # Orifice count bounds
+    min_n_orifices: int = 4
+    max_n_orifices: int = 24
+
+    def __post_init__(self):
+        if self.min_d_pintle_m >= self.max_d_pintle_m:
+            raise ValueError(
+                f"Pintle diameter bounds are swapped: min={self.min_d_pintle_m} >= max={self.max_d_pintle_m}"
+            )
+        if self.min_d_orifice_m >= self.max_d_orifice_m:
+            raise ValueError(
+                f"Orifice diameter bounds are swapped: min={self.min_d_orifice_m} >= max={self.max_d_orifice_m}"
+            )
+        if self.min_h_gap_m >= self.max_h_gap_m:
+            raise ValueError(
+                f"Gap height bounds are swapped: min={self.min_h_gap_m} >= max={self.max_h_gap_m}"
+            )
+        if self.min_n_orifices > self.max_n_orifices:
+            raise ValueError(
+                f"Orifice count bounds are swapped: min={self.min_n_orifices} > max={self.max_n_orifices}"
+            )
    
 
 # Import utility function
@@ -2184,7 +2222,7 @@ def run_layer1_optimization(
         else:
             # Default/Fallback: Legacy CMA-ES Logic with Parallel Evaluation
             # (Executor already created above, wrapping both hybrid and default paths)
-            
+            total_eval_budget = max_iterations
             best_x_global = x0_refined
             best_f_global = float('inf')
             
@@ -2465,8 +2503,8 @@ def run_layer1_optimization(
         optimized_config.fuel_tank = FuelTankConfig(rp1_h=0.5, rp1_radius=0.1, fuel_tank_pos=0.5)
     
     # Extract optimized pressures
-    best_x = opt_state.get("best_x", result.x if hasattr(result, 'x') else x0)
-    if len(best_x) >= 10:
+    best_x = opt_state.get("best_x") or (result.x if hasattr(result, 'x') else x0)
+    if best_x is not None and len(best_x) >= 10:
         P_O_start_optimized_psi = float(np.clip(best_x[8], bounds[8][0], bounds[8][1]))
         P_F_start_optimized_psi = float(np.clip(best_x[9], bounds[9][0], bounds[9][1]))
         optimized_config.lox_tank.initial_pressure_psi = P_O_start_optimized_psi
@@ -2559,48 +2597,78 @@ def run_layer1_optimization(
             F_val = initial_performance.get("F", 0)
             Pc_val = initial_performance.get("Pc", 0)
             A_throat_val = getattr(optimized_config.chamber, "A_throat", None)
-            if A_throat_val and A_throat_val > 0 and Pc_val > 0:
+            if isinstance(A_throat_val, (int, float)) and A_throat_val > 0 and isinstance(Pc_val, (int, float)) and Pc_val > 0:
                 Cf_calculated = F_val / (Pc_val * A_throat_val)
                 initial_performance["Cf_actual"] = Cf_calculated
                 initial_performance["Cf"] = Cf_calculated
     else:
         initial_performance = optimized_runner.evaluate(P_O_initial, P_F_initial, P_ambient=target_P_exit)
-        initial_thrust_error = abs(initial_performance.get("F", 0) - target_thrust) / target_thrust if target_thrust > 0 else 1.0
-        initial_MR_error = abs(initial_performance.get("MR", 0) - optimal_of) / optimal_of if optimal_of > 0 else 1.0
+        try:
+            if isinstance(initial_performance, dict):
+                f_val = initial_performance.get("F", 0)
+                mr_val = initial_performance.get("MR", 0)
+                initial_thrust_error = abs(float(f_val) - target_thrust) / target_thrust if target_thrust > 0 else 1.0
+                initial_MR_error = abs(float(mr_val) - optimal_of) / optimal_of if optimal_of > 0 else 1.0
+            else:
+                initial_thrust_error = 1.0
+                initial_MR_error = 1.0
+        except (TypeError, ValueError):
+            initial_thrust_error = 1.0
+            initial_MR_error = 1.0
         
         # Ensure Cf is included (calculate if not provided by runner)
         if "Cf" not in initial_performance and "Cf_actual" not in initial_performance:
             F_val = initial_performance.get("F", 0)
             Pc_val = initial_performance.get("Pc", 0)
             A_throat_val = getattr(optimized_config.chamber, "A_throat", None)
-            if A_throat_val and A_throat_val > 0 and Pc_val > 0:
+            if isinstance(A_throat_val, (int, float)) and A_throat_val > 0 and isinstance(Pc_val, (int, float)) and Pc_val > 0:
                 Cf_calculated = F_val / (Pc_val * A_throat_val)
                 initial_performance["Cf_actual"] = Cf_calculated
                 initial_performance["Cf"] = Cf_calculated
     
     # Update chamber_geometry.Cf with the calculated thrust coefficient
     Cf_final = initial_performance.get("Cf_actual", initial_performance.get("Cf"))
-    if Cf_final is not None and np.isfinite(Cf_final):
+    try:
+        _cf_is_valid = Cf_final is not None and isinstance(Cf_final, (int, float)) and np.isfinite(Cf_final)
+    except (TypeError, ValueError):
+        _cf_is_valid = False
+    if _cf_is_valid:
         if optimized_config.chamber_geometry is not None:
             optimized_config.chamber_geometry.Cf = float(Cf_final)
     
     # Check stability
-    stored_results = opt_state.get("best_results_for_validation", {})
-    if stored_results and "stability_results" in stored_results:
-        stability_results = stored_results.get("stability_results", {})
-        stability_state = stored_results.get("stability_state", "unstable")
-        stability_score = stored_results.get("stability_score", 0.0)
-        chugging_margin = stored_results.get("chugging_margin", 0)
-        acoustic_margin = stored_results.get("acoustic_margin", 0)
-        feed_margin = stored_results.get("feed_margin", 0)
-    else:
-        stability_results = initial_performance.get("stability_results", {})
-        stability_state = stability_results.get("stability_state", "unstable")
-        stability_score = stability_results.get("stability_score", 0.0)
-        chugging_margin = stability_results.get("chugging", {}).get("stability_margin", 0)
-        acoustic_margin = stability_results.get("acoustic", {}).get("stability_margin", 0)
-        feed_margin = stability_results.get("feed_system", {}).get("stability_margin", 0)
-    initial_stability = min(chugging_margin, acoustic_margin, feed_margin)
+    try:
+        stored_results = opt_state.get("best_results_for_validation", {})
+        if isinstance(stored_results, dict) and stored_results and "stability_results" in stored_results:
+            stability_results = stored_results.get("stability_results", {})
+            stability_state = stored_results.get("stability_state", "unstable")
+            stability_score = stored_results.get("stability_score", 0.0)
+            chugging_margin = stored_results.get("chugging_margin", 0)
+            acoustic_margin = stored_results.get("acoustic_margin", 0)
+            feed_margin = stored_results.get("feed_margin", 0)
+        else:
+            perf = initial_performance if isinstance(initial_performance, dict) else {}
+            stability_results = perf.get("stability_results", {})
+            if not isinstance(stability_results, dict):
+                stability_results = {}
+            stability_state = stability_results.get("stability_state", "unstable")
+            stability_score = stability_results.get("stability_score", 0.0)
+            chugging_sub = stability_results.get("chugging", {})
+            acoustic_sub = stability_results.get("acoustic", {})
+            feed_sub = stability_results.get("feed_system", {})
+            chugging_margin = chugging_sub.get("stability_margin", 0) if isinstance(chugging_sub, dict) else 0
+            acoustic_margin = acoustic_sub.get("stability_margin", 0) if isinstance(acoustic_sub, dict) else 0
+            feed_margin = feed_sub.get("stability_margin", 0) if isinstance(feed_sub, dict) else 0
+        # Ensure margins are numeric
+        chugging_margin = float(chugging_margin) if isinstance(chugging_margin, (int, float)) else 0.0
+        acoustic_margin = float(acoustic_margin) if isinstance(acoustic_margin, (int, float)) else 0.0
+        feed_margin = float(feed_margin) if isinstance(feed_margin, (int, float)) else 0.0
+        initial_stability = min(chugging_margin, acoustic_margin, feed_margin)
+    except Exception:
+        stability_results = {}
+        stability_state = "unstable"
+        stability_score = 0.0
+        initial_stability = 0.0
     
     # Validation checks
     min_stability_score = requirements.get("min_stability_score", 0.75)
@@ -2646,7 +2714,7 @@ def run_layer1_optimization(
     
     # Chamber length constraint
     L_chamber_final = getattr(getattr(optimized_config, "chamber", None), "length", None)
-    L_chamber_final = float(L_chamber_final) if (L_chamber_final is not None and np.isfinite(L_chamber_final)) else np.nan
+    L_chamber_final = float(L_chamber_final) if (L_chamber_final is not None and isinstance(L_chamber_final, (int, float)) and np.isfinite(L_chamber_final)) else np.nan
     max_chamber_length = float(requirements.get("max_chamber_length_m", 0.50))
     
     if np.isfinite(L_chamber_final) and max_chamber_length > 0:
@@ -2716,7 +2784,7 @@ def run_layer1_optimization(
     final_performance["feed_margin"] = feed_margin
     
     # Extract optimized pressures
-    if len(best_x) >= 10:
+    if best_x is not None and len(best_x) >= 10:
         P_O_start_optimized_psi = float(np.clip(best_x[8], bounds[8][0], bounds[8][1]))
         P_F_start_optimized_psi = float(np.clip(best_x[9], bounds[9][0], bounds[9][1]))
         final_performance["P_O_start_psi"] = P_O_start_optimized_psi
@@ -2816,10 +2884,15 @@ def run_layer1_optimization(
         layer1_logger.info(f"Chugging margin: {stored.get('chugging_margin', 0):.3f}")
         layer1_logger.info(f"Acoustic margin: {stored.get('acoustic_margin', 0):.3f}")
         layer1_logger.info(f"Feed margin: {stored.get('feed_margin', 0):.3f}")
-    if final_performance.get("P_O_start_psi") is not None:
-        layer1_logger.info(f"LOX initial pressure: {final_performance['P_O_start_psi']:.1f} psi")
-    if final_performance.get("P_F_start_psi") is not None:
-        layer1_logger.info(f"Fuel initial pressure: {final_performance['P_F_start_psi']:.1f} psi")
+    try:
+        p_o = final_performance.get("P_O_start_psi")
+        if p_o is not None and isinstance(p_o, (int, float)):
+            layer1_logger.info(f"LOX initial pressure: {p_o:.1f} psi")
+        p_f = final_performance.get("P_F_start_psi")
+        if p_f is not None and isinstance(p_f, (int, float)):
+            layer1_logger.info(f"Fuel initial pressure: {p_f:.1f} psi")
+    except (TypeError, ValueError):
+        pass
     layer1_logger.info(f"Validation: {'VALID' if pressure_candidate_valid else 'INVALID'}")
     
     # Log objective function breakdown if objective > 1e0 (indicates non-ideal convergence)

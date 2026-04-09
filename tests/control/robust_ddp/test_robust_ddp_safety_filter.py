@@ -14,12 +14,15 @@ from engine.control.robust_ddp.safety_filter import (
 )
 from engine.control.robust_ddp.data_models import ControllerConfig, ControllerState
 from engine.control.robust_ddp.engine_wrapper import EngineEstimate, EngineWrapper
-from engine.control.robust_ddp.dynamics import IDX_P_U_F, IDX_P_U_O, IDX_P_COPV
+from engine.control.robust_ddp.dynamics import (
+    IDX_P_U_F, IDX_P_U_O, IDX_P_COPV, DynamicsParams, N_STATE,
+)
+from engine.control.robust_ddp.robustness import get_w_bar_array
 
 
 class TestSafetyFilter(unittest.TestCase):
     """Test safety filter."""
-    
+
     def setUp(self):
         """Set up test fixtures."""
         self.cfg = ControllerConfig(
@@ -34,8 +37,16 @@ class TestSafetyFilter(unittest.TestCase):
             qMR=10.0,
             qGas=0.1,
         )
-        
-        # Normal state
+
+        # Compute initial gas masses
+        params = DynamicsParams.from_config(self.cfg)
+        R = params.R_gas
+        T_c = params.T_gas_copv_initial
+        T_F = params.T_gas_F_initial
+        T_O = params.T_gas_O_initial
+        V_c = params.V_copv
+
+        # Normal state (11-dim)
         self.x_normal = np.array([
             30e6,  # P_copv
             24e6,  # P_reg
@@ -45,20 +56,23 @@ class TestSafetyFilter(unittest.TestCase):
             3e6,   # P_d_O
             0.01,  # V_u_F
             0.01,  # V_u_O
+            30e6 * V_c / (R * T_c),   # m_gas_copv
+            3e6 * 0.01 / (R * T_F),   # m_gas_F
+            3.5e6 * 0.01 / (R * T_O), # m_gas_O
         ])
-        
+
         # State with high ullage pressure (near limit)
         self.x_high_ullage = self.x_normal.copy()
         self.x_high_ullage[IDX_P_U_F] = 9.5e6  # Near P_u_max
-        
+
         # State with low COPV pressure
         self.x_low_copv = self.x_normal.copy()
         self.x_low_copv[IDX_P_COPV] = 1.5e6  # Near P_copv_min
-        
+
         self.state = ControllerState(
-            w_bar_array=np.ones(8) * 0.1e6,  # 0.1 MPa uncertainty per component
+            w_bar_array=np.ones(N_STATE) * 0.1e6,  # 0.1 MPa uncertainty per component
         )
-        
+
         # Mock engine wrapper
         self.engine_wrapper = Mock(spec=EngineWrapper)
     
@@ -149,10 +163,10 @@ class TestSafetyFilter(unittest.TestCase):
         )
         self.assertGreater(cost, 0.0)
         
-        # Cost with references
+        # Cost with references where estimate doesn't match (introduces tracking error)
         eng_est = EngineEstimate(
             P_ch=2.5e6,
-            F=5000.0,
+            F=2000.0,   # 3 kN below F_ref=5000 -> significant tracking error
             mdot_F=1.0,
             mdot_O=2.0,
             MR=2.0,
@@ -160,7 +174,7 @@ class TestSafetyFilter(unittest.TestCase):
             injector_dp_O=0.5e6,
         )
         self.engine_wrapper.estimate_from_pressures = Mock(return_value=eng_est)
-        
+
         cost_with_ref = _compute_action_cost(
             self.x_normal, u, self.cfg, self.engine_wrapper, 5000.0, 2.0
         )

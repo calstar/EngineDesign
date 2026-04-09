@@ -17,6 +17,13 @@ from engine.control.robust_ddp.dynamics import (
     IDX_P_U_O,
     IDX_P_D_F,
     IDX_P_D_O,
+    IDX_V_U_F,
+    IDX_V_U_O,
+    IDX_M_GAS_COPV,
+    IDX_M_GAS_F,
+    IDX_M_GAS_O,
+    N_STATE,
+    DynamicsParams,
 )
 
 
@@ -34,22 +41,27 @@ class TestConstraints(unittest.TestCase):
             headroom_dp_min=0.05e6,  # 0.05 MPa minimum headroom
         )
     
-    def create_state(self, **kwargs) -> np.ndarray:
-        """Create test state vector with optional overrides."""
-        from engine.control.robust_ddp.dynamics import IDX_V_U_F, IDX_V_U_O
-        
+    def create_state(self, overrides=None) -> np.ndarray:
+        """Create test state vector (11-dim) with optional index-keyed overrides."""
+        p = DynamicsParams.from_config(self.config)
+        R, T_c, T_F, T_O, V_c = p.R_gas, p.T_gas_copv_initial, p.T_gas_F_initial, p.T_gas_O_initial, p.V_copv
+
         defaults = {
-            IDX_P_COPV: 30e6,    # 30 MPa COPV
-            IDX_P_REG: 24e6,     # 24 MPa regulator
-            IDX_P_U_F: 3e6,      # 3 MPa fuel ullage
-            IDX_P_U_O: 3.5e6,    # 3.5 MPa oxidizer ullage
-            IDX_P_D_F: 2.5e6,    # 2.5 MPa fuel feed
-            IDX_P_D_O: 3e6,      # 3 MPa oxidizer feed
-            IDX_V_U_F: 0.01,     # V_u_F
-            IDX_V_U_O: 0.01,     # V_u_O
+            IDX_P_COPV: 30e6,
+            IDX_P_REG: 24e6,
+            IDX_P_U_F: 3e6,
+            IDX_P_U_O: 3.5e6,
+            IDX_P_D_F: 2.5e6,
+            IDX_P_D_O: 3e6,
+            IDX_V_U_F: 0.01,
+            IDX_V_U_O: 0.01,
+            IDX_M_GAS_COPV: 30e6 * V_c / (R * T_c),
+            IDX_M_GAS_F: 3e6 * 0.01 / (R * T_F),
+            IDX_M_GAS_O: 3.5e6 * 0.01 / (R * T_O),
         }
-        defaults.update(kwargs)
-        x = np.zeros(8)
+        if overrides:
+            defaults.update(overrides)
+        x = np.zeros(N_STATE)
         for idx, val in defaults.items():
             x[idx] = val
         return x
@@ -71,7 +83,7 @@ class TestConstraints(unittest.TestCase):
     def test_copv_minimum_constraint(self):
         """Test COPV minimum pressure constraint."""
         # Safe case: P_copv > P_copv_min
-        x = self.create_state(**{IDX_P_COPV: 5e6})  # 5 MPa > 1 MPa min
+        x = self.create_state({IDX_P_COPV: 5e6})  # 5 MPa > 1 MPa min
         eng_est = self.create_estimate()
         
         constraints = constraint_values(x, eng_est, self.config)
@@ -81,7 +93,7 @@ class TestConstraints(unittest.TestCase):
         self.assertTrue(is_safe(x, eng_est, self.config))
         
         # Violation case: P_copv < P_copv_min
-        x = self.create_state(**{IDX_P_COPV: 0.5e6})  # 0.5 MPa < 1 MPa min
+        x = self.create_state({IDX_P_COPV: 0.5e6})  # 0.5 MPa < 1 MPa min
         constraints = constraint_values(x, eng_est, self.config)
         self.assertGreater(constraints["copv_min"], 0)  # Positive = violated
         self.assertLess(constraints["copv_margin"], 0)  # Negative margin
@@ -91,7 +103,7 @@ class TestConstraints(unittest.TestCase):
     def test_ullage_maximum_constraints(self):
         """Test ullage maximum pressure constraints."""
         # Safe case: P_u < P_u_max
-        x = self.create_state(**{IDX_P_U_F: 5e6, IDX_P_U_O: 6e6})  # Both < 10 MPa max
+        x = self.create_state({IDX_P_U_F: 5e6, IDX_P_U_O: 6e6})  # Both < 10 MPa max
         eng_est = self.create_estimate()
         
         constraints = constraint_values(x, eng_est, self.config)
@@ -103,7 +115,7 @@ class TestConstraints(unittest.TestCase):
         self.assertTrue(is_safe(x, eng_est, self.config))
         
         # Violation case: P_u > P_u_max
-        x = self.create_state(**{IDX_P_U_F: 12e6, IDX_P_U_O: 11e6})  # Both > 10 MPa max
+        x = self.create_state({IDX_P_U_F: 12e6, IDX_P_U_O: 11e6})  # Both > 10 MPa max
         constraints = constraint_values(x, eng_est, self.config)
         self.assertGreater(constraints["ullage_max_F"], 0)  # Positive = violated
         self.assertGreater(constraints["ullage_max_O"], 0)
@@ -148,7 +160,7 @@ class TestConstraints(unittest.TestCase):
         # With eps_i = 1e-3 and P_ch = 2e6, required dp = 2e3 Pa
         
         # Safe case: injector_dp >= required
-        x = self.create_state(**{IDX_P_D_F: 2.5e6, IDX_P_D_O: 3e6})
+        x = self.create_state({IDX_P_D_F: 2.5e6, IDX_P_D_O: 3e6})
         eng_est = self.create_estimate(
             P_ch=2e6,
             injector_dp_F=0.5e6,  # 0.5 MPa > 2e3 Pa required
@@ -183,7 +195,7 @@ class TestConstraints(unittest.TestCase):
         
         # Sufficient headroom case
         x = self.create_state(
-            **{IDX_P_REG: 5e6, IDX_P_U_F: 4e6, IDX_P_U_O: 4.5e6}
+            {IDX_P_REG: 5e6, IDX_P_U_F: 4e6, IDX_P_U_O: 4.5e6}
         )  # Headroom: 1 MPa and 0.5 MPa > 0.05 MPa min
         eng_est = self.create_estimate()
         
@@ -195,7 +207,7 @@ class TestConstraints(unittest.TestCase):
         
         # Insufficient headroom case
         x = self.create_state(
-            **{IDX_P_REG: 3.01e6, IDX_P_U_F: 3e6, IDX_P_U_O: 3e6}
+            {IDX_P_REG: 3.01e6, IDX_P_U_F: 3e6, IDX_P_U_O: 3e6}
         )  # Headroom: 0.01 MPa < 0.05 MPa min
         constraints = constraint_values(x, eng_est, self.config)
         self.assertEqual(constraints["headroom_insufficient_F"], 1.0)  # Insufficient
@@ -206,7 +218,7 @@ class TestConstraints(unittest.TestCase):
     def test_all_constraints_safe(self):
         """Test that all constraints can be satisfied simultaneously."""
         x = self.create_state(
-            **{
+            {
                 IDX_P_COPV: 30e6,    # > 1 MPa min
                 IDX_P_REG: 24e6,     # High regulator
                 IDX_P_U_F: 3e6,      # < 10 MPa max
@@ -232,7 +244,7 @@ class TestConstraints(unittest.TestCase):
     def test_multiple_violations(self):
         """Test detection of multiple constraint violations."""
         x = self.create_state(
-            **{
+            {
                 IDX_P_COPV: 0.5e6,   # < 1 MPa min (violation)
                 IDX_P_U_F: 12e6,     # > 10 MPa max (violation)
                 IDX_P_U_O: 11e6,     # > 10 MPa max (violation)
@@ -289,7 +301,7 @@ class TestConstraints(unittest.TestCase):
         self.assertFalse(summary["headroom_flags"]["insufficient_O"])
         
         # Violation case
-        x = self.create_state(**{IDX_P_COPV: 0.5e6})
+        x = self.create_state({IDX_P_COPV: 0.5e6})
         constraints = constraint_values(x, eng_est, self.config)
         summary = get_constraint_summary(constraints)
         
@@ -299,7 +311,7 @@ class TestConstraints(unittest.TestCase):
     def test_edge_cases(self):
         """Test edge cases (boundary conditions)."""
         # Exactly at COPV minimum
-        x = self.create_state(**{IDX_P_COPV: 1e6})  # Exactly at minimum
+        x = self.create_state({IDX_P_COPV: 1e6})  # Exactly at minimum
         eng_est = self.create_estimate()
         constraints = constraint_values(x, eng_est, self.config)
         self.assertAlmostEqual(constraints["copv_min"], 0.0, places=3)
@@ -307,7 +319,7 @@ class TestConstraints(unittest.TestCase):
         self.assertTrue(is_safe(x, eng_est, self.config))  # Boundary is safe
         
         # Exactly at ullage maximum
-        x = self.create_state(**{IDX_P_U_F: 10e6})  # Exactly at maximum
+        x = self.create_state({IDX_P_U_F: 10e6})  # Exactly at maximum
         constraints = constraint_values(x, eng_est, self.config)
         self.assertAlmostEqual(constraints["ullage_max_F"], 0.0, places=3)
         self.assertAlmostEqual(constraints["ullage_margin_F"], 0.0, places=3)
@@ -328,7 +340,7 @@ class TestConstraints(unittest.TestCase):
         
         # Exactly at headroom minimum
         x = self.create_state(
-            **{IDX_P_REG: 3.05e6, IDX_P_U_F: 3e6}
+            {IDX_P_REG: 3.05e6, IDX_P_U_F: 3e6}
         )  # Headroom = 0.05 MPa (exactly at minimum)
         constraints = constraint_values(x, eng_est, self.config)
         self.assertAlmostEqual(constraints["headroom_margin_F"], 0.0, places=3)

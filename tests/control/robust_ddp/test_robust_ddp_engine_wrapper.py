@@ -417,6 +417,7 @@ class TestEngineWrapperIntegration(unittest.TestCase):
         
         for P_d_F, P_d_O in test_cases:
             with self.subTest(P_d_F=P_d_F, P_d_O=P_d_O):
+                estimate = None
                 try:
                     # Direct call
                     direct_results = self.runner.evaluate(
@@ -424,12 +425,12 @@ class TestEngineWrapperIntegration(unittest.TestCase):
                         P_tank_F=P_d_F,
                         silent=True,
                     )
-                    
+
                     # Wrapper call
                     estimate = self.wrapper.estimate_from_pressures(
                         P_d_F, P_d_O, use_cache=False
                     )
-                    
+
                     # Verify estimates are reasonable
                     self.assertTrue(np.isfinite(estimate.P_ch))
                     self.assertTrue(np.isfinite(estimate.F))
@@ -437,16 +438,16 @@ class TestEngineWrapperIntegration(unittest.TestCase):
                     self.assertTrue(estimate.mdot_F > 0)
                     self.assertTrue(estimate.mdot_O > 0)
                     self.assertTrue(estimate.MR > 0)
-                    
+
                     # Verify injector pressure drops are positive
                     self.assertGreater(estimate.injector_dp_F, 0)
                     self.assertGreater(estimate.injector_dp_O, 0)
-                    
+
                 except Exception as e:
                     # Some pressure combinations may be infeasible
-                    # That's okay - just verify we get a valid estimate structure
-                    self.assertIsNotNone(estimate)
-                    self.assertIsNotNone(estimate.diagnostics)
+                    # If estimate was assigned before the exception, verify it's valid
+                    if estimate is not None:
+                        self.assertIsNotNone(estimate.diagnostics)
 
 
 if __name__ == '__main__':

@@ -82,8 +82,9 @@ class TestReferenceGeneration(unittest.TestCase):
         self.assertEqual(len(F_des), 10)
         # First value should be 1000
         self.assertAlmostEqual(F_des[0], 1000.0, places=1)
-        # Last value should be 3000 (extrapolated)
-        self.assertAlmostEqual(F_des[-1], 3000.0, places=1)
+        # Last value at t=0.09 interpolates between (0.05, 5000) and (0.1, 3000):
+        # F = 5000 + (3000-5000)/(0.1-0.05) * (0.09-0.05) = 5000 - 1600 = 3400
+        self.assertAlmostEqual(F_des[-1], 3400.0, places=1)
     
     def test_altitude_command(self):
         """Test altitude command produces reasonable thrust."""
@@ -134,16 +135,19 @@ class TestReferenceGeneration(unittest.TestCase):
         F_max = 10000.0
         F_prev = 5000.0
         dt = 0.01
-        
+
+        # Disable slew rate limit so we only test the hard bounds
+        self.cfg.thrust_slew_max = 1e9  # Effectively no slew limit (dataclass allows attr set)
+
         # Desired above max -> should clamp to max
         F_ref = _project_thrust(15000.0, F_min, F_max, F_prev, dt, self.cfg)
         self.assertAlmostEqual(F_ref, F_max, places=1)
-        
+
         # Desired below min -> should clamp to min
         F_ref = _project_thrust(500.0, F_min, F_max, F_prev, dt, self.cfg)
         self.assertAlmostEqual(F_ref, F_min, places=1)
-        
-        # Desired in range -> should pass through (if slew allows)
+
+        # Desired in range -> should pass through
         F_ref = _project_thrust(6000.0, F_min, F_max, F_prev, dt, self.cfg)
         self.assertGreaterEqual(F_ref, F_min)
         self.assertLessEqual(F_ref, F_max)
