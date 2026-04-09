@@ -278,6 +278,11 @@ class DischargeConfig(BaseModel):
     use_temperature_correction: bool = Field(default=False, description="Enable temperature-dependent Cd (viscosity effects)")
     T_ref: float = Field(default=300.0, gt=0, description="Reference temperature for temperature correction [K]")
     a_T: float = Field(default=0.0, description="Temperature correction coefficient")
+    # Cold-flow experiment fit: Cd = cd_dp_fit_a * sqrt(ΔP_pa) + cd_dp_fit_b
+    # When set, this overrides the Re-based formula and evaluates at the actual
+    # injector ΔP = P_inj - Pc during each solver iteration.
+    cd_dp_fit_a: Optional[float] = Field(default=None, description="Cold-flow fit slope [Pa^-0.5]: Cd = a·√ΔP_pa + b")
+    cd_dp_fit_b: Optional[float] = Field(default=None, description="Cold-flow fit intercept: Cd = a·√ΔP_pa + b")
 
 
 class SprayAngleConfig(BaseModel):

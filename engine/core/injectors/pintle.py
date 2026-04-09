@@ -154,10 +154,12 @@ class PintleInjector(InjectorModel):
                 # But these should be configurable, not hardcoded
                 T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)  # Use config if available
                 T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)  # Use config if available
-                Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
-                Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
-                Cd_O_quick = min(Cd_O_quick_base, Cd_O_eff)
-                Cd_F_quick = min(Cd_F_quick_base, Cd_F_eff)
+                Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O, delta_p_inj=delta_p_inj_O)
+                Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F, delta_p_inj=delta_p_inj_F)
+                _fit_O = discharge_O.cd_dp_fit_a is not None and discharge_O.cd_dp_fit_b is not None
+                _fit_F = discharge_F.cd_dp_fit_a is not None and discharge_F.cd_dp_fit_b is not None
+                Cd_O_quick = Cd_O_quick_base if _fit_O else min(Cd_O_quick_base, Cd_O_eff)
+                Cd_F_quick = Cd_F_quick_base if _fit_F else min(Cd_F_quick_base, Cd_F_eff)
 
                 mdot_O = Cd_O_quick * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O)
                 mdot_F = Cd_F_quick * A_fuel * np.sqrt(2 * rho_F * delta_p_inj_F)
@@ -179,10 +181,14 @@ class PintleInjector(InjectorModel):
             # CRITICAL FIX: Use same temperature values as above, not hardcoded
             T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)
             T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)
-            Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
-            Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
-            Cd_O = min(Cd_O_base, Cd_O_eff)
-            Cd_F = min(Cd_F_base, Cd_F_eff)
+            Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O, delta_p_inj=delta_p_inj_O)
+            Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F, delta_p_inj=delta_p_inj_F)
+            # In empirical-fit mode the fit already clips Cd internally; skip the
+            # Cd_eff spray-iteration cap so it doesn't freeze Cd at Cd_inf.
+            using_fit_O = discharge_O.cd_dp_fit_a is not None and discharge_O.cd_dp_fit_b is not None
+            using_fit_F = discharge_F.cd_dp_fit_a is not None and discharge_F.cd_dp_fit_b is not None
+            Cd_O = Cd_O_base if using_fit_O else min(Cd_O_base, Cd_O_eff)
+            Cd_F = Cd_F_base if using_fit_F else min(Cd_F_base, Cd_F_eff)
 
             if delta_p_inj_O > 0:
                 mdot_O = Cd_O * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O)

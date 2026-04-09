@@ -42,6 +42,8 @@ interface ChartDataPoint {
   copv_pressure?: number;
    lox_mass_remaining?: number;
    fuel_mass_remaining?: number;
+  Cd_O?: number;
+  Cd_F?: number;
 }
 
 function formatValue(value: number | null | undefined, decimals: number = 2): string {
@@ -204,6 +206,8 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
     copv_pressure: data.copv_pressure_psi?.[i],
     lox_mass_remaining: data.lox_mass_remaining_kg?.[i],
     fuel_mass_remaining: data.fuel_mass_remaining_kg?.[i],
+    Cd_O: data.Cd_O?.[i],
+    Cd_F: data.Cd_F?.[i],
   }));
 
   // Calculate max time for x-axis domain
@@ -265,6 +269,8 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
       case 'A_throat_pct_change': return '%';
       case 'lox_mass_remaining':
       case 'fuel_mass_remaining': return 'kg';
+      case 'Cd_O':
+      case 'Cd_F': return '';
       default: return '';
     }
   };
@@ -473,7 +479,59 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
         </ResponsiveContainer>
       </div>
 
-      {/* 5. COPV & Tank Pressures vs Time */}
+      {/* 5. Cd vs Time */}
+      {(data.Cd_O || data.Cd_F) && (
+        <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+          <h4 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
+            Discharge Coefficient (Cd) vs Time
+          </h4>
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.5} />
+              <XAxis
+                dataKey="time"
+                type="number"
+                domain={[minTime, maxTimeInt]}
+                ticks={integerTicks}
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                tickFormatter={formatTick}
+                allowDecimals={false}
+                label={{ value: 'Time (s)', position: 'insideBottom', offset: -5, fill: 'var(--color-text-secondary)' }}
+              />
+              <YAxis
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                label={{ value: 'Cd', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }}
+              />
+              <Tooltip content={customTooltip} />
+              <Legend />
+              {data.Cd_O && (
+                <Line
+                  type="monotone"
+                  dataKey="Cd_O"
+                  name="LOX Cd"
+                  stroke="#06b6d4"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              )}
+              {data.Cd_F && (
+                <Line
+                  type="monotone"
+                  dataKey="Cd_F"
+                  name="Fuel Cd"
+                  stroke="#f97316"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              )}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* 6. COPV & Tank Pressures vs Time */}
       {(data.copv_pressure_psi || data.P_tank_O_psi) && (
         <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
           <div className="flex items-center justify-between mb-4">

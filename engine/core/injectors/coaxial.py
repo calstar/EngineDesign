@@ -135,8 +135,8 @@ class CoaxialInjector(InjectorModel):
 
                     T_tank_O = 90.0
                     T_tank_F = 300.0
-                    Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
-                    Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
+                    Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O, delta_p_inj=delta_p_inj_O)
+                    Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F, delta_p_inj=delta_p_inj_F)
                     Cd_O_quick = min(Cd_O_quick_base, Cd_O_eff)
                     Cd_F_quick = min(Cd_F_quick_base, Cd_F_eff)
 
@@ -160,8 +160,8 @@ class CoaxialInjector(InjectorModel):
             Re_O = calculate_reynolds_number(rho_O, u_O, d_hyd_core, mu_O)
             Re_F = calculate_reynolds_number(rho_F, u_F, d_hyd_annulus, mu_F)
 
-            Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=90.0)
-            Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=300.0)
+            Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=90.0, delta_p_inj=delta_p_inj_O)
+            Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=300.0, delta_p_inj=delta_p_inj_F)
             Cd_O = min(Cd_O_base, Cd_O_eff)
             Cd_F = min(Cd_F_base, Cd_F_eff)
 
@@ -232,6 +232,16 @@ class CoaxialInjector(InjectorModel):
                     "D32_F": D32_F,
                     "x_star": x_star_combined,
                     "swirl_angle_deg": geometry.annulus.swirl_angle,
+                    # Injector velocities (required by advanced combustion-eff model)
+                    "u_O": float(u_O),
+                    "u_F": float(u_F),
+                    # Injector pressure diagnostics
+                    "P_injector_O": float(P_inj_O),
+                    "P_injector_F": float(P_inj_F),
+                    "delta_p_injector_O": float(delta_p_inj_O),
+                    "delta_p_injector_F": float(delta_p_inj_F),
+                    "delta_p_feed_O": float(delta_p_feed_O),
+                    "delta_p_feed_F": float(delta_p_feed_F),
                     # Discharge coefficients
                     "Cd_O": float(Cd_O),
                     "Cd_F": float(Cd_F),

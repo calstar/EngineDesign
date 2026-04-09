@@ -17,18 +17,7 @@ project_root = Path(__file__).resolve().parents[1]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-# Import control router first (required for controller)
-from backend.routers import control
-
-# Import other routers optionally (may fail if dependencies missing)
-_optional_routers = {}
-for router_name in ['config', 'evaluate', 'timeseries', 'flight', 'geometry', 'optimizer']:
-    try:
-        router_module = __import__(f'backend.routers.{router_name}', fromlist=[router_name])
-        _optional_routers[router_name] = router_module
-    except (ImportError, TypeError) as e:
-        print(f"Warning: Router '{router_name}' unavailable (non-critical): {e}")
-
+from backend.routers import config, evaluate, timeseries, flight, geometry, optimizer, control, experiment
 from backend.state import app_state
 from engine.pipeline.io import load_config
 
@@ -73,16 +62,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers (control is required, others optional)
+# Include routers
+app.include_router(config.router)
+app.include_router(evaluate.router)
+app.include_router(timeseries.router)
+app.include_router(flight.router)
+app.include_router(geometry.router)
+app.include_router(optimizer.router)
 app.include_router(control.router)
-
-# Include optional routers if they loaded successfully
-for router_name, router_module in _optional_routers.items():
-    try:
-        app.include_router(router_module.router)
-        print(f"✅ Loaded router: {router_name}")
-    except Exception as e:
-        print(f"Warning: Failed to include router '{router_name}': {e}")
+app.include_router(experiment.router)
 
 
 @app.get("/")
