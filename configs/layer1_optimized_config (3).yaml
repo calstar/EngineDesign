@@ -27,21 +27,21 @@ ablative_cooling:
   use_physics_based_blowing: true
 chamber: null
 chamber_geometry:
-  A_exit: 0.00801184666481737
-  A_throat: 0.0017651044259737317
-  Cf: 1.5422822280584674
-  Lstar: 1.239905396733828
-  chamber_diameter: 0.11344154349849075
+  A_exit: 0.008011846660276834
+  A_throat: 0.0017651044249737868
+  Cf: 1.5223402265660735
+  Lstar: 1.2399053967343734
+  chamber_diameter: 0.1270000000006823
   design_MR: 2.55
   design_pressure: 2413166.0
   design_thrust: 7000.0
-  exit_diameter: 0.101
-  expansion_ratio: 4.539021344528996
-  length: 0.24846200737808025
+  exit_diameter: 0.10099999997138025
+  expansion_ratio: 4.539021344527996
+  length: 0.21154129848565129
   length_contraction: 0.0451
   length_cylindrical: 0.121
   nozzle_efficiency: 0.95
-  volume: 0.0021885625035635956
+  volume: 0.002188562502324721
 combustion:
   cea:
     MR_range:
@@ -55,7 +55,7 @@ combustion:
     eps_range:
     - 4.0
     - 15.0
-    expansion_ratio: 4.539021344528996
+    expansion_ratio: 4.539021344527996
     fuel_name: Ethanol
     n_points: 34
     ox_name: LOX
@@ -105,18 +105,16 @@ design_requirements:
   copv_free_volume_m3: null
   feed_stability_min: 0.15
   frozen_parameters:
-    A_throat_mm2: null
-    D_chamber_outer_mm: null
-    Lstar_mm: null
+    A_throat_mm2: 1765.1044259737316
+    D_chamber_outer_mm: 152.4
+    Lstar_mm: 1239.905396733828
     P_F_start_psi: null
     P_O_start_psi: null
-    d_orifice_mm: null
-    d_pintle_tip_mm: null
-    expansion_ratio: null
+    d_orifice_mm: 2.7200373856119215
+    d_pintle_tip_mm: 28.2530270113081
+    expansion_ratio: 4.539021344528996
     h_gap_mm: 0.5
-    n_orifices: null
-  layer1_max_pressure_ratio: 0.99
-  layer1_min_pressure_ratio: 0.1
+    n_orifices: 14
   fuel_tank_capacity_kg: null
   lox_tank_capacity_kg: null
   max_Lstar: 1.5
@@ -124,7 +122,7 @@ design_requirements:
   max_P_tank_O: null
   max_chamber_outer_diameter: 0.1397
   max_engine_length: 0.4
-  max_fuel_tank_pressure_psi: 800.0
+  max_fuel_tank_pressure_psi: 1200.0
   max_lox_tank_pressure_psi: 700.0
   max_nozzle_exit_diameter: 0.101
   min_Lstar: 0.95
@@ -135,10 +133,10 @@ design_requirements:
   stability_margin_handicap: 0.0
   target_apogee: 3048.0
   target_burn_time: 6.0
-  target_thrust: 7000.0
+  target_thrust: 4000.0
 discharge:
   fuel:
-    Cd_inf: 0.33
+    Cd_inf: 0.3
     Cd_min: 0.2
     P_ref: 5000000.0
     T_ref: 300.0
@@ -148,7 +146,7 @@ discharge:
     use_pressure_correction: false
     use_temperature_correction: false
   oxidizer:
-    Cd_inf: 0.45
+    Cd_inf: 0.4
     Cd_min: 0.15
     P_ref: 5000000.0
     T_ref: 90.0
@@ -223,7 +221,7 @@ fluids:
     viscosity: 0.00018
 fuel_tank:
   fuel_tank_pos: 3.0
-  initial_pressure_psi: 523.6759162449396
+  initial_pressure_psi: 780.0000001788105
   mass: 7.0
   rp1_h: 0.609
   rp1_radius: 0.0762
@@ -267,20 +265,20 @@ graphite_insert:
 injector:
   geometry:
     fuel:
-      A_entry: 0.0006269311525882157
-      d_hydraulic: 0.0009999999980027608
-      d_pintle_tip: 0.028253027011308197
-      d_reservoir_inner: 0.02925302700931096
-      h_gap: 0.0004999999990013804
+      A_entry: 0.0006269311526226677
+      d_hydraulic: 0.0010000000019972565
+      d_pintle_tip: 0.028253027012084497
+      d_reservoir_inner: 0.029253027014081754
+      h_gap: 0.0005000000009986283
     lox:
-      A_entry: 5.8108495056721366e-06
-      d_hydraulic: 0.0027200373856119215
-      d_orifice: 0.0027200373856119215
+      A_entry: 5.810849508963446e-06
+      d_hydraulic: 0.0027200373863822463
+      d_orifice: 0.0027200373863822463
       n_orifices: 14
       theta_orifice: 90.0
   type: pintle
 lox_tank:
-  initial_pressure_psi: 537.261547029532
+  initial_pressure_psi: 496.87110787450285
   lox_h: 1.14
   lox_radius: 0.06985
   mass: 6.75
@@ -459,12 +457,6 @@ rocket:
   propulsion_dry_mass: 21.0
   radius: 0.078359
   rocket_length: 7.5
-  strakes:
-    fin_position: 3.58
-    fin_span: 0.152
-    no_fins: 4
-    root_chord: 0.305
-    tip_chord: 0.152
 solver:
   Pc_bounds:
   - 100000.0
