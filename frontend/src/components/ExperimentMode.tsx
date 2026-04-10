@@ -45,6 +45,16 @@ interface TimeseriesResponse {
     fuel: { model: string; a: number; b: number };
     lox: { model: string; a: number; b: number };
   };
+  re_similarity?: {
+    mean_re_water_fuel: number;
+    mean_re_water_lox: number;
+    mean_re_hotfire_fuel: number;
+    mean_re_hotfire_lox: number;
+    ratio_hotfire_to_water_fuel: number | null;
+    ratio_hotfire_to_water_lox: number | null;
+    fuel_within_two_orders: boolean;
+    lox_within_two_orders: boolean;
+  };
 }
 
 const PSI_TO_PA = 6894.757;
@@ -866,6 +876,87 @@ function convertToTimeSeriesFormat(results: TimeseriesResponse): { data: TimeSer
 }
 
 // ---------------------------------------------------------------------------
+// Reynolds similarity (hotfire mean Re vs cold-flow mean Re, within 10⁻²…10²)
+// ---------------------------------------------------------------------------
+
+type ReSimilarity = NonNullable<TimeseriesResponse['re_similarity']>;
+
+function ReSimilarityPanel({ re }: { re: ReSimilarity }) {
+  const rows: {
+    label: string;
+    accent: string;
+    meanWater: number;
+    meanHot: number;
+    ratio: number | null;
+    ok: boolean;
+  }[] = [
+    {
+      label: 'Fuel',
+      accent: '#f97316',
+      meanWater: re.mean_re_water_fuel,
+      meanHot: re.mean_re_hotfire_fuel,
+      ratio: re.ratio_hotfire_to_water_fuel,
+      ok: re.fuel_within_two_orders,
+    },
+    {
+      label: 'LOX',
+      accent: '#60a5fa',
+      meanWater: re.mean_re_water_lox,
+      meanHot: re.mean_re_hotfire_lox,
+      ratio: re.ratio_hotfire_to_water_lox,
+      ok: re.lox_within_two_orders,
+    },
+  ];
+
+  const allOk = rows.every(r => r.ok);
+
+  return (
+    <div
+      className={`p-4 rounded-xl border ${
+        allOk ? 'bg-emerald-500/5 border-emerald-500/25' : 'bg-amber-500/5 border-amber-500/30'
+      }`}
+    >
+      <h3 className="text-sm font-semibold text-[var(--color-text-primary)] uppercase tracking-wider mb-1">
+        Reynolds similarity (injector, choke-based)
+      </h3>
+      <p className="text-xs text-[var(--color-text-secondary)] mb-4">
+        Mean Re from the time-series (hot, propellant properties) compared to the mean Re from water test rows.
+        Pass if hotfire/water ratio is between 10<sup>-2</sup> and 10<sup>2</sup> (two orders of magnitude).
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        {rows.map(row => (
+          <div
+            key={row.label}
+            className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]"
+          >
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-sm font-semibold" style={{ color: row.accent }}>{row.label}</span>
+              <span
+                className={`text-xs font-semibold px-2 py-0.5 rounded ${
+                  row.ok ? 'bg-emerald-500/15 text-emerald-400' : 'bg-red-500/15 text-red-400'
+                }`}
+              >
+                {row.ok ? 'Pass' : 'Outside range'}
+              </span>
+            </div>
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs font-mono">
+              <dt className="text-[var(--color-text-secondary)]">Mean Re (water)</dt>
+              <dd className="text-right text-[var(--color-text-primary)]">{fmtSci(row.meanWater)}</dd>
+              <dt className="text-[var(--color-text-secondary)]">Mean Re (hotfire)</dt>
+              <dd className="text-right" style={{ color: row.accent }}>{fmtSci(row.meanHot)}</dd>
+              <dt className="text-[var(--color-text-secondary)]">Ratio (hot / water)</dt>
+              <dd className="text-right text-[var(--color-text-primary)]">
+                {row.ratio != null && Number.isFinite(row.ratio) ? fmtSci(row.ratio) : '—'}
+              </dd>
+            </dl>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Results display
 // ---------------------------------------------------------------------------
 
@@ -899,6 +990,11 @@ function TimeseriesResults({ results }: { results: TimeseriesResponse }) {
           </div>
         ))}
       </div>
+
+      {/* Reynolds: hotfire vs cold-flow (same choke-based definition as spreadsheet) */}
+      {results.re_similarity && (
+        <ReSimilarityPanel re={results.re_similarity} />
+      )}
 
       {/* Fit + pressure curve metadata */}
       {(results.cd_fit || results.pressure_curves_used) && (

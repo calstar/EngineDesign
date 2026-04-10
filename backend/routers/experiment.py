@@ -16,6 +16,8 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from engine.core.discharge import calculate_reynolds_number
+
 from backend.state import app_state
 
 router = APIRouter(prefix="/api/experiment", tags=["experiment"])
@@ -205,6 +207,44 @@ def _extract_cd_pairs(table: PropellantTable) -> List[Tuple[float, float]]:
     return pairs
 
 
+def _mean_re_water(table: PropellantTable) -> float:
+    """Mean injector Re from cold-flow rows (matches frontend spreadsheet: Re = ρ u d / μ_water)."""
+    area = math.pi * (table.choke_diameter_m / 2.0) ** 2
+    if area <= 0:
+        return 0.0
+    values: List[float] = []
+    for i, row in enumerate(table.rows):
+        dt = row.tf - row.t0
+        if dt <= 0:
+            continue
+        prev_w = table.rows[i - 1].weight if i > 0 else 0.0
+        dw = row.weight - prev_w
+        if dw < 0:
+            continue
+        mdot = dw / dt
+        v = mdot / (table.water_density * area)
+        re = table.water_density * v * table.choke_diameter_m / WATER_VISCOSITY_PA_S
+        values.append(re)
+    return float(statistics.mean(values)) if values else 0.0
+
+
+def _re_hotfire_choke(mdot: float, rho: float, mu: float, choke_d_m: float) -> float:
+    """Re at operating conditions using choke diameter and area (consistent with cold-flow table)."""
+    area = math.pi * (choke_d_m / 2.0) ** 2
+    if area <= 0 or rho <= 0:
+        return 0.0
+    u = mdot / (rho * area)
+    return calculate_reynolds_number(rho, u, choke_d_m, mu)
+
+
+def _within_two_orders_of_magnitude(sim: float, ref: float) -> bool:
+    """True if sim is within 10⁻² … 10² of ref (two decades)."""
+    if ref <= 0.0 or sim <= 0.0:
+        return False
+    ratio = sim / ref
+    return 1e-2 <= ratio <= 1e2
+
+
 def _fit_cd_sqrt_dp(pairs: List[Tuple[float, float]]) -> Tuple[float, float]:
     """
     Fit Cd as a linear function of sqrt(ΔP):
@@ -344,11 +384,21 @@ async def run_timeseries(request: RunTimeseriesRequest):
     # ---- build runner ----
     runner = PintleEngineRunner(cfg)
 
+    rho_f = cfg.fluids["fuel"].density
+    mu_f  = cfg.fluids["fuel"].viscosity
+    rho_o = cfg.fluids["oxidizer"].density
+    mu_o  = cfg.fluids["oxidizer"].viscosity
+
+    mean_re_water_fuel = _mean_re_water(request.fuel)
+    mean_re_water_lox  = _mean_re_water(request.lox)
+
     # ---- per-step loop ----
     keys = ["Pc", "mdot_O", "mdot_F", "F", "Isp", "MR", "Cd_O", "Cd_F",
             "delta_p_injector_O", "delta_p_injector_F"]
     out  = {k: np.zeros(len(times)) for k in keys}
     failures: List[str] = []
+    re_hot_f_samples: List[float] = []
+    re_hot_o_samples: List[float] = []
 
     for i in range(len(times)):
         P_O = float(P_lox_curve_pa[i])
@@ -363,6 +413,12 @@ async def run_timeseries(request: RunTimeseriesRequest):
             inj = pt.get("injector_pressure", {}) or {}
             out["delta_p_injector_O"][i] = inj.get("delta_p_injector_O") or 0.0
             out["delta_p_injector_F"][i] = inj.get("delta_p_injector_F") or 0.0
+            mdot_F = float(pt.get("mdot_F", 0.0))
+            mdot_O = float(pt.get("mdot_O", 0.0))
+            if mdot_F > 0.0:
+                re_hot_f_samples.append(_re_hotfire_choke(mdot_F, rho_f, mu_f, request.fuel.choke_diameter_m))
+            if mdot_O > 0.0:
+                re_hot_o_samples.append(_re_hotfire_choke(mdot_O, rho_o, mu_o, request.lox.choke_diameter_m))
         except Exception as e:
             msg = f"step {i} failed (P_O={P_O:.0f} Pa, P_F={P_F:.0f} Pa): {e}"
             failures.append(msg)
@@ -370,6 +426,20 @@ async def run_timeseries(request: RunTimeseriesRequest):
 
     if failures and len(failures) == len(times):
         raise HTTPException(status_code=500, detail=f"Time-series failed for every step. First error: {failures[0]}")
+
+    mean_re_hotfire_fuel = float(statistics.mean(re_hot_f_samples)) if re_hot_f_samples else 0.0
+    mean_re_hotfire_lox  = float(statistics.mean(re_hot_o_samples)) if re_hot_o_samples else 0.0
+
+    re_similarity = {
+        "mean_re_water_fuel":     mean_re_water_fuel,
+        "mean_re_water_lox":      mean_re_water_lox,
+        "mean_re_hotfire_fuel":   mean_re_hotfire_fuel,
+        "mean_re_hotfire_lox":    mean_re_hotfire_lox,
+        "ratio_hotfire_to_water_fuel": (mean_re_hotfire_fuel / mean_re_water_fuel) if mean_re_water_fuel > 0.0 else None,
+        "ratio_hotfire_to_water_lox":  (mean_re_hotfire_lox / mean_re_water_lox) if mean_re_water_lox > 0.0 else None,
+        "fuel_within_two_orders": _within_two_orders_of_magnitude(mean_re_hotfire_fuel, mean_re_water_fuel),
+        "lox_within_two_orders":  _within_two_orders_of_magnitude(mean_re_hotfire_lox, mean_re_water_lox),
+    }
 
     return {
         "status":  "success",
@@ -385,4 +455,5 @@ async def run_timeseries(request: RunTimeseriesRequest):
             "fuel": {"model": "Cd = a*sqrt(dP_pa) + b", "a": a_fuel, "b": b_fuel},
             "lox":  {"model": "Cd = a*sqrt(dP_pa) + b", "a": a_lox,  "b": b_lox},
         },
+        "re_similarity": re_similarity,
     }
