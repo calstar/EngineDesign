@@ -10,6 +10,7 @@ import {
   useNodesState,
   useEdgesState,
   BackgroundVariant,
+  SelectionMode,
   type ReactFlowInstance,
   type Connection,
   type Node,
@@ -23,6 +24,8 @@ import { nodeTypes } from './nodes';
 import { BranchableEdge } from './BranchableEdge';
 import { FLUID_COLORS, COMPONENT_DEFS } from './types';
 import type { PIDNodeData, ComponentType, FluidType } from './types';
+
+export type InteractionMode = 'pan' | 'select';
 
 let _idCounter = 1;
 const genId = () => `node_${_idCounter++}`;
@@ -95,9 +98,10 @@ interface CanvasProps {
   clearRef: React.MutableRefObject<() => void>;
   undoRef:  React.MutableRefObject<() => void>;
   redoRef:  React.MutableRefObject<() => void>;
+  mode:     InteractionMode;
 }
 
-function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef }: CanvasProps) {
+function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mode }: CanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [edgeMenu, setEdgeMenu] = useState<{ id: string; x: number; y: number } | null>(null);
@@ -182,6 +186,10 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef }: 
         onEdgeContextMenu={onEdgeContextMenu}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
+        selectionOnDrag={mode === 'select'}
+        panOnDrag={mode !== 'select'}
+        selectionMode={SelectionMode.Partial}
+        multiSelectionKeyCode="Meta"
         deleteKeyCode="Delete"
         snapToGrid
         snapGrid={[20, 20]}
@@ -195,7 +203,7 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef }: 
           style={{ background: '#0f172a', border: '1px solid #1e293b' }} />
         <Panel position="bottom-center">
           <span className="text-[10px] text-slate-600 select-none">
-            Drag from sidebar · Connect handles · Hover pipe + drag dot to branch · Right-click pipe to change fluid · Delete removes selection
+            Drag from sidebar · Connect handles · V=Pan  B=Box select · Cmd/Ctrl+click to multi-select · Right-click pipe for fluid · Delete removes selection
           </span>
         </Panel>
       </ReactFlow>
@@ -216,6 +224,7 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef }: 
           ))}
         </div>
       )}
+
     </div>
   );
 }
@@ -223,6 +232,7 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef }: 
 // ── Top-level designer — wires toolbar ↔ canvas ───────────────────────────────
 export function PIDDesigner() {
   const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null);
+  const [mode, setMode] = useState<InteractionMode>('pan');
 
   const getRef   = useRef<() => { nodes: Node[]; edges: Edge[] }>(() => ({ nodes: [], edges: [] }));
   const loadRef  = useRef<(d: { nodes: Node[]; edges: Edge[] }) => void>(() => {});
@@ -243,6 +253,8 @@ export function PIDDesigner() {
         onClear={() => clearRef.current()}
         onUndo={() => undoRef.current()}
         onRedo={() => redoRef.current()}
+        mode={mode}
+        onModeChange={setMode}
       />
       <div className="flex flex-1 overflow-hidden">
         <ComponentPalette />
@@ -254,6 +266,7 @@ export function PIDDesigner() {
             clearRef={clearRef}
             undoRef={undoRef}
             redoRef={redoRef}
+            mode={mode}
           />
         </ReactFlowProvider>
       </div>
