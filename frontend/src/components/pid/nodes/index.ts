@@ -6,6 +6,8 @@ import { PRNode }          from './PRNode';
 import { RVNode }          from './RVNode';
 import { QDNode }          from './QDNode';
 import { TankNode }        from './TankNode';
+import { TextNode }        from './TextNode';
+import { JunctionNode }    from './JunctionNode';
 
 export const nodeTypes: NodeTypes = {
   RTD:      SensorNode,
@@ -22,4 +24,6 @@ export const nodeTypes: NodeTypes = {
   QD:       QDNode,
   TANK:     TankNode,
   INJECTOR: TankNode,
+  TEXT:     TextNode,
+  JUNCTION: JunctionNode,
 };

@@ -30,7 +30,7 @@ function PaletteSymbol({ type }: { type: ComponentType }) {
         <svg width="28" height="24" viewBox="0 0 28 24">
           <line x1="14" y1="2" x2="14" y2="22" stroke="#94a3b8" strokeWidth="1.2" />
           <polygon points="14,12 26,4 26,20" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
-          <line x1="4" y1="2" x2="14" y2="12" stroke="#94a3b8" strokeWidth="1.2" />
+          <line x1="4" y1="2"  x2="14" y2="12" stroke="#94a3b8" strokeWidth="1.2" />
           <line x1="4" y1="22" x2="14" y2="12" stroke="#94a3b8" strokeWidth="1.2" />
         </svg>
       );
@@ -53,14 +53,14 @@ function PaletteSymbol({ type }: { type: ComponentType }) {
       return (
         <svg width="28" height="28" viewBox="0 0 28 28">
           <circle cx="14" cy="14" r="11" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
-          <line x1="7" y1="7" x2="21" y2="21" stroke="#94a3b8" strokeWidth="1.5" />
-          <line x1="21" y1="7" x2="7" y2="21" stroke="#94a3b8" strokeWidth="1.5" />
+          <line x1="7"  y1="7"  x2="21" y2="21" stroke="#94a3b8" strokeWidth="1.5" />
+          <line x1="21" y1="7"  x2="7"  y2="21" stroke="#94a3b8" strokeWidth="1.5" />
         </svg>
       );
     case 'TANK':
       return (
         <svg width="32" height="44" viewBox="0 0 32 44">
-          <ellipse cx="16" cy="8" rx="13" ry="5" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
+          <ellipse cx="16" cy="8"  rx="13" ry="5" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
           <rect x="3" y="8" width="26" height="28" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
           <ellipse cx="16" cy="36" rx="13" ry="5" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
         </svg>
@@ -70,6 +70,19 @@ function PaletteSymbol({ type }: { type: ComponentType }) {
         <svg width="32" height="44" viewBox="0 0 32 44">
           <rect x="6" y="2" width="20" height="10" rx="1" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
           <polygon points="6,12 26,12 20,40 12,40" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" />
+        </svg>
+      );
+    case 'JUNCTION':
+      return (
+        <svg width="20" height="20" viewBox="0 0 20 20">
+          <circle cx="10" cy="10" r="6" fill="#94a3b8" stroke="#94a3b8" strokeWidth="1" />
+        </svg>
+      );
+    case 'TEXT':
+      return (
+        <svg width="32" height="24" viewBox="0 0 32 24">
+          <rect x="1" y="1" width="30" height="22" rx="3" fill="#1e293b" stroke="#94a3b8" strokeWidth="1.2" strokeDasharray="3 2" />
+          <text x="16" y="16" textAnchor="middle" fontSize="11" fill="#e2e8f0" fontFamily="serif" fontStyle="italic">T</text>
         </svg>
       );
     default:
@@ -93,7 +106,6 @@ export function ComponentPalette() {
       <div className="p-3 border-b border-[#1e293b]">
         <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Components</h2>
       </div>
-
       {grouped.map(({ group, items }) => (
         <div key={group} className="px-2 py-2">
           <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1 px-1">{group}</p>
