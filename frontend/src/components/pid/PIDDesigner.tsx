@@ -11,6 +11,7 @@ import {
   useEdgesState,
   BackgroundVariant,
   SelectionMode,
+  ConnectionMode,
   type ReactFlowInstance,
   type Connection,
   type Node,
@@ -26,6 +27,12 @@ import { FLUID_COLORS, COMPONENT_DEFS } from './types';
 import type { PIDNodeData, ComponentType, FluidType } from './types';
 
 export type InteractionMode = 'pan' | 'select';
+
+export interface VersionEntry {
+  hash: string;
+  title: string;
+  timestamp: string;
+}
 
 let _idCounter = 1;
 const genId = () => `node_${_idCounter++}`;
@@ -92,30 +99,116 @@ function useHistory(
 
 // ── Inner canvas — owns all React Flow state ─────────────────────────────────
 interface CanvasProps {
-  onInstance: (inst: ReactFlowInstance) => void;
-  getRef:   React.MutableRefObject<() => { nodes: Node[]; edges: Edge[] }>;
-  loadRef:  React.MutableRefObject<(d: { nodes: Node[]; edges: Edge[] }) => void>;
-  clearRef: React.MutableRefObject<() => void>;
-  undoRef:  React.MutableRefObject<() => void>;
-  redoRef:  React.MutableRefObject<() => void>;
-  mode:     InteractionMode;
+  onInstance:        (inst: ReactFlowInstance) => void;
+  getRef:            React.MutableRefObject<() => Snapshot>;
+  loadRef:           React.MutableRefObject<(d: Snapshot) => void>;
+  clearRef:          React.MutableRefObject<() => void>;
+  undoRef:           React.MutableRefObject<() => void>;
+  redoRef:           React.MutableRefObject<() => void>;
+  checkpointRef:     React.MutableRefObject<(title: string, desc: string) => Promise<{ ok: boolean; commit: string }>>;
+  getLatestRef:      React.MutableRefObject<() => Promise<void>>;
+  getHistoryRef:     React.MutableRefObject<() => Promise<VersionEntry[]>>;
+  restoreVersionRef: React.MutableRefObject<(hash: string) => Promise<void>>;
+  mode:              InteractionMode;
 }
 
-function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mode }: CanvasProps) {
+function PIDCanvas({
+  onInstance, getRef, loadRef, clearRef, undoRef, redoRef,
+  checkpointRef, getLatestRef, getHistoryRef, restoreVersionRef,
+  mode,
+}: CanvasProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [edgeMenu, setEdgeMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
   const [rfInst, setRfInst] = useState<ReactFlowInstance | null>(null);
 
   const { undo, redo } = useHistory(nodes, edges, setNodes, setEdges);
 
-  // Expose snapshot helpers via refs so the toolbar can call them
+  // Load diagram from backend on mount
+  useEffect(() => {
+    fetch('/api/pid/load')
+      .then(r => r.ok ? r.json() : null)
+      .then(data => {
+        if (data?.nodes && data?.edges) {
+          setNodes(data.nodes);
+          setEdges(data.edges);
+        }
+      })
+      .catch(() => {}); // silent — backend may not be running
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-save to disk (debounced 1s) — no git
+  useEffect(() => {
+    const t = setTimeout(() => {
+      fetch('/api/pid/autosave', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes, edges }),
+      }).catch(() => {});
+    }, 1000);
+    return () => clearTimeout(t);
+  }, [nodes, edges]);
+
+  // R key — rotate selected nodes 90° clockwise
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'r' && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        setNodes(nds => nds.map(n =>
+          n.selected
+            ? { ...n, data: { ...n.data, rotation: (((n.data as Record<string, unknown>).rotation as number ?? 0) + 90) % 360 } }
+            : n,
+        ));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [setNodes]);
+
+  // Expose snapshot helpers via refs
   getRef.current   = useCallback(() => ({ nodes, edges }), [nodes, edges]);
   loadRef.current  = useCallback((d) => { setNodes(d.nodes); setEdges(d.edges); }, [setNodes, setEdges]);
   clearRef.current = useCallback(() => { setNodes([]); setEdges([]); }, [setNodes, setEdges]);
   undoRef.current  = undo;
   redoRef.current  = redo;
+
+  // Version control helpers
+  checkpointRef.current = useCallback(async (title: string, description: string) => {
+    const res = await fetch('/api/pid/checkpoint', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodes, edges, title, description }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Checkpoint failed');
+    }
+    return res.json();
+  }, [nodes, edges]);
+
+  getLatestRef.current = useCallback(async () => {
+    const res = await fetch('/api/pid/pull', { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Pull failed');
+    }
+    const data = await res.json();
+    setNodes(data.nodes);
+    setEdges(data.edges);
+  }, [setNodes, setEdges]);
+
+  getHistoryRef.current = useCallback(async () => {
+    const res = await fetch('/api/pid/history');
+    if (!res.ok) throw new Error('Failed to load history');
+    return res.json();
+  }, []);
+
+  restoreVersionRef.current = useCallback(async (hash: string) => {
+    const res = await fetch(`/api/pid/version/${hash}`);
+    if (!res.ok) throw new Error('Version not found');
+    const data = await res.json();
+    setNodes(data.nodes);
+    setEdges(data.edges);
+  }, [setNodes, setEdges]);
 
   const onInit = useCallback((inst: ReactFlowInstance) => {
     setRfInst(inst);
@@ -141,12 +234,10 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mo
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     const type = e.dataTransfer.getData('application/pid-type') as ComponentType;
-    if (!type || !rfInst || !wrapperRef.current) return;
-    const bounds = wrapperRef.current.getBoundingClientRect();
-    const position = rfInst.screenToFlowPosition({
-      x: e.clientX - bounds.left,
-      y: e.clientY - bounds.top,
-    });
+    if (!type || !rfInst) return;
+    const nodeH = (type === 'TANK' || type === 'INJECTOR') ? 100 : 60;
+    const flowPos = rfInst.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    const position = { x: flowPos.x - 30, y: flowPos.y - nodeH / 2 };
     const nodeData = type === 'TEXT'
       ? { text: 'Text' }
       : type === 'JUNCTION'
@@ -160,7 +251,6 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mo
     }]);
   }, [rfInst, setNodes]);
 
-  // Right-click a pipe → change fluid colour
   const onEdgeContextMenu = useCallback((e: React.MouseEvent, edge: Edge) => {
     e.preventDefault();
     e.stopPropagation();
@@ -177,7 +267,7 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mo
   }, [setEdges]);
 
   return (
-    <div ref={wrapperRef} className="flex-1 h-full relative" onClick={() => setEdgeMenu(null)}>
+    <div className="flex-1 h-full relative" onClick={() => setEdgeMenu(null)}>
       <ReactFlow
         nodes={nodes} edges={edges}
         onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
@@ -189,6 +279,7 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mo
         selectionOnDrag={mode === 'select'}
         panOnDrag={mode !== 'select'}
         selectionMode={SelectionMode.Partial}
+        connectionMode={ConnectionMode.Loose}
         multiSelectionKeyCode="Meta"
         deleteKeyCode="Delete"
         snapToGrid
@@ -203,7 +294,7 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mo
           style={{ background: '#0f172a', border: '1px solid #1e293b' }} />
         <Panel position="bottom-center">
           <span className="text-[10px] text-slate-600 select-none">
-            Drag from sidebar · Connect handles · V=Pan  B=Box select · Cmd/Ctrl+click to multi-select · Right-click pipe for fluid · Delete removes selection
+            Drag from sidebar · Connect handles · V=Pan  B=Box select · Cmd/Ctrl+click to multi-select · R=Rotate · Right-click pipe for fluid · Delete removes selection
           </span>
         </Panel>
       </ReactFlow>
@@ -224,7 +315,6 @@ function PIDCanvas({ onInstance, getRef, loadRef, clearRef, undoRef, redoRef, mo
           ))}
         </div>
       )}
-
     </div>
   );
 }
@@ -234,15 +324,17 @@ export function PIDDesigner() {
   const [rfInstance, setRfInstance] = useState<ReactFlowInstance | null>(null);
   const [mode, setMode] = useState<InteractionMode>('pan');
 
-  const getRef   = useRef<() => { nodes: Node[]; edges: Edge[] }>(() => ({ nodes: [], edges: [] }));
-  const loadRef  = useRef<(d: { nodes: Node[]; edges: Edge[] }) => void>(() => {});
-  const clearRef = useRef<() => void>(() => {});
-  const undoRef  = useRef<() => void>(() => {});
-  const redoRef  = useRef<() => void>(() => {});
+  const getRef            = useRef<() => Snapshot>(() => ({ nodes: [], edges: [] }));
+  const loadRef           = useRef<(d: Snapshot) => void>(() => {});
+  const clearRef          = useRef<() => void>(() => {});
+  const undoRef           = useRef<() => void>(() => {});
+  const redoRef           = useRef<() => void>(() => {});
+  const checkpointRef     = useRef<(title: string, desc: string) => Promise<{ ok: boolean; commit: string }>>(() => Promise.resolve({ ok: false, commit: '' }));
+  const getLatestRef      = useRef<() => Promise<void>>(() => Promise.resolve());
+  const getHistoryRef     = useRef<() => Promise<VersionEntry[]>>(() => Promise.resolve([]));
+  const restoreVersionRef = useRef<(hash: string) => Promise<void>>(() => Promise.resolve());
 
-  const handleInstance = useCallback((inst: ReactFlowInstance) => {
-    setRfInstance(inst);
-  }, []);
+  const handleInstance = useCallback((inst: ReactFlowInstance) => setRfInstance(inst), []);
 
   return (
     <div className="flex flex-col h-[calc(100vh-140px)] min-h-[600px] rounded-xl overflow-hidden border border-[#1e293b]">
@@ -253,6 +345,10 @@ export function PIDDesigner() {
         onClear={() => clearRef.current()}
         onUndo={() => undoRef.current()}
         onRedo={() => redoRef.current()}
+        onCheckpoint={(title, desc) => checkpointRef.current(title, desc)}
+        onGetLatest={() => getLatestRef.current()}
+        onGetHistory={() => getHistoryRef.current()}
+        onRestoreVersion={hash => restoreVersionRef.current(hash)}
         mode={mode}
         onModeChange={setMode}
       />
@@ -266,6 +362,10 @@ export function PIDDesigner() {
             clearRef={clearRef}
             undoRef={undoRef}
             redoRef={redoRef}
+            checkpointRef={checkpointRef}
+            getLatestRef={getLatestRef}
+            getHistoryRef={getHistoryRef}
+            restoreVersionRef={restoreVersionRef}
             mode={mode}
           />
         </ReactFlowProvider>

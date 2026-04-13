@@ -5,11 +5,11 @@ import { DraggableLabel } from './DraggableLabel';
 const W = 60, H = 60;
 
 export function QDNode({ id, data, selected }: NodeProps<{ data: PIDNodeData }>) {
-  const { label, labelOffset } = data as unknown as PIDNodeData;
+  const { label, labelOffset, rotation } = data as unknown as PIDNodeData;
   const stroke = selected ? '#3b82f6' : '#94a3b8';
 
   return (
-    <div style={{ position: 'relative', width: W, height: H }}>
+    <div style={{ position: 'relative', width: W, height: H, transform: `rotate(${rotation ?? 0}deg)`, transformOrigin: 'center' }}>
       <Handle type="target" position={Position.Top}    id="t" style={{ background: '#94a3b8' }} />
       <Handle type="source" position={Position.Bottom} id="b" style={{ background: '#94a3b8' }} />
       <Handle type="target" position={Position.Left}   id="l" style={{ background: '#94a3b8' }} />

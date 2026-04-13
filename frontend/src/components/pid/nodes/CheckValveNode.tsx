@@ -5,14 +5,12 @@ import { DraggableLabel } from './DraggableLabel';
 const W = 60, H = 60;
 
 export function CheckValveNode({ id, data, selected }: NodeProps<{ data: PIDNodeData }>) {
-  const { label, labelOffset } = data as unknown as PIDNodeData;
+  const { label, labelOffset, rotation } = data as unknown as PIDNodeData;
   const stroke = selected ? '#3b82f6' : '#94a3b8';
   return (
-    <div style={{ position: 'relative', width: W, height: H }}>
-      <Handle type="target" position={Position.Left}   id="l" style={{ background: '#94a3b8' }} />
-      <Handle type="source" position={Position.Right}  id="r" style={{ background: '#94a3b8' }} />
-      <Handle type="target" position={Position.Top}    id="t" style={{ background: '#94a3b8' }} />
-      <Handle type="source" position={Position.Bottom} id="b" style={{ background: '#94a3b8' }} />
+    <div style={{ position: 'relative', width: W, height: H, transform: `rotate(${rotation ?? 0}deg)`, transformOrigin: 'center' }}>
+      <Handle type="target" position={Position.Left}  id="l" style={{ background: '#94a3b8' }} />
+      <Handle type="source" position={Position.Right} id="r" style={{ background: '#94a3b8' }} />
       <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`}>
         <line x1="30" y1="10" x2="30" y2="50" stroke={stroke} strokeWidth={1.5} />
         <polygon points="30,30 52,16 52,44" fill="#1e293b" stroke={stroke} strokeWidth={selected ? 2 : 1.5} />

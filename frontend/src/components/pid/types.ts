@@ -21,6 +21,7 @@ export interface PIDNodeData {
   fluidType?: FluidType;
   notes?: string;
   labelOffset?: { x: number; y: number };
+  rotation?: number;
 }
 
 export interface ComponentDef {
@@ -43,7 +44,6 @@ export const COMPONENT_DEFS: ComponentDef[] = [
   { type: 'RV',       label: 'RV_#',   fullName: 'Relief Valve',                    group: 'Flow Control' },
   { type: 'CV',       label: 'CV_#',   fullName: 'Kero/LOX Check Valve',            group: 'Flow Control' },
   { type: 'QD',       label: '[F]QD',  fullName: 'Quick Disconnect (Face Seal)',     group: 'Flow Control' },
-  { type: 'JUNCTION', label: 'Junc',   fullName: 'Pipe Junction / Tee',             group: 'Flow Control' },
   { type: 'TANK',     label: 'TANK',   fullName: 'Tank / COPV',                     group: 'Hardware' },
   { type: 'INJECTOR', label: 'INJ',    fullName: 'Injector',                        group: 'Hardware' },
   { type: 'TEXT',     label: 'Text',   fullName: 'Text Annotation',                 group: 'Hardware' },

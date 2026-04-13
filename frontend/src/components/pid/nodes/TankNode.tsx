@@ -7,18 +7,16 @@ const TANK_W = 60, TANK_H = 100;
 const INJ_W = 60, INJ_H = 100;
 
 export function TankNode({ id, data, selected }: NodeProps<{ data: PIDNodeData }>) {
-  const { componentType, label, labelOffset, fluidType } = data as unknown as PIDNodeData;
+  const { componentType, label, labelOffset, fluidType, rotation } = data as unknown as PIDNodeData;
   const stroke = selected ? '#3b82f6' : '#94a3b8';
   const fluidColor = FLUID_COLORS[fluidType ?? 'default'];
   const isInjector = componentType === 'INJECTOR';
 
   if (isInjector) {
     return (
-      <div style={{ position: 'relative', width: INJ_W, height: INJ_H }}>
+      <div style={{ position: 'relative', width: INJ_W, height: INJ_H, transform: `rotate(${rotation ?? 0}deg)`, transformOrigin: 'center' }}>
         <Handle type="target" position={Position.Top}    id="t" style={{ background: '#94a3b8' }} />
         <Handle type="source" position={Position.Bottom} id="b" style={{ background: '#94a3b8' }} />
-        <Handle type="target" position={Position.Left}   id="l" style={{ background: '#94a3b8' }} />
-        <Handle type="source" position={Position.Right}  id="r" style={{ background: '#94a3b8' }} />
 
         <svg width={INJ_W} height={INJ_H} viewBox={`0 0 ${INJ_W} ${INJ_H}`}>
           <rect x="10" y="6" width="40" height="22" rx="2"
@@ -40,11 +38,9 @@ export function TankNode({ id, data, selected }: NodeProps<{ data: PIDNodeData }
   }
 
   return (
-    <div style={{ position: 'relative', width: TANK_W, height: TANK_H }}>
+    <div style={{ position: 'relative', width: TANK_W, height: TANK_H, transform: `rotate(${rotation ?? 0}deg)`, transformOrigin: 'center' }}>
       <Handle type="target" position={Position.Top}    id="t" style={{ background: '#94a3b8' }} />
       <Handle type="source" position={Position.Bottom} id="b" style={{ background: '#94a3b8' }} />
-      <Handle type="target" position={Position.Left}   id="l" style={{ background: '#94a3b8', top: '50%' }} />
-      <Handle type="source" position={Position.Right}  id="r" style={{ background: '#94a3b8', top: '50%' }} />
 
       <svg width={TANK_W} height={TANK_H} viewBox={`0 0 ${TANK_W} ${TANK_H}`}>
         <ellipse cx="30" cy="14" rx="24" ry="9"

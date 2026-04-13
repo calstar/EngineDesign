@@ -28,14 +28,12 @@ function ManualValve({ selected }: { selected: boolean }) {
 }
 
 export function ValveNode({ id, data, selected }: NodeProps<{ data: PIDNodeData }>) {
-  const { componentType, label, labelOffset } = data as unknown as PIDNodeData;
+  const { componentType, label, labelOffset, rotation } = data as unknown as PIDNodeData;
   const actuator = componentType === 'SOL' ? 'S' : 'P';
   return (
-    <div style={{ position: 'relative', width: W, height: H }}>
-      <Handle type="target" position={Position.Left}   id="l" style={{ background: '#94a3b8' }} />
-      <Handle type="source" position={Position.Right}  id="r" style={{ background: '#94a3b8' }} />
-      <Handle type="target" position={Position.Top}    id="t" style={{ background: '#94a3b8' }} />
-      <Handle type="source" position={Position.Bottom} id="b" style={{ background: '#94a3b8' }} />
+    <div style={{ position: 'relative', width: W, height: H, transform: `rotate(${rotation ?? 0}deg)`, transformOrigin: 'center' }}>
+      <Handle type="target" position={Position.Left}  id="l" style={{ background: '#94a3b8' }} />
+      <Handle type="source" position={Position.Right} id="r" style={{ background: '#94a3b8' }} />
       {componentType === 'MAN'
         ? <ManualValve selected={!!selected} />
         : <BowtieWithActuator selected={!!selected} actuatorLabel={actuator} />}
