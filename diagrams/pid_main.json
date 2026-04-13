@@ -38,8 +38,8 @@
       "id": "node_17",
       "type": "LC",
       "position": {
-        "x": 110,
-        "y": 50
+        "x": 140,
+        "y": 40
       },
       "data": {
         "componentType": "LC",
@@ -49,13 +49,15 @@
       "measured": {
         "width": 60,
         "height": 60
-      }
+      },
+      "selected": false,
+      "dragging": false
     },
     {
       "id": "node_19",
       "type": "PT",
       "position": {
-        "x": 340,
+        "x": 480,
         "y": -80
       },
       "data": {
@@ -67,7 +69,7 @@
         "width": 60,
         "height": 60
       },
-      "selected": false,
+      "selected": true,
       "dragging": false
     },
     {
@@ -91,8 +93,8 @@
       "id": "node_23",
       "type": "MAN",
       "position": {
-        "x": -90,
-        "y": -130
+        "x": -220,
+        "y": -200
       },
       "data": {
         "componentType": "MAN",
@@ -103,7 +105,8 @@
         "width": 60,
         "height": 60
       },
-      "selected": false
+      "selected": false,
+      "dragging": false
     }
   ],
   "edges": [
@@ -211,6 +214,21 @@
         "fluidType": "default"
       },
       "id": "xy-edge__node_19b-node_15r"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_23",
+      "sourceHandle": "r",
+      "target": "node_21",
+      "targetHandle": "l",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_23r-node_21l"
     }
   ]
 }
