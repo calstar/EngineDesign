@@ -17,6 +17,7 @@ from backend.routers.config import config_to_dict
 from engine.pipeline.config_schemas import DesignRequirementsConfig
 from engine.optimizer.layers.layer1_static_optimization import run_layer1_optimization
 from engine.optimizer.layers.layer2_pressure import run_layer2_pressure
+from engine.optimizer.layers.layer2_blowdown import run_layer2_blowdown
 from engine.optimizer.layers.layer3_thermal_protection import run_layer3_thermal_protection
 
 
@@ -509,7 +510,8 @@ async def run_layer2(
     save_plots: bool = False,
     de_maxiter: int = 5,
     de_popsize: int = 2,
-    de_n_time_points: int = 25
+    de_n_time_points: int = 25,
+    pure_blowdown: bool = False,
 ):
     """Run Layer 2 optimization with Server-Sent Events for progress updates."""
     if not app_state.has_config():
@@ -631,6 +633,30 @@ async def run_layer2(
             current_stop_event = _stop_event
             
             def run_opt():
+                if pure_blowdown:
+                    return run_layer2_blowdown(
+                        optimized_config=app_state.config,
+                        initial_lox_pressure_pa=initial_lox_p,
+                        initial_fuel_pressure_pa=initial_fuel_p,
+                        peak_thrust=target_thrust,
+                        target_apogee_m=target_apogee,
+                        rocket_dry_mass_kg=rocket_dry_mass_kg,
+                        max_lox_tank_capacity_kg=lox_capacity,
+                        max_fuel_tank_capacity_kg=fuel_capacity,
+                        target_burn_time=burn_time,
+                        n_time_points=200,
+                        update_progress=update_progress,
+                        optimal_of_ratio=reqs.optimal_of_ratio,
+                        min_stability_margin=reqs.chugging_margin_min,
+                        max_iterations=max_iterations,
+                        save_evaluation_plots=save_plots,
+                        objective_callback=objective_callback,
+                        pressure_curve_callback=pressure_curve_callback,
+                        stop_event=current_stop_event,
+                        de_maxiter=de_maxiter,
+                        de_popsize=de_popsize,
+                        de_n_time_points=de_n_time_points,
+                    )
                 return run_layer2_pressure(
                     optimized_config=app_state.config,
                     initial_lox_pressure_pa=initial_lox_p,
@@ -651,6 +677,8 @@ async def run_layer2(
                     de_maxiter=de_maxiter,
                     de_popsize=de_popsize,
                     de_n_time_points=de_n_time_points,
+                    optimal_of_ratio=reqs.optimal_of_ratio,
+                    min_stability_margin=reqs.chugging_margin_min,
                 )
             
             # Wait, I need to check the design requirements for tank capacities

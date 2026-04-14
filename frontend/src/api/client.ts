@@ -366,6 +366,21 @@ export interface TimeSeriesData {
   ablative_throat_index?: number;
 }
 
+// Shutdown event reported when the engine terminates before the end of the scheduled burn
+export interface ShutdownEvent {
+  time_s: number;
+  step_index: number;
+  reason: 'supply_below_demand' | 'pressure_bounds_invalid' | string;
+  details: {
+    P_tank_O_Pa?: number;
+    P_tank_F_Pa?: number;
+    Pc_max_Pa?: number;
+    Pc_min_Pa?: number;
+    residual_min?: number;
+    residual_max?: number;
+  };
+}
+
 // Summary statistics
 export interface TimeSeriesSummary {
   avg_thrust_kN: number;
@@ -382,6 +397,8 @@ export interface TimeSeriesSummary {
   copv_initial_mass_kg?: number;
   copv_min_margin_psi?: number;
   copv_volume_L?: number;
+  // Present only when the engine shut down before the end of the scheduled burn
+  shutdown_event?: ShutdownEvent | null;
 }
 
 // Response for generate endpoint
@@ -875,6 +892,8 @@ export interface Layer2Settings {
   de_maxiter?: number;
   de_popsize?: number;
   de_n_time_points?: number;
+  /** Optimize initial tank pressures using coupled blowdown physics (Time Series Pure Blowdown path) */
+  pure_blowdown?: boolean;
 }
 
 export interface Layer2Results {
@@ -985,6 +1004,9 @@ export function runLayer2Optimization(
   }
   if (settings.de_n_time_points !== undefined) {
     params.append('de_n_time_points', settings.de_n_time_points.toString());
+  }
+  if (settings.pure_blowdown) {
+    params.append('pure_blowdown', 'true');
   }
 
   const url = `${API_BASE}/optimizer/layer2?${params.toString()}`;

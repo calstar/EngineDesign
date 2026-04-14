@@ -113,6 +113,30 @@ function loadResultsFromSession(): { data: TimeSeriesData; summary: TimeSeriesSu
   }
 }
 
+/** Read tank pressures and burn duration from session config (YAML lox_tank / fuel_tank / thrust). */
+function readTimeseriesDefaultsFromConfig(config: EngineConfig): {
+  loxPsi?: number;
+  fuelPsi?: number;
+  durationS?: number;
+} {
+  const loxTank = config.lox_tank as Record<string, unknown> | undefined;
+  const fuelTank = config.fuel_tank as Record<string, unknown> | undefined;
+  const thrust = config.thrust as Record<string, unknown> | undefined;
+  const dr = config.design_requirements as Record<string, unknown> | undefined;
+
+  const num = (v: unknown): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+
+  const loxPsi = num(loxTank?.initial_pressure_psi);
+  const fuelPsi = num(fuelTank?.initial_pressure_psi);
+
+  let durationS = num(thrust?.burn_time);
+  if (durationS === undefined) durationS = num(dr?.target_burn_time);
+  if (durationS === undefined) durationS = num(dr?.target_burn_time_s);
+
+  return { loxPsi, fuelPsi, durationS };
+}
+
 export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) {
   // Mode selection
   const [inputMode, setInputMode] = useState<InputMode>('simple');
@@ -134,6 +158,18 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
   // Blowdown mode state
   const [loxInitialPressure, setLoxInitialPressure] = useState(750);
   const [fuelInitialPressure, setFuelInitialPressure] = useState(600);
+
+  // When a YAML config loads or changes, seed Pure Blowdown pressures and shared duration (segment / blowdown).
+  useEffect(() => {
+    if (!config) return;
+    const { loxPsi, fuelPsi, durationS } = readTimeseriesDefaultsFromConfig(config);
+    if (loxPsi !== undefined) setLoxInitialPressure(loxPsi);
+    if (fuelPsi !== undefined) setFuelInitialPressure(fuelPsi);
+    if (durationS !== undefined && durationS >= 0.1 && durationS <= 600) {
+      setSegmentDuration(durationS);
+      setDuration(durationS);
+    }
+  }, [config]);
 
   // Upload state
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -720,6 +756,37 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
               </p>
             </div>
           </div>
+
+          {/* Shutdown event banner */}
+          {results.summary?.shutdown_event && (
+            <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+              <div className="flex items-start gap-3">
+                <svg className="w-5 h-5 mt-0.5 text-amber-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <div>
+                  <p className="font-medium text-amber-400">Engine Shutdown Detected</p>
+                  <p className="text-sm text-amber-300/80 mt-0.5">
+                    Shutdown at{' '}
+                    <span className="font-mono font-semibold">
+                      {results.summary.shutdown_event.time_s.toFixed(3)}s
+                    </span>
+                    {' — '}
+                    {results.summary.shutdown_event.reason === 'supply_below_demand'
+                      ? 'Tank pressure insufficient to sustain combustion (supply below demand)'
+                      : results.summary.shutdown_event.reason === 'pressure_bounds_invalid'
+                      ? 'Tank pressure critically low — chamber pressure bounds collapsed'
+                      : results.summary.shutdown_event.reason === 'propellant_depleted'
+                      ? 'Propellant exhausted'
+                      : results.summary.shutdown_event.reason}
+                  </p>
+                  <p className="text-xs text-amber-300/60 mt-0.5">
+                    Performance data zeroed after shutdown. Results valid up to {results.summary.shutdown_event.time_s.toFixed(3)}s.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           <PressureCurveChart
             data={results.data}

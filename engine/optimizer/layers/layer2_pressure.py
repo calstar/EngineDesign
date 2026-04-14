@@ -283,6 +283,84 @@ def calculate_required_impulse_from_mass(
     return required_impulse
 
 
+def _delta_p_injector_pair_from_diagnostic(diag: Any) -> Tuple[Optional[float], Optional[float]]:
+    """Extract LOX / fuel injector ΔP [Pa] from a per-time-step diagnostics dict."""
+    if not isinstance(diag, dict) or diag.get("error"):
+        return None, None
+    inj = diag.get("injector_pressure")
+    if isinstance(inj, dict) and ("delta_p_injector_O" in inj or "delta_p_injector_F" in inj):
+        dp_o = inj.get("delta_p_injector_O")
+        dp_f = inj.get("delta_p_injector_F")
+    else:
+        dp_o = diag.get("delta_p_injector_O")
+        dp_f = diag.get("delta_p_injector_F")
+    out_o: Optional[float] = None
+    out_f: Optional[float] = None
+    if dp_o is not None and np.isfinite(dp_o):
+        out_o = float(dp_o)
+    if dp_f is not None and np.isfinite(dp_f):
+        out_f = float(dp_f)
+    return out_o, out_f
+
+
+def injector_dp_ratio_penalty_from_results(
+    results_layer2: Dict[str, Any],
+    available_n: int,
+    min_delta_p_over_pc: float = 0.15,
+    max_delta_p_over_pc: Optional[float] = 0.50,
+    scale: float = 400.0,
+) -> float:
+    """
+    Penalize ΔP_inj / Pc outside an acceptable band (per time step, both streams).
+
+    For each stream, ratio r = ΔP_inj / Pc. Violation is distance outside
+    [min_delta_p_over_pc, max_delta_p_over_pc] (lower shortfall + upper excess).
+    Per time step we take the worse of LOX and fuel, then average over steps.
+
+    Typical guidance: keep injection drop large enough for atomization (~15–25% of Pc)
+    but not so large that tank pressure is wasted; upper bound is tunable.
+
+    If max_delta_p_over_pc is None, only the lower bound is enforced (legacy one-sided).
+    """
+    if available_n < 1 or "Pc" not in results_layer2:
+        return 0.0
+    lo = float(min_delta_p_over_pc)
+    hi = float(max_delta_p_over_pc) if max_delta_p_over_pc is not None else None
+    if hi is not None and hi < lo:
+        hi = lo
+
+    Pc_hist = np.atleast_1d(results_layer2["Pc"])[:available_n]
+    diagnostics = results_layer2.get("diagnostics", [])
+    if not isinstance(diagnostics, list):
+        return 0.0
+
+    violations: List[float] = []
+    for i in range(available_n):
+        Pc = float(Pc_hist[i])
+        if not np.isfinite(Pc) or Pc <= 0:
+            continue
+        diag = diagnostics[i] if i < len(diagnostics) else {}
+        dp_o, dp_f = _delta_p_injector_pair_from_diagnostic(diag)
+        if dp_o is None or dp_f is None:
+            continue
+        r_o = dp_o / Pc
+        r_f = dp_f / Pc
+
+        def _band_violation(r: float) -> float:
+            v = max(0.0, lo - r)
+            if hi is not None:
+                v += max(0.0, r - hi)
+            return v
+
+        v_o = _band_violation(r_o)
+        v_f = _band_violation(r_f)
+        violations.append(max(v_o, v_f))
+
+    if not violations:
+        return 0.0
+    return float(np.mean(violations)) * scale
+
+
 # Fixed segment configuration for Layer 2 optimization
 # We use a shared-segment parameterization:
 #   - Shared length ratios across LOX and fuel
@@ -1438,7 +1516,7 @@ def run_layer2_pressure(
             # Check 1: Total impulse must be >= required impulse
             total_impulse = float(np.trapezoid(thrust_hist, time_hist))  # N·s
             impulse_deficit = max(0, required_impulse - total_impulse)
-            impulse_penalty = (impulse_deficit / max(required_impulse, 1e-9)) * 200.0  # Large penalty if insufficient
+            impulse_penalty = (impulse_deficit / max(required_impulse, 1e-9)) * 20.0
             
             # Soft preference: keep the burn active closer to the target_burn_time.
             # We measure when 95% of the total impulse has been delivered; if that
@@ -1574,6 +1652,15 @@ def run_layer2_pressure(
                 else:
                     # No valid Pc values - should be caught by thrust check, but just in case
                     pc_penalty = 100.0
+
+            # Check 5b: Injector ΔP/Pc band (per time step, both streams)
+            injector_dp_penalty = injector_dp_ratio_penalty_from_results(
+                results_layer2,
+                available_n,
+                min_delta_p_over_pc=0.15,
+                max_delta_p_over_pc=0.50,
+                scale=400.0,
+            )
             
             # Check 6: COPV Initial Pressure Optimization
             # Run COPV solver to determine minimum required initial pressure (P0_Pa)
@@ -1757,6 +1844,7 @@ def run_layer2_pressure(
                 stability_penalty,
                 of_penalty,
                 pc_penalty,
+                injector_dp_penalty,
                 copv_penalty,
                 controller_penalty,
             ]
@@ -2530,7 +2618,22 @@ def run_layer2_pressure(
         except Exception as e:
             layer2_logger.warning(f"Failed to save pressure curves to config: {repr(e)}")
             # Don't fail the entire optimization if config saving fails
-    
+
+    # Persist initial pressures and propellant masses to tank configs so the
+    # downloaded YAML carries the full operating point.
+    try:
+        psi_factor = 1.0 / 6894.76
+        if optimized_config.lox_tank is not None:
+            optimized_config.lox_tank.initial_pressure_psi = float(P_tank_O_optimized[0]) * psi_factor
+            if total_lox_mass_final > 0:
+                optimized_config.lox_tank.mass = float(total_lox_mass_final)
+        if optimized_config.fuel_tank is not None:
+            optimized_config.fuel_tank.initial_pressure_psi = float(P_tank_F_optimized[0]) * psi_factor
+            if total_fuel_mass_final > 0:
+                optimized_config.fuel_tank.mass = float(total_fuel_mass_final)
+    except Exception as e:
+        layer2_logger.warning(f"Failed to persist tank fields to config: {repr(e)}")
+
     # Clean up handler to prevent file handle issues
     layer2_logger.handlers.clear()
     

@@ -97,6 +97,7 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
         de_maxiter: 5,
         de_popsize: 2,
         de_n_time_points: 25,
+        pure_blowdown: false,
     });
     const [showAdvanced, setShowAdvanced] = useState(false);
 
@@ -569,6 +570,22 @@ export function Layer2Optimization({ requirements }: Layer2OptimizationProps) {
                                     className="rounded border-[var(--color-border)] bg-[var(--color-bg-primary)]"
                                 />
                                 <span className="text-xs text-[var(--color-text-secondary)]">Save PNG Plots</span>
+                            </label>
+                        </div>
+                        <div className="md:col-span-2 lg:col-span-2 flex flex-col gap-1">
+                            <label className="flex items-start gap-2 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={settings.pure_blowdown ?? false}
+                                    onChange={(e) => setSettings({ ...settings, pure_blowdown: e.target.checked })}
+                                    className="mt-0.5 rounded border-teal-500/60 bg-[var(--color-bg-primary)] accent-teal-500"
+                                />
+                                <span>
+                                    <span className="text-xs font-semibold text-teal-400">Pure Blowdown</span>
+                                    <span className="block text-[11px] text-[var(--color-text-secondary)] mt-0.5">
+                                        Optimize initial tank pressures and propellant masses (4-D) using coupled blowdown physics — same run path as Time Series → Pure Blowdown (no COPV regulation).
+                                    </span>
+                                </span>
                             </label>
                         </div>
                     </div>

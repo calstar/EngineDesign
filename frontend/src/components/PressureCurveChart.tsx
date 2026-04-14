@@ -224,6 +224,12 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
   // Format tick as integer seconds
   const formatTick = (value: number) => Math.round(value).toString();
 
+  const hasDeltaPInjO =
+    Array.isArray(data.delta_P_injector_O_psi) && data.delta_P_injector_O_psi.length === data.time.length;
+  const hasDeltaPInjF =
+    Array.isArray(data.delta_P_injector_F_psi) && data.delta_P_injector_F_psi.length === data.time.length;
+  const showInjectorDeltaChart = hasDeltaPInjO || hasDeltaPInjF;
+
   const customTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
       return (
@@ -654,8 +660,8 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
         </div>
       )}
 
-      {/* 6. Injector Pressure Drops */}
-      {data.delta_P_injector_O_psi && data.delta_P_injector_F_psi && (
+      {/* 6. Injector Pressure Drops (LOX + fuel when present) */}
+      {showInjectorDeltaChart && (
         <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
           <h4 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
             Injector Pressure Drops vs Time
@@ -681,22 +687,28 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
               />
               <Tooltip content={customTooltip} />
               <Legend />
-              <Line
-                type="monotone"
-                dataKey="delta_P_injector_O"
-                name="LOX ΔP"
-                stroke="#06b6d4"
-                strokeWidth={2}
-                dot={false}
-              />
-              <Line
-                type="monotone"
-                dataKey="delta_P_injector_F"
-                name="Fuel ΔP"
-                stroke="#f97316"
-                strokeWidth={2}
-                dot={false}
-              />
+              {hasDeltaPInjO && (
+                <Line
+                  type="monotone"
+                  dataKey="delta_P_injector_O"
+                  name="LOX ΔP_inj"
+                  stroke="#06b6d4"
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls
+                />
+              )}
+              {hasDeltaPInjF && (
+                <Line
+                  type="monotone"
+                  dataKey="delta_P_injector_F"
+                  name="Fuel ΔP_inj"
+                  stroke="#f97316"
+                  strokeWidth={2}
+                  dot={false}
+                  connectNulls
+                />
+              )}
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -915,7 +927,7 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
       )}
 
       {/* 10. Heat Flux Profile Charts */}
-      <HeatFluxProfileChart data={data} />
+      <HeatFluxProfileChart data={data} summary={summary} />
 
       {/* Correlation Heatmap */}
       {data.correlation_matrix && data.correlation_labels && data.correlation_labels.length >= 2 && (
@@ -986,13 +998,13 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
             <tbody>
               {data.time.slice(0, 50).map((t, i) => (
                 <tr key={i} className="border-b border-[var(--color-border)]/50 hover:bg-[var(--color-bg-primary)]/50">
-                  <td className="py-1.5 px-2 text-[var(--color-text-primary)]">{t.toFixed(3)}</td>
-                  <td className="py-1.5 px-2 text-right text-cyan-400">{data.P_tank_O_psi[i].toFixed(1)}</td>
-                  <td className="py-1.5 px-2 text-right text-orange-400">{data.P_tank_F_psi[i].toFixed(1)}</td>
-                  <td className="py-1.5 px-2 text-right text-green-400">{data.Pc_psi[i].toFixed(1)}</td>
-                  <td className="py-1.5 px-2 text-right text-blue-400">{data.thrust_kN[i].toFixed(3)}</td>
-                  <td className="py-1.5 px-2 text-right text-purple-400">{data.Isp_s[i].toFixed(1)}</td>
-                  <td className="py-1.5 px-2 text-right text-yellow-400">{data.MR[i].toFixed(3)}</td>
+                  <td className="py-1.5 px-2 text-[var(--color-text-primary)]">{(t ?? 0).toFixed(3)}</td>
+                  <td className="py-1.5 px-2 text-right text-cyan-400">{(data.P_tank_O_psi[i] ?? 0).toFixed(1)}</td>
+                  <td className="py-1.5 px-2 text-right text-orange-400">{(data.P_tank_F_psi[i] ?? 0).toFixed(1)}</td>
+                  <td className="py-1.5 px-2 text-right text-green-400">{(data.Pc_psi[i] ?? 0).toFixed(1)}</td>
+                  <td className="py-1.5 px-2 text-right text-blue-400">{(data.thrust_kN[i] ?? 0).toFixed(3)}</td>
+                  <td className="py-1.5 px-2 text-right text-purple-400">{(data.Isp_s[i] ?? 0).toFixed(1)}</td>
+                  <td className="py-1.5 px-2 text-right text-yellow-400">{(data.MR[i] ?? 0).toFixed(3)}</td>
                 </tr>
               ))}
             </tbody>

@@ -27,6 +27,40 @@ PSI_TO_PA = 6894.76
 PA_TO_PSI = 1.0 / PSI_TO_PA
 
 
+def _injector_delta_p_pa_from_diagnostic(diag: dict) -> tuple:
+    """Extract LOX/Fuel injector ΔP [Pa] from chamber diagnostics.
+
+    Closure and runner use ``delta_p_injector_O`` / ``delta_p_injector_F`` (lowercase *p*).
+    Older code sometimes used ``delta_P_injector_*``; accept both.
+    Values may live on ``diag`` or under ``diag['injector_pressure']`` (evaluate() format).
+    """
+    if not isinstance(diag, dict):
+        return None, None
+
+    def _pick(container: dict, key_primary: str, key_alt: str):
+        if not isinstance(container, dict):
+            return None
+        v = container.get(key_primary)
+        if v is None:
+            v = container.get(key_alt)
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if np.isfinite(f) else None
+
+    inj = diag.get("injector_pressure")
+    d_o = _pick(inj, "delta_p_injector_O", "delta_P_injector_O") if inj is not None else None
+    d_f = _pick(inj, "delta_p_injector_F", "delta_P_injector_F") if inj is not None else None
+    if d_o is None:
+        d_o = _pick(diag, "delta_p_injector_O", "delta_P_injector_O")
+    if d_f is None:
+        d_f = _pick(diag, "delta_p_injector_F", "delta_P_injector_F")
+    return d_o, d_f
+
+
 def convert_numpy(obj):
     """Recursively convert numpy types to Python native types."""
     if isinstance(obj, dict):
@@ -70,13 +104,15 @@ def compute_timeseries_results(
     
     if use_time_varying:
         results = runner.evaluate_arrays_with_time(
-            times, 
-            P_tank_O_pa, 
+            times,
+            P_tank_O_pa,
             P_tank_F_pa,
             use_coupled_solver=True,
         )
     else:
         results = runner.evaluate_arrays(P_tank_O_pa, P_tank_F_pa)
+
+    shutdown_info = results.get("shutdown_info")  # None or shutdown dict from solver
 
     # Build results dict
     result_data = {
@@ -146,9 +182,35 @@ def compute_timeseries_results(
                 result_data[key] = arr
 
                 
-    # Convert arrays back to lists for JSON serialization
+    # If the solver didn't detect a shutdown (e.g. standard/non-time-varying path)
+    # but flameout masking is active, derive the effective shutdown from the first
+    # depleted point. In blowdown mode the blowdown solver stalls tank pressure
+    # when propellant runs out, so the chamber solver keeps producing non-zero
+    # thrust at stalled pressure — the mask is the only reliable indicator.
+    if mask is not None and shutdown_info is None:
+        depleted_indices = np.where(mask)[0]
+        if len(depleted_indices) > 0:
+            first_depleted = int(depleted_indices[0])
+            shutdown_info = {
+                "time_s": float(times[first_depleted]),
+                "step_index": first_depleted,
+                "reason": "propellant_depleted",
+                "details": {},
+            }
+
+    # Convert arrays back to lists for JSON serialization.
+    # Replace NaN/Inf with 0.0 for numeric performance fields so the frontend
+    # never receives JSON null (NaN serializes as null, which crashes .toFixed()).
+    _NUMERIC_SCRUB_KEYS = {
+        "Pc_psi", "thrust_kN", "Isp_s", "MR",
+        "mdot_O_kg_s", "mdot_F_kg_s", "mdot_total_kg_s",
+        "cstar_actual_m_s", "gamma",
+        "P_tank_O_psi", "P_tank_F_psi",
+    }
     for k, v in result_data.items():
         if isinstance(v, np.ndarray):
+            if k in _NUMERIC_SCRUB_KEYS:
+                v = np.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
             result_data[k] = v.tolist()
     
     # Add optional fields if available
@@ -178,21 +240,14 @@ def compute_timeseries_results(
             recession_rate_graphite_oxidation_um_s.append(np.nan)
             continue
             
-        # Injector pressure drops (check both locations like Streamlit)
-        injector_pressure = diag.get("injector_pressure", {})
-        if injector_pressure and isinstance(injector_pressure, dict):
-            delta_P_O = injector_pressure.get("delta_P_injector_O")
-            delta_P_F = injector_pressure.get("delta_P_injector_F")
-        else:
-            # Fallback to direct access
-            delta_P_O = diag.get("delta_P_injector_O")
-            delta_P_F = diag.get("delta_P_injector_F")
-        
+        # Injector pressure drops: closure uses delta_p_injector_* on diagnostics; runner also nests under injector_pressure
+        delta_P_O, delta_P_F = _injector_delta_p_pa_from_diagnostic(diag)
+
         if delta_P_O is not None:
             delta_P_injector_O_psi.append(float(delta_P_O * PA_TO_PSI))
         else:
             delta_P_injector_O_psi.append(np.nan)
-            
+
         if delta_P_F is not None:
             delta_P_injector_F_psi.append(float(delta_P_F * PA_TO_PSI))
         else:
@@ -371,11 +426,13 @@ def compute_timeseries_results(
         cumulative = np.cumsum(recession_rate_m_s * dt) * 1000.0
         recession_cumulative_graphite_oxidation_mm = cumulative.tolist()
     
-    # Add optional data fields (only if data exists)
-    if delta_P_injector_O_psi and any(np.isfinite(delta_P_injector_O_psi)):
-        result_data["delta_P_injector_O_psi"] = delta_P_injector_O_psi
-    if delta_P_injector_F_psi and any(np.isfinite(delta_P_injector_F_psi)):
-        result_data["delta_P_injector_F_psi"] = delta_P_injector_F_psi
+    # Injector ΔP: always expose both series when we extracted any per-step diagnostics (same length as time)
+    if delta_P_injector_O_psi and len(delta_P_injector_O_psi) == n_points:
+        o_fin = any(np.isfinite(delta_P_injector_O_psi))
+        f_fin = any(np.isfinite(delta_P_injector_F_psi))
+        if o_fin or f_fin:
+            result_data["delta_P_injector_O_psi"] = delta_P_injector_O_psi
+            result_data["delta_P_injector_F_psi"] = delta_P_injector_F_psi
     
     if Lstar_mm and any(np.isfinite(Lstar_mm)):
         result_data["Lstar_mm"] = Lstar_mm
@@ -434,22 +491,44 @@ def compute_timeseries_results(
     else:
         logger.info(f"[TIMESERIES] NO ablative_axial_positions - skipping ablative data")
     
-    # Calculate summary statistics
-    thrust_arr = np.asarray(results["F"], dtype=float) / 1000.0
-    Pc_arr = np.asarray(results["Pc"], dtype=float) * PA_TO_PSI
-    Isp_arr = np.asarray(results["Isp"], dtype=float)
-    mdot_arr = np.asarray(results["mdot_total"], dtype=float)
-    
+    # Calculate summary statistics.
+    # When there is a shutdown event, restrict averages/peaks to the active burn
+    # period only (steps before shutdown_info["step_index"]).  Post-shutdown steps
+    # are zero-filled and must not drag down averages or skew peak/min values.
+    thrust_arr = np.nan_to_num(np.asarray(results["F"], dtype=float) / 1000.0)
+    Pc_arr = np.nan_to_num(np.asarray(results["Pc"], dtype=float) * PA_TO_PSI)
+    Isp_arr = np.asarray(results["Isp"], dtype=float)  # kept as-is; nanmean handles NaN
+    mdot_arr = np.nan_to_num(np.asarray(results["mdot_total"], dtype=float))
+
+    if shutdown_info is not None:
+        burn_end_idx = int(shutdown_info["step_index"])
+        # Clamp to at least 1 so we always have something to average
+        burn_end_idx = max(1, burn_end_idx)
+        thrust_burn = thrust_arr[:burn_end_idx]
+        Pc_burn     = Pc_arr[:burn_end_idx]
+        Isp_burn    = Isp_arr[:burn_end_idx]
+        mdot_burn   = mdot_arr[:burn_end_idx]
+        times_burn  = np.asarray(times[:burn_end_idx])
+        actual_burn_time = float(shutdown_info["time_s"]) - float(times[0])
+    else:
+        thrust_burn = thrust_arr
+        Pc_burn     = Pc_arr
+        Isp_burn    = Isp_arr
+        mdot_burn   = mdot_arr
+        times_burn  = np.asarray(times)
+        actual_burn_time = float(times[-1] - times[0]) if len(times) > 1 else 0.0
+
     summary = {
-        "avg_thrust_kN": float(np.nanmean(thrust_arr)),
-        "peak_thrust_kN": float(np.nanmax(thrust_arr)),
-        "min_thrust_kN": float(np.nanmin(thrust_arr)),
-        "avg_Pc_psi": float(np.nanmean(Pc_arr)),
-        "peak_Pc_psi": float(np.nanmax(Pc_arr)),
-        "avg_Isp_s": float(np.nanmean(Isp_arr)),
-        "total_impulse_kNs": float(np.trapezoid(thrust_arr, times) if hasattr(np, "trapezoid") else np.trapz(thrust_arr, times)),
-        "total_propellant_kg": float(np.trapezoid(mdot_arr, times) if hasattr(np, "trapezoid") else np.trapz(mdot_arr, times)),
-        "burn_time_s": float(times[-1] - times[0]) if len(times) > 1 else 0.0,
+        "avg_thrust_kN": float(np.nanmean(thrust_burn)),
+        "peak_thrust_kN": float(np.nanmax(thrust_burn)),
+        "min_thrust_kN": float(np.nanmin(thrust_burn)),
+        "avg_Pc_psi": float(np.nanmean(Pc_burn)),
+        "peak_Pc_psi": float(np.nanmax(Pc_burn)),
+        "avg_Isp_s": float(np.nanmean(Isp_burn)),
+        "total_impulse_kNs": float(np.trapezoid(thrust_burn, times_burn) if hasattr(np, "trapezoid") else np.trapz(thrust_burn, times_burn)),
+        "total_propellant_kg": float(np.trapezoid(mdot_burn, times_burn) if hasattr(np, "trapezoid") else np.trapz(mdot_burn, times_burn)),
+        "burn_time_s": actual_burn_time,
+        "shutdown_event": shutdown_info,
     }
     
     # =========================================================================
@@ -550,6 +629,8 @@ def _compute_correlation_matrix(result_data: dict) -> Optional[dict]:
         "cstar_actual_m_s": "c*",
         "gamma": "Gamma",
         "copv_pressure_psi": "COPV P",
+        "delta_P_injector_O_psi": "LOX ΔP_inj",
+        "delta_P_injector_F_psi": "Fuel ΔP_inj",
     }
     
     # Build dataframe with available variables
@@ -870,11 +951,17 @@ async def generate_from_segments(request: SegmentsRequest):
                     res = app_state.runner.evaluate(
                         P_tank_O=P_lox_Pa,
                         P_tank_F=P_fuel_Pa,
-                        silent=True
+                        silent=True,
+                        debug=True,
                     )
                     return res["mdot_O"], res["mdot_F"]
-                except Exception:
-                    # If evaluation fails (e.g. pressure too low for CEA), return 0 flow
+                except Exception as _eval_err:
+                    import logging as _logging
+                    _logging.getLogger("evaluate").warning(
+                        f"[BLOWDOWN] engine_evaluator failed at "
+                        f"P_lox={P_lox_Pa/6894.76:.1f} psi, "
+                        f"P_fuel={P_fuel_Pa/6894.76:.1f} psi: {_eval_err}"
+                    )
                     return 0.0, 0.0
 
             # Run coupled simulation
