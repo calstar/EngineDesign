@@ -1,4 +1,235 @@
 {
-  "nodes": [],
-  "edges": []
+  "nodes": [
+    {
+      "id": "node_13",
+      "type": "RTD",
+      "position": {
+        "x": 70,
+        "y": -90
+      },
+      "data": {
+        "componentType": "RTD",
+        "label": "RTD_#",
+        "fluidType": "default"
+      },
+      "measured": {
+        "width": 60,
+        "height": 60
+      }
+    },
+    {
+      "id": "node_15",
+      "type": "PG",
+      "position": {
+        "x": 230,
+        "y": -10
+      },
+      "data": {
+        "componentType": "PG",
+        "label": "PG_#",
+        "fluidType": "default"
+      },
+      "measured": {
+        "width": 60,
+        "height": 60
+      }
+    },
+    {
+      "id": "node_17",
+      "type": "LC",
+      "position": {
+        "x": 140,
+        "y": 40
+      },
+      "data": {
+        "componentType": "LC",
+        "label": "LC_#",
+        "fluidType": "default"
+      },
+      "measured": {
+        "width": 60,
+        "height": 60
+      },
+      "selected": false,
+      "dragging": false
+    },
+    {
+      "id": "node_19",
+      "type": "PT",
+      "position": {
+        "x": 480,
+        "y": -80
+      },
+      "data": {
+        "componentType": "PT",
+        "label": "PT_#",
+        "fluidType": "default",
+        "rotation": 90
+      },
+      "measured": {
+        "width": 60,
+        "height": 60
+      },
+      "selected": true,
+      "dragging": false
+    },
+    {
+      "id": "node_21",
+      "type": "ROT",
+      "position": {
+        "x": -10,
+        "y": 30
+      },
+      "data": {
+        "componentType": "ROT",
+        "label": "ROT_#",
+        "fluidType": "default"
+      },
+      "measured": {
+        "width": 60,
+        "height": 60
+      }
+    },
+    {
+      "id": "node_23",
+      "type": "MAN",
+      "position": {
+        "x": -220,
+        "y": -200
+      },
+      "data": {
+        "componentType": "MAN",
+        "label": "MAN_#",
+        "fluidType": "default"
+      },
+      "measured": {
+        "width": 60,
+        "height": 60
+      },
+      "selected": false,
+      "dragging": false
+    }
+  ],
+  "edges": [
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_23",
+      "sourceHandle": "r",
+      "target": "node_13",
+      "targetHandle": "l",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_23r-node_13l"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_21",
+      "sourceHandle": "l",
+      "target": "node_23",
+      "targetHandle": "l",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_21l-node_23l"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_21",
+      "sourceHandle": "r",
+      "target": "node_17",
+      "targetHandle": "l",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_21r-node_17l"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_13",
+      "sourceHandle": "r",
+      "target": "node_17",
+      "targetHandle": "t",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_13r-node_17t"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_13",
+      "sourceHandle": "r",
+      "target": "node_15",
+      "targetHandle": "t",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_13r-node_15t"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_19",
+      "sourceHandle": "l",
+      "target": "node_15",
+      "targetHandle": "t",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_19l-node_15t"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_19",
+      "sourceHandle": "b",
+      "target": "node_15",
+      "targetHandle": "r",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_19b-node_15r"
+    },
+    {
+      "type": "smoothstep",
+      "style": {
+        "stroke": "#94a3b8",
+        "strokeWidth": 2
+      },
+      "source": "node_23",
+      "sourceHandle": "r",
+      "target": "node_21",
+      "targetHandle": "l",
+      "data": {
+        "fluidType": "default"
+      },
+      "id": "xy-edge__node_23r-node_21l"
+    }
+  ]
 }
