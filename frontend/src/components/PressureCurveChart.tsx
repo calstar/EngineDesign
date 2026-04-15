@@ -8,6 +8,7 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
+  ReferenceLine,
 } from 'recharts';
 import type { TimeSeriesData, TimeSeriesSummary } from '../api/client';
 import { HeatFluxProfileChart } from './HeatFluxProfileChart';
@@ -44,6 +45,7 @@ interface ChartDataPoint {
    fuel_mass_remaining?: number;
   Cd_O?: number;
   Cd_F?: number;
+  P_exit?: number;
 }
 
 function formatValue(value: number | null | undefined, decimals: number = 2): string {
@@ -208,6 +210,7 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
     fuel_mass_remaining: data.fuel_mass_remaining_kg?.[i],
     Cd_O: data.Cd_O?.[i],
     Cd_F: data.Cd_F?.[i],
+    P_exit: data.P_exit_psi?.[i],
   }));
 
   // Calculate max time for x-axis domain
@@ -229,6 +232,14 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
   const hasDeltaPInjF =
     Array.isArray(data.delta_P_injector_F_psi) && data.delta_P_injector_F_psi.length === data.time.length;
   const showInjectorDeltaChart = hasDeltaPInjO || hasDeltaPInjF;
+
+  const showExitPressureChart =
+    !data.is_waterflow &&
+    Array.isArray(data.P_exit_psi) &&
+    data.P_exit_psi.length === data.time.length;
+  const targetExitPsi = summary.target_P_exit_psi;
+  const hasTargetExit =
+    targetExitPsi != null && Number.isFinite(targetExitPsi) && targetExitPsi > 0;
 
   const customTooltip = ({ active, payload, label }: any) => {
     if (active && payload && payload.length) {
@@ -277,6 +288,7 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
       case 'fuel_mass_remaining': return 'kg';
       case 'Cd_O':
       case 'Cd_F': return '';
+      case 'P_exit': return 'psi';
       default: return '';
     }
   };
@@ -392,6 +404,66 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
           </LineChart>
         </ResponsiveContainer>
       </div>
+
+      {/* Exit pressure vs ambient target */}
+      {showExitPressureChart && (
+        <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+          <h4 className="text-sm font-semibold mb-4 text-[var(--color-text-primary)]">
+            Exit Pressure vs Time
+            {hasTargetExit && (
+              <span className="text-xs font-normal text-[var(--color-text-secondary)] ml-2">
+                (dashed = ambient / target {targetExitPsi.toFixed(2)} psi)
+              </span>
+            )}
+          </h4>
+          <ResponsiveContainer width="100%" height={220}>
+            <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--color-border)" opacity={0.5} />
+              <XAxis
+                dataKey="time"
+                type="number"
+                domain={[minTime, maxTimeInt]}
+                ticks={integerTicks}
+                stroke="var(--color-text-secondary)"
+                tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
+                tickFormatter={formatTick}
+                allowDecimals={false}
+                label={{ value: 'Time (s)', position: 'insideBottom', offset: -5, fill: 'var(--color-text-secondary)' }}
+              />
+              <YAxis
+                stroke="#f43f5e"
+                tick={{ fill: '#f43f5e', fontSize: 11 }}
+                label={{ value: 'P_exit (psi)', angle: -90, position: 'insideLeft', fill: '#f43f5e' }}
+              />
+              <Tooltip content={customTooltip} />
+              <Legend />
+              {hasTargetExit && (
+                <ReferenceLine
+                  y={targetExitPsi}
+                  stroke="var(--color-text-secondary)"
+                  strokeDasharray="6 4"
+                  strokeWidth={2}
+                  ifOverflow="extendDomain"
+                  label={{
+                    value: 'Target (ambient)',
+                    position: 'insideTopRight',
+                    fill: 'var(--color-text-secondary)',
+                    fontSize: 11,
+                  }}
+                />
+              )}
+              <Line
+                type="monotone"
+                dataKey="P_exit"
+                name="Exit pressure"
+                stroke="#f43f5e"
+                strokeWidth={2}
+                dot={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
 
       {/* 3. Mass Flow Rates */}
       <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">

@@ -1,5 +1,6 @@
 """Time-series evaluation endpoints."""
 
+import copy
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel, Field, ValidationError
@@ -14,6 +15,8 @@ from engine.pipeline.time_series import generate_pressure_profile
 from engine.pipeline.config_schemas import PintleEngineConfig
 from engine.optimizer.layers.layer2_pressure import generate_pressure_curve_from_segments
 from copv.copv_solve_both import size_or_check_copv_for_polytropic_N2
+from engine.pipeline.timeseries_engine_eval import eval_runner_timeseries_like_api
+from engine.core.runner import PintleEngineRunner
 
 # Get path to N2 Z lookup table (relative to project root)
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -77,6 +80,18 @@ def convert_numpy(obj):
         return obj
 
 
+def _runner_for_cd(use_cold_flow_cd: bool) -> PintleEngineRunner:
+    """Return a runner that either uses or strips the saved cold-flow Cd fit."""
+    if not use_cold_flow_cd:
+        cfg = copy.deepcopy(app_state.config)
+        for fluid in ("oxidizer", "fuel"):
+            if fluid in cfg.discharge:
+                cfg.discharge[fluid].cd_dp_fit_a = None
+                cfg.discharge[fluid].cd_dp_fit_b = None
+        return PintleEngineRunner(cfg)
+    return app_state.runner
+
+
 def compute_timeseries_results(
     runner,
     times: np.ndarray,
@@ -93,24 +108,7 @@ def compute_timeseries_results(
     P_tank_O_pa = np.asarray(P_tank_O_psi) * PSI_TO_PA
     P_tank_F_pa = np.asarray(P_tank_F_psi) * PSI_TO_PA
 
-    # Check if ablative geometry tracking is enabled
-    ablative_cfg = runner.config.ablative_cooling
-    use_time_varying = (
-        ablative_cfg is not None 
-        and ablative_cfg.enabled 
-        and getattr(ablative_cfg, 'track_geometry_evolution', False)
-        and len(times) >= 2
-    )
-    
-    if use_time_varying:
-        results = runner.evaluate_arrays_with_time(
-            times,
-            P_tank_O_pa,
-            P_tank_F_pa,
-            use_coupled_solver=True,
-        )
-    else:
-        results = runner.evaluate_arrays(P_tank_O_pa, P_tank_F_pa)
+    results = eval_runner_timeseries_like_api(runner, times, P_tank_O_pa, P_tank_F_pa)
 
     shutdown_info = results.get("shutdown_info")  # None or shutdown dict from solver
 
@@ -130,6 +128,10 @@ def compute_timeseries_results(
         "cstar_actual_m_s": np.asarray(results["cstar_actual"], dtype=float),
         "gamma": np.asarray(results["gamma"], dtype=float),
     }
+    if "P_exit" in results:
+        pexit_arr = np.asarray(results["P_exit"], dtype=float)
+        if len(pexit_arr) == len(times):
+            result_data["P_exit_psi"] = pexit_arr * PA_TO_PSI
 
     # FLAMEOUT MASKING
     # If mass history is provided, mask performance metrics where propellant is depleted.
@@ -172,7 +174,7 @@ def compute_timeseries_results(
         metrics_to_mask = [
             "Pc_psi", "thrust_kN", "Isp_s", "MR", 
             "mdot_O_kg_s", "mdot_F_kg_s", "mdot_total_kg_s", 
-            "cstar_actual_m_s"
+            "cstar_actual_m_s", "P_exit_psi",
         ]
         for key in metrics_to_mask:
             if key in result_data:
@@ -206,6 +208,7 @@ def compute_timeseries_results(
         "mdot_O_kg_s", "mdot_F_kg_s", "mdot_total_kg_s",
         "cstar_actual_m_s", "gamma",
         "P_tank_O_psi", "P_tank_F_psi",
+        "P_exit_psi",
     }
     for k, v in result_data.items():
         if isinstance(v, np.ndarray):
@@ -530,6 +533,13 @@ def compute_timeseries_results(
         "burn_time_s": actual_burn_time,
         "shutdown_event": shutdown_info,
     }
+    # Ambient/back-pressure used for thrust (matches Layer 1 "target" exit pressure / P_ambient)
+    try:
+        Pa_amb = float(runner._get_ambient_pressure(None))
+        if np.isfinite(Pa_amb) and Pa_amb > 0:
+            summary["target_P_exit_psi"] = Pa_amb * PA_TO_PSI
+    except Exception:
+        pass
     
     # =========================================================================
     # Propellant Mass Remaining (Tank Fill Levels)
@@ -609,6 +619,66 @@ def compute_timeseries_results(
 
 
 
+
+def _build_waterflow_summary(
+    times,
+    mdot_O,
+    mdot_F,
+    lox_mass_kg,
+    fuel_mass_kg,
+    wf_results,
+):
+    """Build summary statistics for a water flow test run."""
+    times_arr = np.asarray(times, dtype=float)
+    mdot_O_arr = np.nan_to_num(np.asarray(mdot_O, dtype=float))
+    mdot_F_arr = np.nan_to_num(np.asarray(mdot_F, dtype=float))
+    mdot_total = mdot_O_arr + mdot_F_arr
+
+    lox_m = np.asarray(lox_mass_kg, dtype=float)
+    fuel_m = np.asarray(fuel_mass_kg, dtype=float)
+    # Both tanks must be empty before flow stops (each side runs independently)
+    depleted_mask = (lox_m <= 1e-4) & (fuel_m <= 1e-4)
+    depleted_idx = int(np.where(depleted_mask)[0][0]) if np.any(depleted_mask) else len(times_arr) - 1
+    flow_duration_s = float(times_arr[depleted_idx]) if depleted_idx < len(times_arr) else float(times_arr[-1])
+
+    t_burn = times_arr[:depleted_idx]
+    if len(t_burn) < 2:
+        t_burn = times_arr
+
+    _trap = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+
+    total_lox_kg = float(_trap(mdot_O_arr[:len(t_burn)], t_burn))
+    total_fuel_kg = float(_trap(mdot_F_arr[:len(t_burn)], t_burn))
+
+    return {
+        "avg_mdot_lox_kg_s": float(np.nanmean(mdot_O_arr[:depleted_idx])) if depleted_idx > 0 else 0.0,
+        "avg_mdot_fuel_kg_s": float(np.nanmean(mdot_F_arr[:depleted_idx])) if depleted_idx > 0 else 0.0,
+        "peak_mdot_lox_kg_s": float(np.nanmax(mdot_O_arr)),
+        "peak_mdot_fuel_kg_s": float(np.nanmax(mdot_F_arr)),
+        "avg_mdot_total_kg_s": float(np.nanmean(mdot_total[:depleted_idx])) if depleted_idx > 0 else 0.0,
+        "total_lox_consumed_kg": total_lox_kg,
+        "total_fuel_consumed_kg": total_fuel_kg,
+        "total_water_consumed_kg": total_lox_kg + total_fuel_kg,
+        "flow_duration_s": flow_duration_s,
+        "Cd_used": None,  # cd_from_re model used (Re-dependent, not a single value)
+        "avg_thrust_kN": 0.0,
+        "peak_thrust_kN": 0.0,
+        "min_thrust_kN": 0.0,
+        "avg_Pc_psi": 0.0,
+        "peak_Pc_psi": 0.0,
+        "avg_Isp_s": 0.0,
+        "total_impulse_kNs": 0.0,
+        "total_propellant_kg": total_lox_kg + total_fuel_kg,
+        "burn_time_s": flow_duration_s,
+        "shutdown_event": {
+            "time_s": flow_duration_s,
+            "step_index": depleted_idx,
+            "reason": "water_depleted",
+            "details": {},
+        },
+    }
+
+
 def _compute_correlation_matrix(result_data: dict) -> Optional[dict]:
     """Compute correlation matrix for key time-series variables.
     
@@ -620,6 +690,7 @@ def _compute_correlation_matrix(result_data: dict) -> Optional[dict]:
         "P_tank_O_psi": "LOX Tank P",
         "P_tank_F_psi": "Fuel Tank P",
         "Pc_psi": "Chamber P",
+        "P_exit_psi": "Exit P",
         "thrust_kN": "Thrust",
         "Isp_s": "Isp",
         "MR": "O/F Ratio",
@@ -754,6 +825,7 @@ class GenerateProfileRequest(BaseModel):
     n_steps: int = Field(default=101, ge=2, le=2000, description="Number of time steps")
     lox_profile: ProfileParams
     fuel_profile: ProfileParams
+    use_cold_flow_cd: bool = Field(default=True, description="Use saved cold-flow Cd fit if present. When False, uses Re-based formula.")
 
 
 class GenerateProfileResponse(BaseModel):
@@ -774,7 +846,8 @@ async def generate_timeseries(request: GenerateProfileRequest):
             status_code=400,
             detail="No config loaded. Upload a config file first."
         )
-    
+    app_state.ensure_runner()
+
     try:
         # Generate LOX profile
         lox_params = {}
@@ -810,18 +883,18 @@ async def generate_timeseries(request: GenerateProfileRequest):
         
         # Compute time-series results
         data, summary = compute_timeseries_results(
-            app_state.runner,
+            _runner_for_cd(request.use_cold_flow_cd),
             times,
             lox_pressures,
             fuel_pressures,
         )
-        
+
         return GenerateProfileResponse(
             status="success",
             data=convert_numpy(data),
             summary=convert_numpy(summary),
         )
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -845,11 +918,20 @@ class SegmentsRequest(BaseModel):
     n_points: int = Field(default=200, ge=10, le=2000, description="Number of time points")
     lox_segments: List[PressureSegment] = Field(default=[], max_length=20)
     fuel_segments: List[PressureSegment] = Field(default=[], max_length=20)
-    
+
     # Blowdown mode parameters
     blowdown_mode: bool = Field(default=False, description="Enable pure blowdown (no COPV regulation)")
     lox_initial_pressure_psi: Optional[float] = Field(default=None, gt=0, description="Initial LOX tank pressure (psi), required for blowdown mode")
     fuel_initial_pressure_psi: Optional[float] = Field(default=None, gt=0, description="Initial fuel tank pressure (psi), required for blowdown mode")
+
+    # Water flow test parameters (sub-mode of blowdown_mode)
+    waterflow_mode: bool = Field(default=False, description="Water flow test: water through injector at atmospheric back-pressure, no combustion")
+
+    # Initial propellant/water mass overrides (from tank fill visualizer UI)
+    lox_initial_mass_kg: Optional[float] = Field(default=None, gt=0, description="Initial LOX/water mass [kg]. Overrides config value.")
+    fuel_initial_mass_kg: Optional[float] = Field(default=None, gt=0, description="Initial fuel/water mass [kg]. Overrides config value.")
+
+    use_cold_flow_cd: bool = Field(default=True, description="Use saved cold-flow Cd fit if present. When False, uses Re-based formula.")
 
 
 class SegmentsResponse(BaseModel):
@@ -913,7 +995,8 @@ async def generate_from_segments(request: SegmentsRequest):
             status_code=400,
             detail="No config loaded. Upload a config file first."
         )
-    
+    app_state.ensure_runner()
+
     # Validate blowdown mode parameters
     if request.blowdown_mode:
         if request.lox_initial_pressure_psi is None:
@@ -939,68 +1022,135 @@ async def generate_from_segments(request: SegmentsRequest):
         times = np.linspace(0, request.duration_s, request.n_points)
         
         if request.blowdown_mode:
-            # ===== BLOWDOWN MODE =====
-            # Import coupled blowdown solver
-            from copv.blowdown_solver import simulate_coupled_blowdown
-            
-            # Define engine callback for coupled solver
-            def engine_evaluator(P_lox_Pa: float, P_fuel_Pa: float):
-                # Run single-point evaluation
-                # Note: evaluate returns dict with mdot_O and mdot_F (kg/s)
-                try:
-                    res = app_state.runner.evaluate(
-                        P_tank_O=P_lox_Pa,
-                        P_tank_F=P_fuel_Pa,
-                        silent=True,
-                        debug=True,
-                    )
-                    return res["mdot_O"], res["mdot_F"]
-                except Exception as _eval_err:
-                    import logging as _logging
-                    _logging.getLogger("evaluate").warning(
-                        f"[BLOWDOWN] engine_evaluator failed at "
-                        f"P_lox={P_lox_Pa/6894.76:.1f} psi, "
-                        f"P_fuel={P_fuel_Pa/6894.76:.1f} psi: {_eval_err}"
-                    )
-                    return 0.0, 0.0
+            if request.waterflow_mode:
+                # ===== WATER FLOW TEST MODE =====
+                from copv.waterflow import simulate_waterflow
 
-            # Run coupled simulation
-            blowdown_results = simulate_coupled_blowdown(
-                times=times,
-                evaluate_engine_fn=engine_evaluator,
-                P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
-                P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
-                config=app_state.runner.config,
-                R_pressurant=296.803,  # N2
-                T_lox_gas_K=250.0,
-                T_fuel_gas_K=293.0,
-                n_polytropic=1.2,
-                use_real_gas=True,
-                n2_Z_csv=N2_Z_LOOKUP_CSV,
-            )
-            
-            # Extract Actual Blowdown Pressures
-            lox_curve_pa = blowdown_results["lox"]["P_Pa"]
-            fuel_curve_pa = blowdown_results["fuel"]["P_Pa"]
-            lox_curve_psi = lox_curve_pa * PA_TO_PSI
-            fuel_curve_psi = fuel_curve_pa * PA_TO_PSI
-            
-            # Extract Propellant Mass History (for flameout masking)
-            lox_mass_kg = blowdown_results["lox"]["m_prop_kg"]
-            fuel_mass_kg = blowdown_results["fuel"]["m_prop_kg"]
-            
-            # Run final evaluation with actual blowdown pressures
-            data, summary = compute_timeseries_results(
-                app_state.runner,
-                times,
-                lox_curve_psi,
-                fuel_curve_psi,
-                run_copv=False,  # Skip COPV analysis for efficiency
-                lox_mass_kg=lox_mass_kg,
-                fuel_mass_kg=fuel_mass_kg,
-            )
-            
-            # (COPV analysis skipped via flag, so no cleanup needed)
+                wf = simulate_waterflow(
+                    times=times,
+                    P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
+                    P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
+                    config=app_state.runner.config,
+                    m_lox_override_kg=request.lox_initial_mass_kg,
+                    m_fuel_override_kg=request.fuel_initial_mass_kg,
+                    rho_water=1000.0,
+                    mu_water=1e-3,
+                    P_ambient_Pa=101325.0,
+                    T_lox_gas_K=293.0,   # Room temperature — water tanks are not cryogenic
+                    T_fuel_gas_K=293.0,
+                    n_polytropic=1.2,
+                    use_real_gas=True,
+                    n2_Z_csv=N2_Z_LOOKUP_CSV,
+                )
+
+                mdot_O = np.asarray(wf["lox"]["mdot_kg_s"], dtype=float)
+                mdot_F = np.asarray(wf["fuel"]["mdot_kg_s"], dtype=float)
+                lox_curve_psi = np.asarray(wf["lox"]["P_Pa"], dtype=float) * PA_TO_PSI
+                fuel_curve_psi = np.asarray(wf["fuel"]["P_Pa"], dtype=float) * PA_TO_PSI
+                lox_mass_kg = np.asarray(wf["lox"]["m_prop_kg"], dtype=float)
+                fuel_mass_kg = np.asarray(wf["fuel"]["m_prop_kg"], dtype=float)
+                dp_inj_O_psi = np.asarray(wf["delta_p_inj_O_Pa"], dtype=float) * PA_TO_PSI
+                dp_inj_F_psi = np.asarray(wf["delta_p_inj_F_Pa"], dtype=float) * PA_TO_PSI
+
+                # Build result_data directly — no combustion engine call
+                n_pts = len(times)
+                data = {
+                    "time": times.tolist(),
+                    "P_tank_O_psi": lox_curve_psi.tolist(),
+                    "P_tank_F_psi": fuel_curve_psi.tolist(),
+                    "mdot_O_kg_s": mdot_O.tolist(),
+                    "mdot_F_kg_s": mdot_F.tolist(),
+                    "mdot_total_kg_s": (mdot_O + mdot_F).tolist(),
+                    "lox_mass_remaining_kg": lox_mass_kg.tolist(),
+                    "fuel_mass_remaining_kg": fuel_mass_kg.tolist(),
+                    "delta_P_injector_O_psi": dp_inj_O_psi.tolist(),
+                    "delta_P_injector_F_psi": dp_inj_F_psi.tolist(),
+                    # Combustion metrics: zero (no combustion in water flow test)
+                    "Pc_psi": [0.0] * n_pts,
+                    "thrust_kN": [0.0] * n_pts,
+                    "Isp_s": [0.0] * n_pts,
+                    "MR": [0.0] * n_pts,
+                    "cstar_actual_m_s": [0.0] * n_pts,
+                    "gamma": [0.0] * n_pts,
+                    "is_waterflow": True,
+                }
+                summary = _build_waterflow_summary(times, mdot_O, mdot_F, lox_mass_kg, fuel_mass_kg, wf)
+                summary["is_waterflow"] = True
+
+                lox_preview = lox_curve_psi.tolist()
+                fuel_preview = fuel_curve_psi.tolist()
+
+                return SegmentsResponse(
+                    status="success",
+                    data=convert_numpy(data),
+                    summary=convert_numpy(summary),
+                    lox_curve_preview=lox_preview[:50],
+                    fuel_curve_preview=fuel_preview[:50],
+                )
+
+            else:
+                # ===== HOT-FIRE BLOWDOWN MODE =====
+                # Import coupled blowdown solver
+                from copv.blowdown_solver import simulate_coupled_blowdown
+
+                # Define engine callback for coupled solver
+                def engine_evaluator(P_lox_Pa: float, P_fuel_Pa: float):
+                    # Run single-point evaluation
+                    # Note: evaluate returns dict with mdot_O and mdot_F (kg/s)
+                    try:
+                        res = app_state.runner.evaluate(
+                            P_tank_O=P_lox_Pa,
+                            P_tank_F=P_fuel_Pa,
+                            silent=True,
+                            debug=True,
+                        )
+                        return res["mdot_O"], res["mdot_F"]
+                    except Exception as _eval_err:
+                        import logging as _logging
+                        _logging.getLogger("evaluate").warning(
+                            f"[BLOWDOWN] engine_evaluator failed at "
+                            f"P_lox={P_lox_Pa/6894.76:.1f} psi, "
+                            f"P_fuel={P_fuel_Pa/6894.76:.1f} psi: {_eval_err}"
+                        )
+                        return 0.0, 0.0
+
+                # Run coupled simulation
+                blowdown_results = simulate_coupled_blowdown(
+                    times=times,
+                    evaluate_engine_fn=engine_evaluator,
+                    P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
+                    P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
+                    config=app_state.runner.config,
+                    R_pressurant=296.803,  # N2
+                    T_lox_gas_K=250.0,
+                    T_fuel_gas_K=293.0,
+                    n_polytropic=1.2,
+                    use_real_gas=True,
+                    n2_Z_csv=N2_Z_LOOKUP_CSV,
+                    m_lox_override_kg=request.lox_initial_mass_kg,
+                    m_fuel_override_kg=request.fuel_initial_mass_kg,
+                )
+
+                # Extract Actual Blowdown Pressures
+                lox_curve_pa = blowdown_results["lox"]["P_Pa"]
+                fuel_curve_pa = blowdown_results["fuel"]["P_Pa"]
+                lox_curve_psi = lox_curve_pa * PA_TO_PSI
+                fuel_curve_psi = fuel_curve_pa * PA_TO_PSI
+
+                # Extract Propellant Mass History (for flameout masking)
+                lox_mass_kg = blowdown_results["lox"]["m_prop_kg"]
+                fuel_mass_kg = blowdown_results["fuel"]["m_prop_kg"]
+
+                # Run final evaluation with actual blowdown pressures
+                data, summary = compute_timeseries_results(
+                    _runner_for_cd(request.use_cold_flow_cd),
+                    times,
+                    lox_curve_psi,
+                    fuel_curve_psi,
+                    run_copv=False,  # Skip COPV analysis for efficiency
+                    lox_mass_kg=lox_mass_kg,
+                    fuel_mass_kg=fuel_mass_kg,
+                )
             
         else:
             # ===== REGULATED MODE (original behavior) =====
@@ -1024,7 +1174,7 @@ async def generate_from_segments(request: SegmentsRequest):
             
             # Compute time-series results (includes COPV analysis)
             data, summary = compute_timeseries_results(
-                app_state.runner,
+                _runner_for_cd(request.use_cold_flow_cd),
                 times,
                 lox_curve_psi,
                 fuel_curve_psi,
@@ -1206,7 +1356,8 @@ async def generate_from_csv(file: UploadFile = File(...)):
                     status_code=400,
                     detail="No config loaded. Upload a config file first."
                 )
-            
+            app_state.ensure_runner()
+
             try:
                 df = pd.read_csv(io.BytesIO(contents))
                 

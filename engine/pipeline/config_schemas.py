@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, field_validator, ConfigDict
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 from typing import Literal, Optional, Union, List, Dict, Tuple, Set
 import numpy as np
 
@@ -332,12 +332,38 @@ class SprayConfig(BaseModel):
     turbulence_penetration_gain: float = Field(default=0.5, ge=0, description="Gain applied to evaporation length reduction due to turbulence")
 
 
+class CEAFuelBlendConfig(BaseModel):
+    """RocketCEA liquid fuel blend (names must exist in ``rocketcea`` ``fuelCards``, e.g. Ethanol + H2O)."""
+
+    components: List[str] = Field(
+        min_length=2,
+        description="Fuel card names in order, e.g. ['Ethanol', 'H2O']",
+    )
+    weight_percent: List[float] = Field(
+        min_length=2,
+        description="Weight % of each component (must sum to 100)",
+    )
+
+    @model_validator(mode="after")
+    def _validate_blend(self):
+        if len(self.components) != len(self.weight_percent):
+            raise ValueError("components and weight_percent must have the same length")
+        s = float(sum(self.weight_percent))
+        if abs(s - 100.0) > 0.02:
+            raise ValueError(f"fuel blend weight_percent must sum to 100 (got {s})")
+        return self
+
+
 class CEAConfig(BaseModel):
     use_parallel_cea_build: bool = Field(default=True, description="Use parallel processing for CEA cache building")
     cea_parallel_workers: Optional[int] = Field(default=None, description="Number of parallel workers (None = auto-detect, limited to 8)")
     """CEA (Chemical Equilibrium Analysis) configuration"""
     ox_name: str = Field(default="LOX", description="Oxidizer name")
-    fuel_name: str = Field(default="RP-1", description="Fuel name")
+    fuel_name: str = Field(default="RP-1", description="Fuel name (RocketCEA card); ignored for CEA if fuel_blend is set")
+    fuel_blend: Optional[CEAFuelBlendConfig] = Field(
+        default=None,
+        description="If set, registers a RocketCEa fuel blend and uses it for CEA (e.g. 90 wt%% Ethanol / 10 wt%% water)",
+    )
     expansion_ratio: float = Field(gt=1, description="Nozzle expansion ratio (initial/default value)")
     cache_file: str = Field(default="cea_cache_LOX_RP1.npz", description="Cache filename")
     Pc_range: List[float] = Field(

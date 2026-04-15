@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import type { EngineConfig, TimeSeriesData, TimeSeriesSummary } from '../api/client';
-import { API_BASE } from '../api/client';
+import { API_BASE, updateConfig } from '../api/client';
 import { PressureCurveChart } from './PressureCurveChart';
 import {
   ComposedChart, Scatter, Line, XAxis, YAxis,
@@ -9,6 +9,7 @@ import {
 
 interface ExperimentModeProps {
   config: EngineConfig | null;
+  onConfigUpdated?: (config: EngineConfig) => void;
 }
 
 interface RowInput {
@@ -551,7 +552,7 @@ function GridPanel({
 // Main component
 // ---------------------------------------------------------------------------
 
-export function ExperimentMode({ config }: ExperimentModeProps) {
+export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps) {
   const [chokeDiamFuelMm,  setChokeDiamFuelMm]  = useState('3.0');
   const [chokeDiamLoxMm,   setChokeDiamLoxMm]   = useState('3.0');
   const [waterDensity,     setWaterDensity]      = useState('998.2');
@@ -564,6 +565,7 @@ export function ExperimentMode({ config }: ExperimentModeProps) {
   const [results,  setResults]  = useState<TimeseriesResponse | null>(null);
   const [error,    setError]    = useState<string | null>(null);
   const [loading,  setLoading]  = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   const inputCls = "w-full px-3 py-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] text-sm focus:outline-none focus:border-amber-500";
 
@@ -627,6 +629,24 @@ export function ExperimentMode({ config }: ExperimentModeProps) {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function handleSaveCdToConfig() {
+    if (!results?.cd_fit) return;
+    setSaveStatus('saving');
+    const res = await updateConfig({
+      discharge: {
+        fuel:     { cd_dp_fit_a: results.cd_fit.fuel.a, cd_dp_fit_b: results.cd_fit.fuel.b },
+        oxidizer: { cd_dp_fit_a: results.cd_fit.lox.a,  cd_dp_fit_b: results.cd_fit.lox.b },
+      },
+    } as Partial<EngineConfig>);
+    if (res.error) {
+      setSaveStatus('error');
+    } else {
+      setSaveStatus('saved');
+      if (res.data?.config) onConfigUpdated?.(res.data.config);
+    }
+    setTimeout(() => setSaveStatus('idle'), 3000);
   }
 
   return (
@@ -696,7 +716,7 @@ export function ExperimentMode({ config }: ExperimentModeProps) {
       )}
 
       {/* Results */}
-      {results && <TimeseriesResults results={results} />}
+      {results && <TimeseriesResults results={results} onSaveCdToConfig={handleSaveCdToConfig} saveStatus={saveStatus} />}
     </div>
   );
 }
@@ -960,7 +980,11 @@ function ReSimilarityPanel({ re }: { re: ReSimilarity }) {
 // Results display
 // ---------------------------------------------------------------------------
 
-function TimeseriesResults({ results }: { results: TimeseriesResponse }) {
+function TimeseriesResults({ results, onSaveCdToConfig, saveStatus }: {
+  results: TimeseriesResponse;
+  onSaveCdToConfig: () => void;
+  saveStatus: 'idle' | 'saving' | 'saved' | 'error';
+}) {
   const R = results.results;
   const nonZero = R.F.filter(v => v > 0);
 
@@ -1023,6 +1047,13 @@ function TimeseriesResults({ results }: { results: TimeseriesResponse }) {
                     <p className="text-[#60a5fa]">{results.cd_fit.lox.b.toFixed(4)}</p>
                   </div>
                 </div>
+                <button
+                  onClick={onSaveCdToConfig}
+                  disabled={saveStatus === 'saving'}
+                  className="mt-3 w-full px-3 py-2 rounded-lg text-xs font-semibold transition-colors bg-amber-500 hover:bg-amber-400 text-black disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved to Config' : saveStatus === 'error' ? 'Save Failed' : 'Save Cd to Config'}
+                </button>
               </div>
             )}
 

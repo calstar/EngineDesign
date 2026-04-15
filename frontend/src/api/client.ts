@@ -62,6 +62,7 @@ export interface UploadResponse {
 export interface EvaluateRequest {
   lox_pressure_psi: number;
   fuel_pressure_psi: number;
+  use_cold_flow_cd?: boolean;  // When false, strips saved Cd fit and uses Re-based formula
 }
 
 // Runner results - same field names as runner.evaluate() returns
@@ -290,6 +291,7 @@ export interface GenerateProfileRequest {
   n_steps: number;
   lox_profile: ProfileParams;
   fuel_profile: ProfileParams;
+  use_cold_flow_cd?: boolean;  // When false, strips saved Cd fit and uses Re-based formula
 }
 
 // Pressure segment for segment-based curve building
@@ -311,6 +313,12 @@ export interface SegmentsRequest {
   blowdown_mode?: boolean;
   lox_initial_pressure_psi?: number;
   fuel_initial_pressure_psi?: number;
+  // Water flow test parameters
+  waterflow_mode?: boolean;
+  // Initial propellant/water mass overrides (from tank fill visualizer UI)
+  lox_initial_mass_kg?: number;
+  fuel_initial_mass_kg?: number;
+  use_cold_flow_cd?: boolean;  // When false, strips saved Cd fit and uses Re-based formula
 }
 
 // Time-series data returned from the API
@@ -327,6 +335,8 @@ export interface TimeSeriesData {
   mdot_total_kg_s: number[];
   cstar_actual_m_s: number[];
   gamma: number[];
+  /** Nozzle exit static pressure [psi] (combustion runs only; omitted for water-flow test) */
+  P_exit_psi?: number[];
   // Tank fill levels (propellant mass remaining)
   lox_mass_remaining_kg?: number[];
   fuel_mass_remaining_kg?: number[];
@@ -353,6 +363,8 @@ export interface TimeSeriesData {
   // Correlation matrix data
   correlation_matrix?: number[][];
   correlation_labels?: string[];
+  // Water flow test flag
+  is_waterflow?: boolean;
   // Heat Flux Profiles (Regen Cooling)
   heat_flux_profiles_w_m2?: number[][];
   wall_temp_profiles_k?: number[][];
@@ -397,8 +409,22 @@ export interface TimeSeriesSummary {
   copv_initial_mass_kg?: number;
   copv_min_margin_psi?: number;
   copv_volume_L?: number;
+  /** Ambient/back pressure used for thrust [psi], for overlay on exit pressure plot */
+  target_P_exit_psi?: number;
   // Present only when the engine shut down before the end of the scheduled burn
   shutdown_event?: ShutdownEvent | null;
+  // Water flow test fields
+  is_waterflow?: boolean;
+  avg_mdot_lox_kg_s?: number;
+  avg_mdot_fuel_kg_s?: number;
+  avg_mdot_total_kg_s?: number;
+  peak_mdot_lox_kg_s?: number;
+  peak_mdot_fuel_kg_s?: number;
+  total_lox_consumed_kg?: number;
+  total_fuel_consumed_kg?: number;
+  total_water_consumed_kg?: number;
+  flow_duration_s?: number;
+  Cd_used?: number;
 }
 
 // Response for generate endpoint
@@ -892,8 +918,10 @@ export interface Layer2Settings {
   de_maxiter?: number;
   de_popsize?: number;
   de_n_time_points?: number;
-  /** Optimize initial tank pressures using coupled blowdown physics (Time Series Pure Blowdown path) */
+  /** Pure blowdown: coupled tank physics + same post-blowdown engine evaluation as Time Series Analysis */
   pure_blowdown?: boolean;
+  /** Skip the impulse-vs-required-impulse penalty in the objective */
+  disable_impulse_requirement?: boolean;
 }
 
 export interface Layer2Results {
@@ -1007,6 +1035,9 @@ export function runLayer2Optimization(
   }
   if (settings.pure_blowdown) {
     params.append('pure_blowdown', 'true');
+  }
+  if (settings.disable_impulse_requirement) {
+    params.append('disable_impulse_requirement', 'true');
   }
 
   const url = `${API_BASE}/optimizer/layer2?${params.toString()}`;

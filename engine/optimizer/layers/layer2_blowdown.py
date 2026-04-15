@@ -5,9 +5,10 @@ Optimizes initial LOX/fuel tank pressures **and** initial propellant masses (4D)
 using **CMA-ES** (bounded, derivative-free) on a coarse time grid, then one
 full-resolution evaluation for export.
 
-Pressure-vs-time emerges from coupled ullage physics — the exact same path as
-Time Series Analysis > Pure Blowdown (`simulate_coupled_blowdown` + `runner.evaluate`
-callback), matching backend/routers/timeseries.py.
+Pressure-vs-time emerges from coupled ullage physics — the same path as
+Time Series Analysis > Pure Blowdown: ``simulate_coupled_blowdown`` plus
+``engine.pipeline.timeseries_engine_eval.eval_runner_timeseries_like_api`` for the
+full performance trace (including flameout masking when mass histories exist).
 
 Decision variables:
   x = [P_lox_initial_Pa, P_fuel_initial_Pa, m_lox_kg, m_fuel_kg]
@@ -25,20 +26,27 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import pandas as pd
 from scipy.integrate import cumulative_trapezoid
 
 from copv.blowdown_solver import simulate_coupled_blowdown
 from engine.core.runner import PintleEngineRunner
 from engine.optimizer.layers.layer2_pressure import (
+    LAYER2_BURN_TIME_SOFT_SCALE,
+    LAYER2_BURN_DURATION_SCALE,
     N2_Z_LOOKUP_CSV,
     calculate_required_impulse_from_mass,
+    effective_burn_time_for_layer2_objective,
+    active_burn_prefix_len,
     injector_dp_ratio_penalty_from_results,
 )
 from engine.pipeline.config_schemas import (
     PintleEngineConfig,
     PressureCurvesConfig,
     PressureSegmentConfig,
+)
+from engine.pipeline.timeseries_engine_eval import (
+    apply_propellant_depletion_mask_to_runner_results,
+    eval_runner_timeseries_like_api,
 )
 
 N_SEGMENTS_TRACE = 8
@@ -89,10 +97,16 @@ def _compute_penalties_from_results(
     target_burn_time: float,
     optimal_of_ratio: Optional[float],
     min_stability_margin: Optional[float],
+    loaded_lox_kg: float,
+    loaded_fuel_kg: float,
+    disable_impulse_requirement: bool = False,
 ) -> Tuple[float, Dict[str, float]]:
     """
     Same penalty structure as `layer2_pressure.layer2_objective` (impulse, burn time,
-    capacity, stability, O/F, Pc, injector ΔP/Pc band). COPV and controller penalties are omitted (always 0).
+    stability, O/F, Pc, injector ΔP/Pc band), except **capacity**: only **overfull**
+    tanks are penalized (loaded propellant mass above physical max). Partial fill is free.
+
+    COPV and controller penalties are omitted (always 0).
     """
     n_points = len(time_hist)
     thrust_hist = np.atleast_1d(results_layer2.get("F", np.full(n_points, peak_thrust)))
@@ -108,6 +122,24 @@ def _compute_penalties_from_results(
     if finite_thrust_ratio < 0.5:
         return 1e6, {"invalid": 1e6}
 
+    mdot_O_hist = np.nan_to_num(
+        np.atleast_1d(results_layer2.get("mdot_O", np.zeros(available_n)))[:available_n],
+        nan=0.0, posinf=0.0, neginf=0.0,
+    )
+    mdot_F_hist = np.nan_to_num(
+        np.atleast_1d(results_layer2.get("mdot_F", np.zeros(available_n)))[:available_n],
+        nan=0.0, posinf=0.0, neginf=0.0,
+    )
+
+    # Trim post-burnout tail so zeros don't corrupt averages / validity.
+    active_n = active_burn_prefix_len(time_hist, mdot_O_hist, mdot_F_hist, target_burn_time, thrust_hist=thrust_hist)
+    active_n = max(2, min(active_n, available_n))
+    thrust_hist = thrust_hist[:active_n]
+    time_hist = time_hist[:active_n]
+    mdot_O_hist = mdot_O_hist[:active_n]
+    mdot_F_hist = mdot_F_hist[:active_n]
+    finite_thrust_mask = np.isfinite(thrust_hist) & (thrust_hist > 0.0)
+
     valid_thrust_values = thrust_hist[finite_thrust_mask]
     if len(valid_thrust_values) == 0:
         return 1e6, {"invalid": 1e6}
@@ -118,31 +150,29 @@ def _compute_penalties_from_results(
     MR_hist = np.atleast_1d(
         results_layer2.get("MR", np.full(available_n, optimal_of_ratio if optimal_of_ratio else 2.3))
     )
-    MR_hist = MR_hist[:available_n]
+    MR_hist = MR_hist[:active_n]
     finite_MR_mask = np.isfinite(MR_hist) & (MR_hist > 0) & (MR_hist < 100)
-    if float(np.sum(finite_MR_mask)) < available_n * 0.5:
+    if float(np.sum(finite_MR_mask)) < max(1.0, active_n * 0.5):
         return 1e6, {"invalid": 1e6}
 
     thrust_hist = np.nan_to_num(thrust_hist, nan=0.0, posinf=1e6, neginf=-1e6)
-    mdot_O_hist = np.nan_to_num(
-        np.atleast_1d(results_layer2.get("mdot_O", np.zeros(available_n)))[:available_n],
-        nan=0.0, posinf=0.0, neginf=0.0,
-    )
-    mdot_F_hist = np.nan_to_num(
-        np.atleast_1d(results_layer2.get("mdot_F", np.zeros(available_n)))[:available_n],
-        nan=0.0, posinf=0.0, neginf=0.0,
-    )
 
     total_lox_mass = float(np.trapezoid(mdot_O_hist, time_hist))
     total_fuel_mass = float(np.trapezoid(mdot_F_hist, time_hist))
     total_propellant_mass = total_lox_mass + total_fuel_mass
 
+    effective_burn_time = effective_burn_time_for_layer2_objective(
+        time_hist, mdot_O_hist, mdot_F_hist, target_burn_time
+    )
     required_impulse = calculate_required_impulse_from_mass(
-        target_apogee_m, rocket_dry_mass_kg, total_propellant_mass, target_burn_time,
+        target_apogee_m, rocket_dry_mass_kg, total_propellant_mass, effective_burn_time,
     )
     total_impulse = float(np.trapezoid(thrust_hist, time_hist))
-    impulse_deficit = max(0, required_impulse - total_impulse)
-    impulse_penalty = (impulse_deficit / max(required_impulse, 1e-9)) * 20.0
+    if disable_impulse_requirement:
+        impulse_penalty = 0.0
+    else:
+        impulse_deficit = max(0, required_impulse - total_impulse)
+        impulse_penalty = (impulse_deficit / max(required_impulse, 1e-9)) * 20.0
 
     burn_time_penalty = 0.0
     if total_impulse > 0:
@@ -152,11 +182,22 @@ def _compute_penalties_from_results(
         if idx_95 >= len(time_hist):
             idx_95 = len(time_hist) - 1
         t95 = float(time_hist[idx_95])
-        burn_completion_slack = max(0.0, target_burn_time - t95)
-        burn_time_penalty = (burn_completion_slack / max(target_burn_time, 1e-9)) * 20.0
+        if t95 + 1e-9 < effective_burn_time:
+            burn_completion_slack = max(0.0, effective_burn_time - t95)
+            burn_time_penalty = (
+                burn_completion_slack / max(effective_burn_time, 1e-9)
+            ) * LAYER2_BURN_TIME_SOFT_SCALE
 
-    lox_capacity_exceeded = max(0, total_lox_mass - max_lox_tank_capacity_kg)
-    fuel_capacity_exceeded = max(0, total_fuel_mass - max_fuel_tank_capacity_kg)
+    burn_duration_penalty = 0.0
+    if target_burn_time > 0:
+        utilisation = min(effective_burn_time / target_burn_time, 1.0)
+        shortfall = 1.0 - utilisation
+        burn_duration_penalty = shortfall * shortfall * LAYER2_BURN_DURATION_SCALE
+
+    # Capacity: only physical overfill (loaded mass > tank max). How full the tank is
+    # below capacity does not enter the objective.
+    lox_capacity_exceeded = max(0.0, float(loaded_lox_kg) - max_lox_tank_capacity_kg)
+    fuel_capacity_exceeded = max(0.0, float(loaded_fuel_kg) - max_fuel_tank_capacity_kg)
     capacity_penalty = 0.0
     if lox_capacity_exceeded > 0:
         capacity_penalty += (lox_capacity_exceeded / max(max_lox_tank_capacity_kg, 1e-9)) * 300.0
@@ -209,9 +250,10 @@ def _compute_penalties_from_results(
             Pc_initial = valid_Pc[0]
             if Pc_initial > 0:
                 pc_devs = np.abs(valid_Pc - Pc_initial) / Pc_initial
-                excess = np.maximum(0.0, pc_devs - 0.25)
+                # Blowdown: large Pc decay is expected; only penalize extreme drift.
+                excess = np.maximum(0.0, pc_devs - 0.60)
                 if np.any(excess > 0):
-                    pc_penalty = float(np.mean(excess)) * 1000.0
+                    pc_penalty = float(np.mean(excess)) * 200.0
         else:
             pc_penalty = 100.0
 
@@ -226,6 +268,7 @@ def _compute_penalties_from_results(
     components = {
         "impulse_penalty": float(impulse_penalty),
         "burn_time_penalty": float(burn_time_penalty),
+        "burn_duration_penalty": float(burn_duration_penalty),
         "capacity_penalty": float(capacity_penalty),
         "stability_penalty": float(stability_penalty),
         "of_penalty": float(of_penalty),
@@ -270,6 +313,7 @@ def run_layer2_blowdown(
     de_maxiter: int = 5,
     de_popsize: int = 2,
     de_n_time_points: int = 25,
+    disable_impulse_requirement: bool = False,
 ) -> Tuple[PintleEngineConfig, np.ndarray, np.ndarray, np.ndarray, Dict[str, Any], bool]:
     """
     Optimize initial tank pressures **and propellant masses** for pure blowdown.
@@ -277,7 +321,7 @@ def run_layer2_blowdown(
     Decision variables (4-D):
         x = [P_lox_init_Pa, P_fuel_init_Pa, m_lox_kg, m_fuel_kg]
 
-    The blowdown physics path is identical to Time Series Analysis > Pure Blowdown.
+    Post-blowdown evaluation matches Time Series Analysis (``eval_runner_timeseries_like_api``).
     """
     # ---- logging setup ----
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -302,13 +346,12 @@ def run_layer2_blowdown(
         f"Fuel: {initial_fuel_pressure_pa / PSI_TO_PA:.1f} psi"
     )
     log.info(f"Tank capacities — LOX: {max_lox_tank_capacity_kg:.2f} kg, Fuel: {max_fuel_tank_capacity_kg:.2f} kg")
+    if disable_impulse_requirement:
+        log.info("Impulse requirement: DISABLED (impulse penalty zeroed)")
+    log.info("COPV calculations: SKIPPED (pure blowdown is self-pressurized)")
 
-    # ---- config copy (ablative/graphite disabled) ----
+    # ---- config copy (same physics as Time Series / loaded config; ablative may track geometry) ----
     config_layer2 = copy.deepcopy(optimized_config)
-    if hasattr(config_layer2, "ablative_cooling") and config_layer2.ablative_cooling:
-        config_layer2.ablative_cooling.enabled = False
-    if hasattr(config_layer2, "graphite_insert") and config_layer2.graphite_insert:
-        config_layer2.graphite_insert.enabled = False
 
     runner = PintleEngineRunner(config_layer2)
     n2_csv = str(N2_Z_LOOKUP_CSV)
@@ -400,15 +443,22 @@ def run_layer2_blowdown(
         n_pts: int,
         phase: str,
         record_best: bool = True,
-    ) -> Tuple[float, Optional[np.ndarray], Optional[np.ndarray], Optional[Dict[str, Any]]]:
-        """Run blowdown + time series; return objective and pressure arrays.
+    ) -> Tuple[
+        float,
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[Dict[str, Any]],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+    ]:
+        """Run blowdown + same engine time-series path as Time Series Analysis API.
 
-        When ``record_best`` is False (full-resolution upsample after polish), we skip
+        When ``record_best`` is False (e.g. full-resolution export), we skip
         objective bookkeeping and streaming callbacks — only traces matter.
         """
         if record_best:
             if stop_event is not None and stop_event.is_set():
-                return state.get("best_obj", 1e6), None, None, None
+                return state.get("best_obj", 1e6), None, None, None, None, None
 
             state["eval_count"] += 1
             eval_num = state["eval_count"]
@@ -418,8 +468,8 @@ def run_layer2_blowdown(
         x_vec = np.array([P_lox_init, P_fuel_init, m_lox_kg, m_fuel_kg], dtype=float)
         if not np.all(np.isfinite(x_vec)):
             if record_best:
-                return finish_evaluation(1e6, x_vec), None, None, None
-            return 1e6, None, None, None
+                return finish_evaluation(1e6, x_vec), None, None, None, None, None
+            return 1e6, None, None, None, None, None
 
         times = np.asarray(time_eval, dtype=float)
         if len(times) != n_pts:
@@ -460,33 +510,37 @@ def run_layer2_blowdown(
         except Exception as e:
             log.warning(f"simulate_coupled_blowdown failed eval #{eval_num}: {e!r}")
             if record_best:
-                return finish_evaluation(1e6, x_vec), None, None, None
-            return 1e6, None, None, None
+                return finish_evaluation(1e6, x_vec), None, None, None, None, None
+            return 1e6, None, None, None, None, None
 
         P_lox = np.asarray(blowdown_results["lox"]["P_Pa"], dtype=float)
         P_fuel = np.asarray(blowdown_results["fuel"]["P_Pa"], dtype=float)
+        lox_mass_trace = np.asarray(blowdown_results["lox"]["m_prop_kg"], dtype=float)
+        fuel_mass_trace = np.asarray(blowdown_results["fuel"]["m_prop_kg"], dtype=float)
         if P_lox.size != len(times) or P_fuel.size != len(times):
             log.warning(f"Length mismatch blowdown vs times eval #{eval_num}")
             if record_best:
-                return finish_evaluation(1e6, x_vec), None, None, None
-            return 1e6, None, None, None
+                return finish_evaluation(1e6, x_vec), None, None, None, None, None
+            return 1e6, None, None, None, None, None
 
         try:
-            results_ts = runner.evaluate_arrays_with_time(
-                times, P_lox, P_fuel,
-                track_ablative_geometry=False,
-                use_coupled_solver=False,
+            results_ts = eval_runner_timeseries_like_api(runner, times, P_lox, P_fuel)
+            apply_propellant_depletion_mask_to_runner_results(
+                results_ts, times, lox_mass_trace, fuel_mass_trace
             )
         except Exception as e:
-            log.warning(f"evaluate_arrays_with_time failed eval #{eval_num}: {e!r}")
+            log.warning(f"eval_runner_timeseries_like_api failed eval #{eval_num}: {e!r}")
             if record_best:
-                return finish_evaluation(1e6, x_vec), None, None, None
-            return 1e6, None, None, None
+                return finish_evaluation(1e6, x_vec), None, None, None, None, None
+            return 1e6, None, None, None, None, None
 
         obj, comp = _compute_penalties_from_results(
             results_ts, times, peak_thrust, target_apogee_m, rocket_dry_mass_kg,
             max_lox_tank_capacity_kg, max_fuel_tank_capacity_kg, target_burn_time,
             optimal_of_ratio, min_stability_margin,
+            m_lox_kg,
+            m_fuel_kg,
+            disable_impulse_requirement=disable_impulse_requirement,
         )
 
         if record_best:
@@ -507,10 +561,10 @@ def run_layer2_blowdown(
                 log.info(f"  [{phase}] eval #{eval_num}: obj={obj:.4f} (best={state['best_obj']:.4f})")
 
             finish_evaluation(obj, x_vec, P_lox, P_fuel)
-        return obj, P_lox, P_fuel, results_ts
+        return obj, P_lox, P_fuel, results_ts, lox_mass_trace, fuel_mass_trace
 
     def objective_cma(x: np.ndarray) -> float:
-        obj, _, _, _ = evaluate_candidate(
+        obj, _, _, _, _, _ = evaluate_candidate(
             float(x[0]), float(x[1]), float(x[2]), float(x[3]),
             time_array_de, n_time_points_de, "CMA",
         )
@@ -534,7 +588,7 @@ def run_layer2_blowdown(
     n_dims = 4
     cma_popsize = max(6, min(14, int(de_popsize) * 3))
     # Hard cap on expensive evals (same order as old DE × pop, but no extra polish passes).
-    cma_budget = max(40, min(200, int(de_maxiter) * cma_popsize))
+    cma_budget = max(100, min(400, int(de_maxiter) * cma_popsize))
 
     opts: Dict[str, Any] = {
         "bounds": [lb.tolist(), ub.tolist()],
@@ -591,44 +645,27 @@ def run_layer2_blowdown(
         f"m_lox={opt_m_lox_kg:.3f}kg  m_fuel={opt_m_fuel_kg:.3f}kg"
     )
 
-    # ---- full-resolution pressure traces for YAML / UI (one upsample after CMA on coarse grid) ----
+    # ---- full-resolution blowdown + same evaluation path as Time Series API (summary + YAML curves) ----
     if n_time_points_de < n_time_points:
-        log.info(f"Upsampling best solution from {n_time_points_de} to {n_time_points} time points...")
-        _, P_lox_opt, P_fuel_opt, _ = evaluate_candidate(
-            opt_P_lox_pa, opt_P_fuel_pa, opt_m_lox_kg, opt_m_fuel_kg,
-            time_array, n_time_points, "final",
-            record_best=False,
+        log.info(
+            f"Exporting best solution at {n_time_points} time points "
+            f"(CMA used {n_time_points_de} pts)..."
         )
     else:
-        P_lox_opt = state["best_P_lox"]
-        P_fuel_opt = state["best_P_fuel"]
+        log.info(f"Exporting best solution at {n_time_points} time points...")
+    _, P_lox_opt, P_fuel_opt, results_final, lox_mass_trace_final, fuel_mass_trace_final = evaluate_candidate(
+        opt_P_lox_pa, opt_P_fuel_pa, opt_m_lox_kg, opt_m_fuel_kg,
+        time_array, n_time_points, "final_export",
+        record_best=False,
+    )
+    thrust_final = None
+    if results_final is not None:
+        thrust_final = np.atleast_1d(results_final.get("F", []))
     if P_lox_opt is None or P_fuel_opt is None:
-        _, P_lox_opt, P_fuel_opt, _ = evaluate_candidate(
-            opt_P_lox_pa, opt_P_fuel_pa, opt_m_lox_kg, opt_m_fuel_kg,
-            time_array, n_time_points, "final",
-            record_best=False,
-        )
-    if P_lox_opt is None:
         P_lox_opt = np.linspace(initial_lox_pressure_pa, initial_lox_pressure_pa * 0.8, n_time_points)
         P_fuel_opt = np.linspace(initial_fuel_pressure_pa, initial_fuel_pressure_pa * 0.8, n_time_points)
-
-    # ---- final evaluation for summary ----
-    # Stamp optimised masses so the final eval uses the right ullage
-    if config_layer2.lox_tank is not None:
-        config_layer2.lox_tank.mass = opt_m_lox_kg
-    if config_layer2.fuel_tank is not None:
-        config_layer2.fuel_tank.mass = opt_m_fuel_kg
-
-    results_final = None
-    thrust_final = None
-    try:
-        results_final = runner.evaluate_arrays_with_time(
-            time_array, P_lox_opt, P_fuel_opt,
-            track_ablative_geometry=False, use_coupled_solver=False,
-        )
-        thrust_final = np.atleast_1d(results_final.get("F", []))
-    except Exception as e:
-        log.error(f"Final evaluate_arrays_with_time failed: {e!r}")
+        results_final = None
+        thrust_final = None
 
     total_impulse_actual = 0.0
     initial_thrust_actual = 0.0
@@ -646,69 +683,87 @@ def run_layer2_blowdown(
         total_lox_mass_final = float(np.trapezoid(mdot_O_final, time_array[:len(mdot_O_final)]))
         total_fuel_mass_final = float(np.trapezoid(mdot_F_final, time_array[:len(mdot_F_final)]))
         total_prop = total_lox_mass_final + total_fuel_mass_final
-        required_impulse_final = calculate_required_impulse_from_mass(
-            target_apogee_m, rocket_dry_mass_kg, total_prop, target_burn_time,
+        n_fin = min(len(time_array), len(mdot_O_final), len(mdot_F_final))
+        eff_burn_final = effective_burn_time_for_layer2_objective(
+            time_array[:n_fin], mdot_O_final[:n_fin], mdot_F_final[:n_fin], target_burn_time
         )
+        required_impulse_final = calculate_required_impulse_from_mass(
+            target_apogee_m, rocket_dry_mass_kg, total_prop, eff_burn_final,
+        )
+        # Build a thrust-based burn mask so post-burnout zero-masked values
+        # don't corrupt avg_of_ratio or min_stability_margin.
+        thrust_arr = np.atleast_1d(thrust_final).astype(float)
+        peak_thrust_val = float(np.nanmax(thrust_arr)) if thrust_arr.size else 0.0
+        if np.isfinite(peak_thrust_val) and peak_thrust_val > 0:
+            burn_mask = thrust_arr > max(peak_thrust_val * 1e-3, 1.0)
+        else:
+            burn_mask = np.ones(len(thrust_arr), dtype=bool)
+
+        n_burn = int(np.sum(burn_mask))
+        log.info(f"Burn mask: {n_burn}/{len(burn_mask)} points active (peak_thrust={peak_thrust_val:.1f} N)")
+
         MR_hist = np.atleast_1d(results_final.get("MR", []))
         if len(MR_hist) > 0:
-            vm = MR_hist[np.isfinite(MR_hist)]
+            MR_hist = MR_hist[:len(burn_mask)]
+            vm = MR_hist[burn_mask[:len(MR_hist)] & np.isfinite(MR_hist) & (MR_hist > 0)]
             if len(vm) > 0:
                 avg_of_ratio = float(np.mean(vm))
+                log.info(f"avg_of_ratio={avg_of_ratio:.4f} from {len(vm)} active-burn MR points")
         chm = results_final.get("chugging_stability_margin")
         if chm is not None:
-            chm = np.atleast_1d(chm)
-            vf = chm[np.isfinite(chm)]
+            chm = np.atleast_1d(chm)[:len(burn_mask)]
+            vf = chm[burn_mask[:len(chm)] & np.isfinite(chm) & (chm > 0)]
             if len(vf) > 0:
                 min_stability_margin_val = float(np.min(vf))
+                log.info(f"min_stability_margin={min_stability_margin_val:.4f} from {len(vf)} active-burn points")
 
-    # ---- COPV optional summary ----
+    # Pure blowdown is self-pressurized — no COPV needed.
     copv_P0_Pa = None
     copv_pressure_trace_Pa = None
     copv_time_s = None
-    if results_final is not None:
-        try:
-            from copv.copv_solve_both import size_or_check_copv_for_polytropic_N2
-
-            mdot_O_final = np.atleast_1d(results_final.get("mdot_O", np.zeros(len(time_array))))
-            mdot_F_final = np.atleast_1d(results_final.get("mdot_F", np.zeros(len(time_array))))
-            df_copv = pd.DataFrame({
-                "time": time_array,
-                "mdot_O (kg/s)": mdot_O_final,
-                "mdot_F (kg/s)": mdot_F_final,
-                "P_tank_O (psi)": P_lox_opt / PSI_TO_PA,
-                "P_tank_F (psi)": P_fuel_opt / PSI_TO_PA,
-            })
-            copv_volume_m3 = None
-            if hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "free_volume_L"):
-                copv_volume_m3 = float(config_layer2.press_tank.free_volume_L) / 1000.0
-            elif hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "press_volume"):
-                copv_volume_m3 = float(config_layer2.press_tank.press_volume)
-            elif hasattr(config_layer2, "press_tank") and hasattr(config_layer2.press_tank, "volume_m3"):
-                copv_volume_m3 = float(config_layer2.press_tank.volume_m3)
-            if copv_volume_m3 is not None and copv_volume_m3 > 0:
-                copv_results_final = size_or_check_copv_for_polytropic_N2(
-                    df_copv, config_layer2,
-                    n=1.2, T0_K=300.0, Tp_K=293.0, use_real_gas=True,
-                    n2_Z_csv=str(N2_Z_LOOKUP_CSV), pressurant_R=296.8,
-                    branch_temperatures_K={"oxidizer": 250.0, "fuel": 293.0},
-                    copv_volume_m3=copv_volume_m3, copv_P0_Pa=None,
-                )
-                copv_P0_Pa = float(copv_results_final.get("P0_Pa", 0.0))
-                copv_pressure_trace_Pa = copv_results_final.get("PH_trace_Pa", np.array([]))
-                copv_time_s = copv_results_final.get("time_s", np.array([]))
-        except Exception as e:
-            log.warning(f"COPV final summary skipped: {e!r}")
 
     # ---- thrust / OF curves for UI ----
     thrust_curve_time = None
     thrust_curve_values = None
     of_curve_values = None
+    pc_curve_values = None
+    mdot_O_curve_values = None
+    mdot_F_curve_values = None
+    mdot_total_curve_values = None
     if results_final is not None and thrust_final is not None and len(thrust_final) > 0:
         thrust_curve_time = time_array[:len(thrust_final)].tolist()
         thrust_curve_values = thrust_final.tolist()
         MR_final = np.atleast_1d(results_final.get("MR", np.zeros(len(thrust_final))))
         if len(MR_final) > 0:
             of_curve_values = MR_final.tolist()
+        Pc_final = np.atleast_1d(results_final.get("Pc", np.zeros(len(thrust_final))))
+        if len(Pc_final) > 0:
+            pc_curve_values = Pc_final.tolist()
+        mdot_O_final_curve = np.atleast_1d(results_final.get("mdot_O", np.zeros(len(thrust_final))))
+        mdot_F_final_curve = np.atleast_1d(results_final.get("mdot_F", np.zeros(len(thrust_final))))
+        mdot_total_final_curve = np.atleast_1d(results_final.get("mdot_total", np.zeros(len(thrust_final))))
+        if len(mdot_O_final_curve) > 0:
+            mdot_O_curve_values = mdot_O_final_curve.tolist()
+        if len(mdot_F_final_curve) > 0:
+            mdot_F_curve_values = mdot_F_final_curve.tolist()
+        if len(mdot_total_final_curve) > 0:
+            mdot_total_curve_values = mdot_total_final_curve.tolist()
+
+    # ---- fill level curves (fraction of physical max capacity) ----
+    lox_fill_fraction_curve = None
+    fuel_fill_fraction_curve = None
+    if (
+        lox_mass_trace_final is not None
+        and fuel_mass_trace_final is not None
+        and max_lox_tank_capacity_kg > 0
+        and max_fuel_tank_capacity_kg > 0
+    ):
+        lox_trace = np.asarray(lox_mass_trace_final, dtype=float)
+        fuel_trace = np.asarray(fuel_mass_trace_final, dtype=float)
+        n_fill = int(min(len(time_array), lox_trace.size, fuel_trace.size))
+        if n_fill > 1:
+            lox_fill_fraction_curve = np.clip(lox_trace[:n_fill] / float(max_lox_tank_capacity_kg), 0.0, 1.0).tolist()
+            fuel_fill_fraction_curve = np.clip(fuel_trace[:n_fill] / float(max_fuel_tank_capacity_kg), 0.0, 1.0).tolist()
 
     # ---- summary dict (same schema as regulated Layer 2) ----
     summary: Dict[str, Any] = {
@@ -739,6 +794,13 @@ def run_layer2_blowdown(
         "thrust_curve_time": thrust_curve_time,
         "thrust_curve_values": thrust_curve_values,
         "of_curve_values": of_curve_values,
+        "pc_curve_values": pc_curve_values,
+        "mdot_O_curve_values": mdot_O_curve_values,
+        "mdot_F_curve_values": mdot_F_curve_values,
+        "mdot_total_curve_values": mdot_total_curve_values,
+        # Tank fill level curves (% of physical max capacity, 0-1)
+        "lox_fill_fraction_curve": lox_fill_fraction_curve,
+        "fuel_fill_fraction_curve": fuel_fill_fraction_curve,
         "total_lox_mass_kg": total_lox_mass_final,
         "total_fuel_mass_kg": total_fuel_mass_final,
         "total_propellant_mass_kg": total_lox_mass_final + total_fuel_mass_final,

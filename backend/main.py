@@ -26,11 +26,13 @@ from engine.pipeline.io import load_config
 async def lifespan(app: FastAPI):
     """Application lifespan - load default config on startup."""
     # Try to load default config on startup
-    default_config_path = project_root / "configs" / "default.yaml"
+    default_config_path = project_root / "configs" / "diablo_config.yaml"
     if default_config_path.exists():
         try:
             config_obj = load_config(str(default_config_path))
-            app_state.set_config(config_obj, str(default_config_path))
+            app_state.set_config(
+                config_obj, str(default_config_path), defer_runner=True
+            )
             print(f"Loaded default config from {default_config_path}")
         except Exception as e:
             print(f"Warning: Could not load default config: {e}")
@@ -90,5 +92,6 @@ async def health():
     return {
         "status": "healthy",
         "config_loaded": app_state.has_config(),
+        "runner_ready": app_state.runner is not None,
     }
 

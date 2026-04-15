@@ -292,7 +292,7 @@ function App() {
         </div>
 
         <div className={tabPanelClass('experiment')}>
-          <ExperimentMode config={config} />
+          <ExperimentMode config={config} onConfigUpdated={handleConfigLoaded} />
         </div>
 
         <div className={tabPanelClass('config')}>
