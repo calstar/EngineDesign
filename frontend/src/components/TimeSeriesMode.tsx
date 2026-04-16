@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { PressureProfileForm } from './PressureProfileForm';
 import { SegmentCurveBuilder } from './SegmentCurveBuilder';
 import { PressureCurveChart } from './PressureCurveChart';
@@ -21,6 +21,14 @@ interface TimeSeriesModeProps {
 }
 
 type InputMode = 'simple' | 'segments' | 'blowdown' | 'upload';
+
+interface PwmSegment {
+  id: number;
+  startTime: string;   // s — when this PWM block begins
+  frequency: string;   // Hz
+  dutyCycle: string;   // percent, 0–100
+  duration: string;    // s
+}
 
 // Default profile params
 const defaultLoxProfile: ProfileParams = {
@@ -173,6 +181,175 @@ function hasCdFit(config: EngineConfig | null): boolean {
   return fuel?.cd_dp_fit_a != null;
 }
 
+/** Expand a list of PWM segments into (t_open, t_close) intervals for the API. */
+function pwmToIntervals(segs: PwmSegment[]): { t_open: number; t_close: number }[] {
+  return segs.flatMap(s => {
+    const f = parseFloat(s.frequency);
+    const d = parseFloat(s.dutyCycle) / 100;
+    const dur = parseFloat(s.duration);
+    const t0 = parseFloat(s.startTime);
+    if (!Number.isFinite(f) || f <= 0 || !Number.isFinite(d) || d <= 0 || d > 1) return [];
+    if (!Number.isFinite(dur) || dur <= 0 || !Number.isFinite(t0)) return [];
+    const period = 1 / f;
+    const openDt = period * d;
+    const out: { t_open: number; t_close: number }[] = [];
+    for (let t = t0; t + openDt <= t0 + dur + 1e-9; t += period) {
+      out.push({ t_open: t, t_close: Math.min(t + openDt, t0 + dur) });
+    }
+    return out;
+  });
+}
+
+/** Mini SVG timeline showing a few PWM pulses. */
+function PwmPreview({ frequency, dutyCycle, accentColor }: { frequency: string; dutyCycle: string; accentColor: string }) {
+  const f = parseFloat(frequency);
+  const d = parseFloat(dutyCycle) / 100;
+  if (!Number.isFinite(f) || f <= 0 || !Number.isFinite(d) || d <= 0) {
+    return <div style={{ width: 120, height: 20, background: 'rgba(255,255,255,0.04)', borderRadius: 3 }} />;
+  }
+  const showCycles = Math.min(Math.ceil(f * 2), 6); // ~2s worth, max 6 cycles
+  const rects: React.ReactElement[] = [];
+  const w = 120, h = 20;
+  const cycleW = w / showCycles;
+  const openW = cycleW * d;
+  for (let i = 0; i < showCycles; i++) {
+    const x = i * cycleW;
+    rects.push(
+      <rect key={`o${i}`} x={x} y={2} width={openW} height={h - 4} fill={accentColor} opacity={0.85} rx={1} />,
+      <rect key={`c${i}`} x={x + openW} y={2} width={cycleW - openW} height={h - 4} fill="rgba(255,255,255,0.06)" rx={1} />,
+    );
+  }
+  return (
+    <svg width={w} height={h} style={{ borderRadius: 3, overflow: 'hidden', flexShrink: 0 }}>
+      {rects}
+    </svg>
+  );
+}
+
+function PwmEditor({
+  label,
+  segments,
+  onChange,
+  accentColor = '#60a5fa',
+}: {
+  label: string;
+  segments: PwmSegment[];
+  onChange: (segs: PwmSegment[]) => void;
+  accentColor?: string;
+}) {
+  function addSeg() {
+    onChange([...segments, { id: Date.now(), startTime: '0', frequency: '1', dutyCycle: '50', duration: '5' }]);
+  }
+  function removeSeg(id: number) { onChange(segments.filter(s => s.id !== id)); }
+  function update(id: number, field: keyof PwmSegment, val: string) {
+    onChange(segments.map(s => s.id === id ? { ...s, [field]: val } : s));
+  }
+
+  // Summary: total pulse count + total open time
+  const allIntervals = pwmToIntervals(segments);
+  const totalOpen = allIntervals.reduce((acc, i) => acc + (i.t_close - i.t_open), 0);
+
+  const inputStyle: React.CSSProperties = {
+    width: '100%',
+    background: 'var(--color-bg-primary)',
+    border: '1px solid var(--color-border)',
+    borderRadius: 4,
+    color: 'var(--color-text-primary)',
+    padding: '3px 6px',
+    fontSize: 11,
+    fontFamily: 'ui-monospace, monospace',
+    outline: 'none',
+  };
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 600, color: accentColor, marginBottom: 8 }}>{label}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {segments.map(seg => {
+          const f = parseFloat(seg.frequency);
+          const d = parseFloat(seg.dutyCycle) / 100;
+          const dur = parseFloat(seg.duration);
+          const t0 = parseFloat(seg.startTime);
+          const pulseCount = (Number.isFinite(f) && f > 0 && Number.isFinite(d) && d > 0 && Number.isFinite(dur) && dur > 0)
+            ? Math.floor(dur * f * d / d) // = floor(dur * f)
+            : null;
+          const openTime = (pulseCount != null && Number.isFinite(d))
+            ? (dur * d).toFixed(2)
+            : null;
+          return (
+            <div
+              key={seg.id}
+              style={{
+                background: 'var(--color-bg-primary)',
+                border: `1px solid ${accentColor}33`,
+                borderLeft: `3px solid ${accentColor}`,
+                borderRadius: 6,
+                padding: '8px 10px',
+              }}
+            >
+              {/* Row 1: fields */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 6 }}>
+                <div>
+                  <div style={{ fontSize: 9, color: 'var(--color-text-secondary)', marginBottom: 2, letterSpacing: '0.05em' }}>START [s]</div>
+                  <input type="number" step="0.1" value={seg.startTime} onChange={e => update(seg.id, 'startTime', e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: 'var(--color-text-secondary)', marginBottom: 2, letterSpacing: '0.05em' }}>FREQ [Hz]</div>
+                  <input type="number" step="0.1" min="0.01" value={seg.frequency} onChange={e => update(seg.id, 'frequency', e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: 'var(--color-text-secondary)', marginBottom: 2, letterSpacing: '0.05em' }}>DUTY [%]</div>
+                  <input type="number" step="1" min="1" max="99" value={seg.dutyCycle} onChange={e => update(seg.id, 'dutyCycle', e.target.value)} style={inputStyle} />
+                </div>
+                <div>
+                  <div style={{ fontSize: 9, color: 'var(--color-text-secondary)', marginBottom: 2, letterSpacing: '0.05em' }}>DURATION [s]</div>
+                  <input type="number" step="0.1" min="0" value={seg.duration} onChange={e => update(seg.id, 'duration', e.target.value)} style={inputStyle} />
+                </div>
+              </div>
+              {/* Row 2: preview + summary + delete */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                <PwmPreview frequency={seg.frequency} dutyCycle={seg.dutyCycle} accentColor={accentColor} />
+                <div style={{ flex: 1, fontSize: 10, color: 'var(--color-text-secondary)' }}>
+                  {pulseCount != null
+                    ? <>
+                        <span style={{ color: accentColor }}>{pulseCount} pulses</span>
+                        {' · '}
+                        {Number.isFinite(t0) ? `t = ${t0}–${(t0 + (parseFloat(seg.duration) || 0)).toFixed(1)}s` : ''}
+                        {' · '}
+                        {openTime}s open
+                      </>
+                    : <span style={{ opacity: 0.5 }}>fill in fields above</span>
+                  }
+                </div>
+                <button
+                  onClick={() => removeSeg(seg.id)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', fontSize: 14, padding: '0 4px', flexShrink: 0 }}
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button
+          onClick={addSeg}
+          style={{ fontSize: 11, background: 'none', border: 'none', cursor: 'pointer', color: accentColor, padding: 0 }}
+        >
+          + Add PWM segment
+        </button>
+        {allIntervals.length > 0 && (
+          <span style={{ fontSize: 10, color: 'var(--color-text-secondary)' }}>
+            Total: {allIntervals.length} pulses · {totalOpen.toFixed(2)}s open
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) {
   // Mode selection
   const [inputMode, setInputMode] = useState<InputMode>('simple');
@@ -195,6 +372,9 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
   const [loxInitialPressure, setLoxInitialPressure] = useState(750);
   const [fuelInitialPressure, setFuelInitialPressure] = useState(600);
   const [testType, setTestType] = useState<'hotfire' | 'waterflow'>('hotfire');
+  const [loxPwmSegments, setLoxPwmSegments] = useState<PwmSegment[]>([]);
+  const [fuelPwmSegments, setFuelPwmSegments] = useState<PwmSegment[]>([]);
+  const [showSolenoidSchedule, setShowSolenoidSchedule] = useState(false);
 
   // ---- Tank capacity: derived directly from config (always up-to-date, never 0 if config is loaded) ----
   const tankCapacities = useMemo(() => {
@@ -483,6 +663,12 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
       waterflow_mode: isWaterflow,
       lox_initial_mass_kg: activeLoxMass > 0 ? activeLoxMass : undefined,
       fuel_initial_mass_kg: activeFuelMass > 0 ? activeFuelMass : undefined,
+      ...(showSolenoidSchedule && loxPwmSegments.length > 0
+        ? { lox_solenoid_schedule: pwmToIntervals(loxPwmSegments) }
+        : {}),
+      ...(showSolenoidSchedule && fuelPwmSegments.length > 0
+        ? { fuel_solenoid_schedule: pwmToIntervals(fuelPwmSegments) }
+        : {}),
       use_cold_flow_cd: hasCdFit(config) ? useColdFlowCd : undefined,
     });
 
@@ -498,7 +684,22 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
       setResults(newResults);
       saveResultsToSession(newResults);
     }
-  }, [segmentDuration, nPoints, loxInitialPressure, fuelInitialPressure, testType, loxInitialMass, fuelInitialMass, loxWaterMass, fuelWaterMass, useColdFlowCd, config]);
+  }, [
+    segmentDuration,
+    nPoints,
+    loxInitialPressure,
+    fuelInitialPressure,
+    testType,
+    loxInitialMass,
+    fuelInitialMass,
+    loxWaterMass,
+    fuelWaterMass,
+    showSolenoidSchedule,
+    loxPwmSegments,
+    fuelPwmSegments,
+    useColdFlowCd,
+    config,
+  ]);
 
 
   // Handle CSV upload submission
@@ -942,6 +1143,47 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
                     className="w-full px-3 py-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] focus:outline-none focus:border-blue-500"
                   />
                 </div>
+              </div>
+
+              {/* Solenoid PWM Schedule (optional) */}
+              <div style={{ marginTop: 12, borderTop: '1px solid var(--color-border)', paddingTop: 10 }}>
+                <label
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    fontSize: 12,
+                    cursor: 'pointer',
+                    color: 'var(--color-text-secondary)',
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={showSolenoidSchedule}
+                    onChange={e => setShowSolenoidSchedule(e.target.checked)}
+                    disabled={testType === 'waterflow'}
+                  />
+                  Pressurant Solenoid Schedule (optional — requires press_system config)
+                  {testType === 'waterflow' && (
+                    <span style={{ fontSize: 11, opacity: 0.8 }}>(disabled in water flow mode)</span>
+                  )}
+                </label>
+                {showSolenoidSchedule && testType !== 'waterflow' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 8 }}>
+                    <PwmEditor
+                      label="LOX Pressurant Solenoid"
+                      segments={loxPwmSegments}
+                      onChange={setLoxPwmSegments}
+                      accentColor="#60a5fa"
+                    />
+                    <PwmEditor
+                      label="Fuel Pressurant Solenoid"
+                      segments={fuelPwmSegments}
+                      onChange={setFuelPwmSegments}
+                      accentColor="#f97316"
+                    />
+                  </div>
+                )}
               </div>
 
 

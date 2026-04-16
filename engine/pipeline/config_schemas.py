@@ -653,6 +653,39 @@ class FuelTankConfig(BaseModel):
     tank_volume_m3: Optional[float] = Field(default=None, gt=0, description="RP-1 tank volume [m³]. If not provided, will be calculated from rp1_h and rp1_radius using π×r²×h")
 
 
+class PressSystemConfig(BaseModel):
+    """Pressurant regulator and line characterization for COPV→tank resupply."""
+
+    reg_cv: float = Field(
+        default=0.06,
+        gt=0,
+        description="Regulator Cv (Aqua 1120 spec: 0.06)",
+    )
+    reg_droop_coeff: float = Field(
+        default=0.070,
+        ge=0,
+        description="Regulator outlet droop [psi/psi]: P_reg = P_set0 + k*(P_COPV0 - P_COPV)",
+    )
+    reg_setpoint_psi: float = Field(
+        gt=0,
+        description="Regulator outlet setpoint [psi] at reg_initial_copv_psi",
+    )
+    reg_initial_copv_psi: float = Field(
+        gt=0,
+        description="COPV pressure [psi] when setpoint was calibrated",
+    )
+    line_cv_lox: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="LOX branch downstream line + solenoid lumped Cv. None until fitted from test data.",
+    )
+    line_cv_fuel: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Fuel branch downstream line + solenoid lumped Cv. None until fitted from test data.",
+    )
+
+
 class PressTankConfig(BaseModel):
     """Pressurant (COPV) tank configuration for flight simulation.
     
@@ -902,6 +935,10 @@ class PintleEngineConfig(BaseModel):
     lox_tank: Optional[LOXTankConfig] = Field(default=None, description="LOX tank configuration for flight simulation")
     fuel_tank: Optional[FuelTankConfig] = Field(default=None, description="Fuel tank configuration for flight simulation")
     press_tank: Optional[PressTankConfig] = Field(default=None, description="Pressurant tank configuration for flight simulation")
+    press_system: Optional[PressSystemConfig] = Field(
+        default=None,
+        description="Pressurant regulator and line Cv for COPV resupply ODE",
+    )
     rocket: Optional[RocketConfig] = Field(default=None, description="Rocket configuration for flight simulation")
     environment: Optional[EnvironmentConfig] = Field(default=None, description="Environment configuration for flight simulation")
     thrust: Optional[ThrustConfig] = Field(default=None, description="Thrust configuration for flight simulation")

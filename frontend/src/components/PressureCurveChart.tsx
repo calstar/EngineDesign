@@ -1,4 +1,3 @@
-import React from 'react';
 import {
   LineChart,
   Line,
@@ -79,7 +78,6 @@ function getCorrelationColor(value: number): string {
 }
 
 function CorrelationHeatmap({ matrix, labels }: CorrelationHeatmapProps) {
-  const n = labels.length;
   const cellSize = 52;
   const labelWidth = 90;
 
@@ -645,21 +643,35 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
                 label={{ value: 'Time (s)', position: 'insideBottom', offset: -5, fill: 'var(--color-text-secondary)' }}
               />
               <YAxis
+                yAxisId="left"
                 stroke="var(--color-text-secondary)"
                 tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-                label={{ value: 'Pressure (psi)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }}
+                label={{ value: 'Tank Pressure (psi)', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)' }}
               />
+              {data.copv_pressure_psi && (
+                <YAxis
+                  yAxisId="right"
+                  orientation="right"
+                  stroke="#22c55e"
+                  tick={{ fill: '#22c55e', fontSize: 11 }}
+                  label={{ value: 'COPV Pressure (psi)', angle: 90, position: 'insideRight', fill: '#22c55e' }}
+                />
+              )}
               <Tooltip content={customTooltip} />
               <Legend />
+              {data.copv_pressure_psi && (
+                <Line
+                  yAxisId="right"
+                  type="monotone"
+                  dataKey="copv_pressure"
+                  name="COPV"
+                  stroke="#22c55e"
+                  strokeWidth={2}
+                  dot={false}
+                />
+              )}
               <Line
-                type="monotone"
-                dataKey="copv_pressure"
-                name="COPV"
-                stroke="#22c55e"
-                strokeWidth={2}
-                dot={false}
-              />
-              <Line
+                yAxisId="left"
                 type="monotone"
                 dataKey="P_tank_O"
                 name="LOX Tank"
@@ -668,6 +680,7 @@ export function PressureCurveChart({ data, summary }: PressureCurveChartProps) {
                 dot={false}
               />
               <Line
+                yAxisId="left"
                 type="monotone"
                 dataKey="P_tank_F"
                 name="Fuel Tank"

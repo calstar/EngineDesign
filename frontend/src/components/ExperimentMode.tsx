@@ -1,9 +1,9 @@
 import { useState, useRef } from 'react';
 import type { EngineConfig, TimeSeriesData, TimeSeriesSummary } from '../api/client';
-import { API_BASE, updateConfig } from '../api/client';
+import { API_BASE, getConfig, updateConfig } from '../api/client';
 import { PressureCurveChart } from './PressureCurveChart';
 import {
-  ComposedChart, Scatter, Line, XAxis, YAxis,
+  ComposedChart, Line, XAxis, YAxis,
   CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
 
@@ -19,6 +19,46 @@ interface RowInput {
   tf: string;
   deltaP: string;   // psi
   weight: string;   // kg — cumulative tank weight reading
+}
+
+type ExperimentTab = 'cold_flow' | 'press_feed';
+
+interface PressTestRowInput {
+  id: number;
+  tank: 'lox' | 'fuel';
+  label: string;
+  copvPStart: string;
+  copvPEnd: string;
+  copvTStart: string;
+  copvTEnd: string;
+  tankPStart: string;
+  tankPEnd: string;
+  tankTStart: string;
+  tankTEnd: string;
+}
+
+interface PressTestRunResult {
+  label: string;
+  tank: 'lox' | 'fuel';
+  cv_line_estimate: number;
+  mdot_copv_avg: number;
+  mdot_tank_avg: number;
+  cross_check_ratio: number;
+  copv_dp_psi: number;
+  tank_dp_psi: number;
+}
+
+interface PressTestFitResponse {
+  rows: PressTestRunResult[];
+  cv_line_lox_fitted: number | null;
+  cv_line_lox_std: number | null;
+  cv_line_fuel_fitted: number | null;
+  cv_line_fuel_std: number | null;
+  cv_reg: number;
+  cv_eff_lox: number | null;
+  cv_eff_fuel: number | null;
+  recommendation: string;
+  save_available: boolean;
 }
 
 interface TimeseriesResponse {
@@ -147,6 +187,18 @@ const LAST_INPUT  = INPUT_COL_INDICES[INPUT_COL_INDICES.length - 1];
 
 function newRow(n: number): RowInput {
   return { id: Date.now() + Math.random(), label: `Run ${n}`, t0: '', tf: '', deltaP: '', weight: '' };
+}
+
+function newPressRow(n: number, tank: 'lox' | 'fuel' = 'lox'): PressTestRowInput {
+  return {
+    id: Date.now() + Math.random(),
+    tank,
+    label: `Run ${n}`,
+    copvPStart: '', copvPEnd: '',
+    copvTStart: '', copvTEnd: '',
+    tankPStart: '', tankPEnd: '',
+    tankTStart: '', tankTEnd: '',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -552,7 +604,525 @@ function GridPanel({
 // Main component
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Press-feed spreadsheet grid
+// ---------------------------------------------------------------------------
+
+type PressCell = { rowId: number; colKey: string };
+
+const PRESS_NUM_COLS = [
+  { key: 'copvPStart', header: 'COPV P₀ [psi]', width: 108 },
+  { key: 'copvPEnd',   header: 'COPV Pf [psi]', width: 108 },
+  { key: 'copvTStart', header: 'COPV t₀ [s]',   width: 90  },
+  { key: 'copvTEnd',   header: 'COPV tf [s]',    width: 90  },
+  { key: 'tankPStart', header: 'Tank P₀ [psi]',  width: 108 },
+  { key: 'tankPEnd',   header: 'Tank Pf [psi]',  width: 108 },
+  { key: 'tankTStart', header: 'Tank t₀ [s]',    width: 90  },
+  { key: 'tankTEnd',   header: 'Tank tf [s]',     width: 90  },
+] as const;
+
+function PressSpreadsheetGrid({
+  rows,
+  onChange,
+}: {
+  rows: PressTestRowInput[];
+  onChange: (rows: PressTestRowInput[]) => void;
+}) {
+  const [selected, setSelected] = useState<PressCell | null>(null);
+  const [editing, setEditing] = useState<PressCell | null>(null);
+  const tableRef = useRef<HTMLDivElement>(null);
+
+  const numCols = PRESS_NUM_COLS;
+  const allColKeys = ['label', ...numCols.map(c => c.key)];
+
+  function updateRow(id: number, field: keyof PressTestRowInput, val: string | 'lox' | 'fuel') {
+    onChange(rows.map(r => r.id === id ? { ...r, [field]: val } : r));
+  }
+  function removeRow(id: number) { if (rows.length > 1) onChange(rows.filter(r => r.id !== id)); }
+  function addRow() { onChange([...rows, newPressRow(rows.length + 1)]); }
+
+  function handleKeyDown(e: React.KeyboardEvent, rowIdx: number, colKey: string) {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (editing?.rowId === rows[rowIdx].id && editing.colKey === colKey) {
+        setEditing(null);
+      } else {
+        setEditing({ rowId: rows[rowIdx].id, colKey });
+      }
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      const ci = allColKeys.indexOf(colKey);
+      const nextCi = ci + (e.shiftKey ? -1 : 1);
+      if (nextCi >= 0 && nextCi < allColKeys.length) {
+        const nextKey = allColKeys[nextCi];
+        setSelected({ rowId: rows[rowIdx].id, colKey: nextKey });
+        setEditing({ rowId: rows[rowIdx].id, colKey: nextKey });
+      } else if (!e.shiftKey && rowIdx === rows.length - 1) {
+        addRow();
+        setTimeout(() => {
+          const newRow = rows[rows.length]; // will exist after state update
+          if (newRow) setSelected({ rowId: newRow.id, colKey: allColKeys[0] });
+        }, 0);
+      }
+    } else if (e.key === 'ArrowDown' && !editing) {
+      if (rowIdx < rows.length - 1) setSelected({ rowId: rows[rowIdx + 1].id, colKey });
+    } else if (e.key === 'ArrowUp' && !editing) {
+      if (rowIdx > 0) setSelected({ rowId: rows[rowIdx - 1].id, colKey });
+    } else if (e.key === 'ArrowRight' && !editing) {
+      const ci = allColKeys.indexOf(colKey);
+      if (ci < allColKeys.length - 1) setSelected({ rowId: rows[rowIdx].id, colKey: allColKeys[ci + 1] });
+    } else if (e.key === 'ArrowLeft' && !editing) {
+      const ci = allColKeys.indexOf(colKey);
+      if (ci > 0) setSelected({ rowId: rows[rowIdx].id, colKey: allColKeys[ci - 1] });
+    }
+  }
+
+  const cellBase: React.CSSProperties = {
+    padding: '0 4px',
+    height: 28,
+    outline: 'none',
+    cursor: 'default',
+    userSelect: 'none',
+  };
+
+  return (
+    <div ref={tableRef} style={{ overflowX: 'auto' }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: 12, tableLayout: 'fixed' }}>
+        <thead>
+          <tr>
+            <th style={{ width: 48, padding: '4px 6px', textAlign: 'center', borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-secondary)', fontWeight: 700 }}>Tank</th>
+            <th style={{ width: 100, padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-secondary)', fontWeight: 700 }}>Label</th>
+            {numCols.map(c => (
+              <th key={c.key} style={{ width: c.width, padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-secondary)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                {c.header}
+              </th>
+            ))}
+            <th style={{ width: 80, padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 700 }}>COPV ΔP</th>
+            <th style={{ width: 80, padding: '4px 8px', color: 'var(--color-text-secondary)', fontWeight: 700 }}>Tank ΔP</th>
+            <th style={{ width: 32 }} />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIdx) => {
+            const copvDp = parseFloat(row.copvPStart) - parseFloat(row.copvPEnd);
+            const tankDp = parseFloat(row.tankPEnd) - parseFloat(row.tankPStart);
+            const isLox = row.tank === 'lox';
+            const accentColor = isLox ? '#60a5fa' : '#f97316';
+            return (
+              <tr key={row.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                {/* Tank toggle */}
+                <td style={{ padding: '2px 4px', textAlign: 'center' }}>
+                  <button
+                    onClick={() => updateRow(row.id, 'tank', isLox ? 'fuel' : 'lox')}
+                    style={{
+                      background: `${accentColor}22`,
+                      border: `1px solid ${accentColor}66`,
+                      borderRadius: 4,
+                      color: accentColor,
+                      fontWeight: 700,
+                      fontSize: 10,
+                      padding: '2px 6px',
+                      cursor: 'pointer',
+                      letterSpacing: '0.04em',
+                      width: 40,
+                    }}
+                  >
+                    {isLox ? 'LOX' : 'FUEL'}
+                  </button>
+                </td>
+                {/* Label */}
+                <td
+                  style={{
+                    ...cellBase,
+                    width: 100,
+                    background: selected?.rowId === row.id && selected.colKey === 'label'
+                      ? 'rgba(96,165,250,0.12)' : undefined,
+                  }}
+                  tabIndex={0}
+                  onClick={() => { setSelected({ rowId: row.id, colKey: 'label' }); setEditing({ rowId: row.id, colKey: 'label' }); }}
+                  onKeyDown={e => handleKeyDown(e, rowIdx, 'label')}
+                >
+                  {editing?.rowId === row.id && editing.colKey === 'label' ? (
+                    <input
+                      autoFocus
+                      type="text"
+                      value={row.label}
+                      onChange={e => updateRow(row.id, 'label', e.target.value)}
+                      onBlur={() => setEditing(null)}
+                      style={{ width: '100%', background: 'transparent', border: 'none', outline: 'none', color: 'var(--color-text-primary)', fontSize: 12 }}
+                    />
+                  ) : (
+                    <span style={{ color: 'var(--color-text-primary)', paddingLeft: 4 }}>{row.label || '—'}</span>
+                  )}
+                </td>
+                {/* Numeric cols */}
+                {numCols.map(c => {
+                  const isSelected = selected?.rowId === row.id && selected.colKey === c.key;
+                  const isEditingCell = editing?.rowId === row.id && editing.colKey === c.key;
+                  const val = row[c.key as keyof PressTestRowInput] as string;
+                  return (
+                    <td
+                      key={c.key}
+                      tabIndex={0}
+                      style={{
+                        ...cellBase,
+                        width: c.width,
+                        background: isSelected ? 'rgba(96,165,250,0.12)' : undefined,
+                        fontFamily: 'ui-monospace, monospace',
+                      }}
+                      onClick={() => { setSelected({ rowId: row.id, colKey: c.key }); setEditing({ rowId: row.id, colKey: c.key }); }}
+                      onKeyDown={e => handleKeyDown(e, rowIdx, c.key)}
+                    >
+                      {isEditingCell ? (
+                        <input
+                          autoFocus
+                          type="number"
+                          step="any"
+                          value={val}
+                          onChange={e => updateRow(row.id, c.key as keyof PressTestRowInput, e.target.value)}
+                          onBlur={() => setEditing(null)}
+                          style={{ width: '100%', background: 'transparent', border: 'none', outline: 'none', color: 'var(--color-text-primary)', fontSize: 12, fontFamily: 'ui-monospace, monospace' }}
+                        />
+                      ) : (
+                        <span style={{ color: val ? 'var(--color-text-primary)' : 'rgba(255,255,255,0.2)', paddingLeft: 4 }}>
+                          {val || '—'}
+                        </span>
+                      )}
+                    </td>
+                  );
+                })}
+                {/* Computed: COPV ΔP */}
+                <td style={{ padding: '4px 8px', color: Number.isFinite(copvDp) && copvDp > 0 ? '#f97316' : 'rgba(255,255,255,0.2)', fontFamily: 'ui-monospace, monospace' }}>
+                  {Number.isFinite(copvDp) && copvDp > 0 ? copvDp.toFixed(1) : '—'}
+                </td>
+                {/* Computed: Tank ΔP */}
+                <td style={{ padding: '4px 8px', color: Number.isFinite(tankDp) && tankDp > 0 ? '#60a5fa' : 'rgba(255,255,255,0.2)', fontFamily: 'ui-monospace, monospace' }}>
+                  {Number.isFinite(tankDp) && tankDp > 0 ? tankDp.toFixed(1) : '—'}
+                </td>
+                {/* Delete */}
+                <td style={{ padding: '0 4px' }}>
+                  {rows.length > 1 && (
+                    <button
+                      onClick={() => removeRow(row.id)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(255,255,255,0.3)', fontSize: 14 }}
+                    >
+                      ×
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className="mt-3">
+        <button
+          onClick={addRow}
+          className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+        >
+          + Add Run
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PressureFeedExperiment({ onConfigUpdated }: { onConfigUpdated?: (config: EngineConfig) => void }) {
+  const [rows, setRows] = useState<PressTestRowInput[]>([newPressRow(1, 'lox'), newPressRow(2, 'fuel')]);
+
+  // System params
+  const [copvVolumeL,    setCopvVolumeL]    = useState('4.5');
+  const [tankVolumeL,    setTankVolumeL]    = useState('9.15');
+  const [fillFraction,   setFillFraction]   = useState('0.0');
+  const [tCopvK,         setTCopvK]         = useState('300');
+  const [tUllK,          setTUllK]          = useState('293');
+  const [regCv,          setRegCv]          = useState('0.06');
+  const [regDroop,       setRegDroop]       = useState('0.070');
+  const [regSetpoint,    setRegSetpoint]    = useState('450');
+  const [regInitialCopv, setRegInitialCopv] = useState('4500');
+
+  // Results
+  const [results, setResults] = useState<PressTestFitResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+
+  const inputCls = "w-full px-3 py-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)] text-[var(--color-text-primary)] text-sm focus:outline-none";
+
+  async function handleFit() {
+    setLoading(true);
+    setError(null);
+    setResults(null);
+    try {
+      const parsedRows = rows.map((r, i) => ({
+        label: r.label || `Run ${i + 1}`,
+        tank: r.tank,
+        copv_p_start_psi: parseFloat(r.copvPStart),
+        copv_p_end_psi: parseFloat(r.copvPEnd),
+        copv_t_start_s: parseFloat(r.copvTStart),
+        copv_t_end_s: parseFloat(r.copvTEnd),
+        tank_p_start_psi: parseFloat(r.tankPStart),
+        tank_p_end_psi: parseFloat(r.tankPEnd),
+        tank_t_start_s: parseFloat(r.tankTStart),
+        tank_t_end_s: parseFloat(r.tankTEnd),
+      }));
+
+      for (const r of parsedRows) {
+        const nums = Object.entries(r).filter(([k]) => k !== 'label' && k !== 'tank').map(([, v]) => v as number);
+        if (nums.some(v => Number.isNaN(v))) {
+          throw new Error(`Row "${r.label}": all numeric fields must be filled in.`);
+        }
+      }
+
+      const resp = await fetch(`${API_BASE}/experiment/press_test_fit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rows: parsedRows,
+          tank_volume_m3: parseFloat(tankVolumeL) / 1000,
+          fill_fraction: parseFloat(fillFraction),
+          copv_volume_L: parseFloat(copvVolumeL),
+          T_copv_K: parseFloat(tCopvK),
+          T_ull_K: parseFloat(tUllK),
+          reg_cv: parseFloat(regCv),
+          reg_droop_coeff: parseFloat(regDroop),
+          reg_setpoint_psi: parseFloat(regSetpoint),
+          reg_initial_copv_psi: parseFloat(regInitialCopv),
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${resp.status}`);
+      }
+      setResults(await resp.json());
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Fit failed');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleSave() {
+    if (!results) return;
+    setSaveStatus('saving');
+    try {
+      const body: Record<string, number> = {};
+      if (results.cv_line_lox_fitted != null) body.cv_line_lox = results.cv_line_lox_fitted;
+      if (results.cv_line_fuel_fitted != null) body.cv_line_fuel = results.cv_line_fuel_fitted;
+      const resp = await fetch(`${API_BASE}/experiment/press_test_save_cv_line`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${resp.status}`);
+      }
+      setSaveStatus('saved');
+      const res = await getConfig();
+      if (res.data?.config) onConfigUpdated?.(res.data.config);
+      setTimeout(() => setSaveStatus('idle'), 2500);
+    } catch {
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus('idle'), 2500);
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+        <h2 className="text-xl font-bold text-[var(--color-text-primary)] mb-1">Pressure Feed Experiment</h2>
+        <p className="text-sm text-[var(--color-text-secondary)]">
+          Fit downstream <span className="font-mono">Cv_line</span> separately for LOX and fuel branches from static press tests (COPV → reg → solenoid → tank, no propellant flow). Tag each run with the tank it pressurizes.
+        </p>
+      </div>
+
+      {/* System params */}
+      <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+        <h3 className="text-sm font-semibold text-[var(--color-text-primary)] uppercase tracking-wider mb-3">System Parameters</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">COPV Volume [L]</label>
+            <input type="number" step="any" min="0" value={copvVolumeL} onChange={e => setCopvVolumeL(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Tank Volume [L]</label>
+            <input type="number" step="any" min="0" value={tankVolumeL} onChange={e => setTankVolumeL(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Fill Fraction [0–1]</label>
+            <input type="number" step="any" min="0" max="0.999" value={fillFraction} onChange={e => setFillFraction(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">T COPV [K]</label>
+            <input type="number" step="any" min="0" value={tCopvK} onChange={e => setTCopvK(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">T Ullage [K]</label>
+            <input type="number" step="any" min="0" value={tUllK} onChange={e => setTUllK(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Reg Cv</label>
+            <input type="number" step="any" min="0" value={regCv} onChange={e => setRegCv(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Reg Droop (psi/psi)</label>
+            <input type="number" step="any" min="0" value={regDroop} onChange={e => setRegDroop(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Reg Setpoint [psi]</label>
+            <input type="number" step="any" min="0" value={regSetpoint} onChange={e => setRegSetpoint(e.target.value)} className={inputCls} />
+          </div>
+          <div>
+            <label className="block text-xs text-[var(--color-text-secondary)] mb-1">Reg Initial COPV [psi]</label>
+            <input type="number" step="any" min="0" value={regInitialCopv} onChange={e => setRegInitialCopv(e.target.value)} className={inputCls} />
+          </div>
+        </div>
+      </div>
+
+      {/* Spreadsheet */}
+      <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
+        <h3 className="text-sm font-semibold text-[var(--color-text-primary)] uppercase tracking-wider mb-3">Static Test Runs</h3>
+        <PressSpreadsheetGrid rows={rows} onChange={setRows} />
+      </div>
+
+      {/* Controls */}
+      <div className="flex flex-wrap gap-3 items-center">
+        <button
+          onClick={handleFit}
+          disabled={loading}
+          className="px-4 py-2 rounded-xl font-semibold text-sm transition-colors bg-blue-500 hover:bg-blue-400 text-black disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? 'Fitting…' : 'Fit Cv_line'}
+        </button>
+        {results?.save_available && (results.cv_line_lox_fitted != null || results.cv_line_fuel_fitted != null) && (
+          <button
+            onClick={handleSave}
+            disabled={saveStatus === 'saving'}
+            className="px-4 py-2 rounded-xl font-semibold text-sm transition-colors bg-emerald-500 hover:bg-emerald-400 text-black disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved ✓' : saveStatus === 'error' ? 'Save failed' : 'Save Cv_lines to Config'}
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm">{error}</div>
+      )}
+
+      {/* Results */}
+      {results && (
+        <div className="space-y-4">
+          {/* Branch fit summary cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* LOX */}
+            <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-blue-500/30">
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#60a5fa', display: 'inline-block' }} />
+                <h3 className="text-sm font-semibold text-blue-400 uppercase tracking-wider">LOX Branch</h3>
+              </div>
+              {results.cv_line_lox_fitted != null ? (
+                <div className="grid grid-cols-3 gap-2 text-sm">
+                  <div className="p-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                    <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cv_line_lox</p>
+                    <p className="font-mono text-[var(--color-text-primary)] text-xs">
+                      {results.cv_line_lox_fitted.toFixed(6)}
+                      <span className="text-[var(--color-text-secondary)]"> ± {results.cv_line_lox_std?.toFixed(6)}</span>
+                    </p>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                    <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cv_reg</p>
+                    <p className="font-mono text-[var(--color-text-primary)] text-xs">{results.cv_reg.toFixed(4)}</p>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                    <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cv_eff</p>
+                    <p className="font-mono text-[var(--color-text-primary)] text-xs">{results.cv_eff_lox?.toFixed(6)}</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-[var(--color-text-secondary)] italic">No LOX runs provided.</p>
+              )}
+            </div>
+            {/* Fuel */}
+            <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-orange-500/30">
+              <div className="flex items-center gap-2 mb-3">
+                <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#f97316', display: 'inline-block' }} />
+                <h3 className="text-sm font-semibold text-orange-400 uppercase tracking-wider">Fuel Branch</h3>
+              </div>
+              {results.cv_line_fuel_fitted != null ? (
+                <div className="grid grid-cols-3 gap-2 text-sm">
+                  <div className="p-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                    <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cv_line_fuel</p>
+                    <p className="font-mono text-[var(--color-text-primary)] text-xs">
+                      {results.cv_line_fuel_fitted.toFixed(6)}
+                      <span className="text-[var(--color-text-secondary)]"> ± {results.cv_line_fuel_std?.toFixed(6)}</span>
+                    </p>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                    <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cv_reg</p>
+                    <p className="font-mono text-[var(--color-text-primary)] text-xs">{results.cv_reg.toFixed(4)}</p>
+                  </div>
+                  <div className="p-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
+                    <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cv_eff</p>
+                    <p className="font-mono text-[var(--color-text-primary)] text-xs">{results.cv_eff_fuel?.toFixed(6)}</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-xs text-[var(--color-text-secondary)] italic">No Fuel runs provided.</p>
+              )}
+            </div>
+          </div>
+
+          <p className="text-xs text-[var(--color-text-secondary)] px-1">{results.recommendation}</p>
+
+          {/* Per-run diagnostics */}
+          <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)] overflow-x-auto">
+            <h3 className="text-sm font-semibold text-[var(--color-text-primary)] uppercase tracking-wider mb-3">Per-run Diagnostics</h3>
+            <table style={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {['Tank', 'Label', 'Cv_line', 'COPV ΔP [psi]', 'Tank ΔP [psi]', 'ṁ COPV [g/s]', 'ṁ Tank [g/s]', 'Cross-check'].map(h => (
+                    <th key={h} style={{ padding: '4px 8px', textAlign: 'left', borderBottom: '1px solid var(--color-border)', color: 'var(--color-text-secondary)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {results.rows.map((r, i) => {
+                  const ratioOk = Math.abs(r.cross_check_ratio - 1.0) < 0.10;
+                  const tankColor = r.tank === 'lox' ? '#60a5fa' : '#f97316';
+                  return (
+                    <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                      <td style={{ padding: '4px 8px' }}>
+                        <span style={{ color: tankColor, fontWeight: 700, fontSize: 10, letterSpacing: '0.04em' }}>
+                          {r.tank === 'lox' ? 'LOX' : 'FUEL'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '4px 8px' }}>{r.label}</td>
+                      <td style={{ padding: '4px 8px', fontFamily: 'ui-monospace, monospace' }}>{r.cv_line_estimate.toFixed(6)}</td>
+                      <td style={{ padding: '4px 8px', fontFamily: 'ui-monospace, monospace' }}>{r.copv_dp_psi.toFixed(1)}</td>
+                      <td style={{ padding: '4px 8px', fontFamily: 'ui-monospace, monospace' }}>{r.tank_dp_psi.toFixed(1)}</td>
+                      <td style={{ padding: '4px 8px', fontFamily: 'ui-monospace, monospace' }}>{(r.mdot_copv_avg * 1000).toFixed(2)}</td>
+                      <td style={{ padding: '4px 8px', fontFamily: 'ui-monospace, monospace' }}>{(r.mdot_tank_avg * 1000).toFixed(2)}</td>
+                      <td style={{ padding: '4px 8px', color: ratioOk ? '#34d399' : '#f59e0b', fontFamily: 'ui-monospace, monospace' }}>
+                        {r.cross_check_ratio.toFixed(3)} {ratioOk ? '✓' : '⚠'}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps) {
+  const [activeTab, setActiveTab] = useState<ExperimentTab>('cold_flow');
+
   const [chokeDiamFuelMm,  setChokeDiamFuelMm]  = useState('3.0');
   const [chokeDiamLoxMm,   setChokeDiamLoxMm]   = useState('3.0');
   const [waterDensity,     setWaterDensity]      = useState('998.2');
@@ -649,7 +1219,7 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
     setTimeout(() => setSaveStatus('idle'), 3000);
   }
 
-  return (
+  const coldFlowContent = (
     <div className="space-y-5">
       {/* Header */}
       <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
@@ -717,6 +1287,48 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
 
       {/* Results */}
       {results && <TimeseriesResults results={results} onSaveCdToConfig={handleSaveCdToConfig} saveStatus={saveStatus} />}
+    </div>
+  );
+
+  return (
+    <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Tab bar */}
+      <div
+        style={{
+          display: 'flex',
+          borderBottom: '1px solid var(--color-border)',
+          background: 'var(--color-bg-secondary)',
+          flexShrink: 0,
+        }}
+      >
+        {[
+          { key: 'cold_flow' as ExperimentTab, label: 'Feed System Cd — Water Flow' },
+          { key: 'press_feed' as ExperimentTab, label: 'Pressure Feed Experiment' },
+        ].map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setActiveTab(tab.key)}
+            style={{
+              padding: '10px 18px',
+              fontSize: 13,
+              fontWeight: activeTab === tab.key ? 700 : 400,
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              borderBottom: activeTab === tab.key ? '2px solid #3b82f6' : '2px solid transparent',
+              color: activeTab === tab.key ? '#3b82f6' : 'var(--color-text-secondary)',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        {activeTab === 'cold_flow' && coldFlowContent}
+        {activeTab === 'press_feed' && <PressureFeedExperiment onConfigUpdated={onConfigUpdated} />}
+      </div>
     </div>
   );
 }

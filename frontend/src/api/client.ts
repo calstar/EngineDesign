@@ -303,6 +303,11 @@ export interface PressureSegment {
   k: number;                 // Blowdown decay constant (0.1-3.0)
 }
 
+export interface SolenoidScheduleInterval {
+  t_open: number;
+  t_close: number;
+}
+
 // Request for segment-based generation
 export interface SegmentsRequest {
   duration_s: number;
@@ -318,6 +323,9 @@ export interface SegmentsRequest {
   // Initial propellant/water mass overrides (from tank fill visualizer UI)
   lox_initial_mass_kg?: number;
   fuel_initial_mass_kg?: number;
+  // Optional pressurant solenoid schedules (blowdown mode only)
+  lox_solenoid_schedule?: SolenoidScheduleInterval[];
+  fuel_solenoid_schedule?: SolenoidScheduleInterval[];
   use_cold_flow_cd?: boolean;  // When false, strips saved Cd fit and uses Re-based formula
 }
 
@@ -358,7 +366,7 @@ export interface TimeSeriesData {
   A_throat_m2?: number[];
   V_chamber_initial_m3?: number;
   A_throat_initial_m2?: number;
-  // COPV pressure trace
+  // COPV pressure trace (single shared COPV for both tanks)
   copv_pressure_psi?: number[];
   // Correlation matrix data
   correlation_matrix?: number[][];

@@ -3,7 +3,7 @@
 import copy
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 from typing import List, Optional, Literal
 import numpy as np
 import pandas as pd
@@ -28,6 +28,19 @@ router = APIRouter(prefix="/api/timeseries", tags=["timeseries"])
 # Constants
 PSI_TO_PA = 6894.76
 PA_TO_PSI = 1.0 / PSI_TO_PA
+
+
+class SolenoidSchedule(BaseModel):
+    """A single open/close interval for a pressurant solenoid [seconds]."""
+
+    t_open: float = Field(ge=0, description="Time solenoid opens [s]")
+    t_close: float = Field(gt=0, description="Time solenoid closes [s]")
+
+    @model_validator(mode="after")
+    def _check_order(self) -> "SolenoidSchedule":
+        if self.t_close <= self.t_open:
+            raise ValueError("t_close must be > t_open")
+        return self
 
 
 def _injector_delta_p_pa_from_diagnostic(diag: dict) -> tuple:
@@ -809,6 +822,100 @@ def _run_copv_analysis(
         return None
 
 
+def _run_press_resupply_for_blowdown(
+    config,
+    times: np.ndarray,
+    lox_schedule: Optional[List[SolenoidSchedule]],
+    fuel_schedule: Optional[List[SolenoidSchedule]],
+    blowdown_results: dict,
+) -> Optional[dict]:
+    """Run the coupled dual-tank press resupply ODE.
+
+    A single COPV feeds both propellant tanks through separate solenoids and line Cvs.
+    blowdown_results: output from simulate_coupled_blowdown, keyed 'lox' and 'fuel',
+    each containing 'P_Pa', 'mdot_kg_s', 'm_prop_kg' arrays.
+
+    Returns dict with single 'copv_pressure_psi' trace, or None if no schedules.
+    """
+    from copv.press_resupply_solver import simulate_press_resupply_dual_tank
+
+    ps = getattr(config, "press_system", None)
+    if ps is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Config missing press_system section — required for solenoid PWM simulation.",
+        )
+
+    pt = getattr(config, "press_tank", None)
+    copv_volume_m3 = (getattr(pt, "free_volume_L", 4.5) / 1000.0) if pt else 0.0045
+
+    P_copv_initial_Pa = float(ps.reg_initial_copv_psi) * PSI_TO_PA
+
+    lox_sch = [(s.t_open, s.t_close) for s in lox_schedule] if lox_schedule else []
+    fuel_sch = [(s.t_open, s.t_close) for s in fuel_schedule] if fuel_schedule else []
+
+    if not lox_sch and not fuel_sch:
+        return None
+
+    def _branch_props(branch_key: str, tank_config):
+        bd = blowdown_results.get(branch_key, {})
+        mdot_arr = bd.get("mdot_kg_s", np.zeros_like(times))
+        m_prop_arr = bd.get("m_prop_kg", None)
+        P_tank_arr = bd.get("P_Pa", None)
+        P_initial = float(P_tank_arr[0]) if P_tank_arr is not None else 400.0 * PSI_TO_PA
+        tank_vol_m3 = getattr(tank_config, "tank_volume_m3", None) or 0.01
+        try:
+            rho = (
+                float(config.fluids["oxidizer"].density)
+                if branch_key == "lox"
+                else float(config.fluids["fuel"].density)
+            )
+        except Exception:
+            rho = 1000.0
+        m_initial = float(m_prop_arr[0]) if m_prop_arr is not None else 0.0
+        V_ull = max(tank_vol_m3 - m_initial / rho, 1e-5)
+        return P_initial, V_ull, mdot_arr, rho, m_initial
+
+    P_lox0, V_ull_lox0, mdot_lox_arr, rho_lox, m_lox0 = _branch_props(
+        "lox", getattr(config, "lox_tank", None)
+    )
+    P_fuel0, V_ull_fuel0, mdot_fuel_arr, rho_fuel, m_fuel0 = _branch_props(
+        "fuel", getattr(config, "fuel_tank", None)
+    )
+
+    result = simulate_press_resupply_dual_tank(
+        times,
+        P_copv_initial_Pa=P_copv_initial_Pa,
+        P_lox_initial_Pa=P_lox0,
+        P_fuel_initial_Pa=P_fuel0,
+        V_copv_m3=copv_volume_m3,
+        V_ull_lox_initial_m3=V_ull_lox0,
+        V_ull_fuel_initial_m3=V_ull_fuel0,
+        press_system_config=ps,
+        lox_solenoid_schedule=lox_sch,
+        fuel_solenoid_schedule=fuel_sch,
+        mdot_lox_arr=mdot_lox_arr,
+        rho_lox=rho_lox,
+        m_lox_initial_kg=m_lox0,
+        mdot_fuel_arr=mdot_fuel_arr,
+        rho_fuel=rho_fuel,
+        m_fuel_initial_kg=m_fuel0,
+        T_ull_lox_K=250.0,
+        T_ull_fuel_K=293.0,
+    )
+
+    out: dict = {
+        "copv_pressure_psi": (np.asarray(result["P_copv_Pa"], dtype=float) * PA_TO_PSI).tolist(),
+    }
+    # Include resupply tank pressure traces so the chart can show the pressurisation effect.
+    # These replace the blowdown-only tank curves when solenoid schedule is active.
+    if lox_sch:
+        out["P_tank_O_psi"] = (np.asarray(result["P_lox_Pa"], dtype=float) * PA_TO_PSI).tolist()
+    if fuel_sch:
+        out["P_tank_F_psi"] = (np.asarray(result["P_fuel_Pa"], dtype=float) * PA_TO_PSI).tolist()
+    return out
+
+
 # Request models for simple profile generation
 class ProfileParams(BaseModel):
     """Parameters for a single propellant profile."""
@@ -930,6 +1037,15 @@ class SegmentsRequest(BaseModel):
     # Initial propellant/water mass overrides (from tank fill visualizer UI)
     lox_initial_mass_kg: Optional[float] = Field(default=None, gt=0, description="Initial LOX/water mass [kg]. Overrides config value.")
     fuel_initial_mass_kg: Optional[float] = Field(default=None, gt=0, description="Initial fuel/water mass [kg]. Overrides config value.")
+
+    lox_solenoid_schedule: Optional[List[SolenoidSchedule]] = Field(
+        default=None,
+        description="LOX pressurant solenoid schedule. Only used in blowdown_mode=True.",
+    )
+    fuel_solenoid_schedule: Optional[List[SolenoidSchedule]] = Field(
+        default=None,
+        description="Fuel pressurant solenoid schedule. Only used in blowdown_mode=True.",
+    )
 
     use_cold_flow_cd: bool = Field(default=True, description="Use saved cold-flow Cd fit if present. When False, uses Re-based formula.")
 
@@ -1090,13 +1206,10 @@ async def generate_from_segments(request: SegmentsRequest):
 
             else:
                 # ===== HOT-FIRE BLOWDOWN MODE =====
-                # Import coupled blowdown solver
-                from copv.blowdown_solver import simulate_coupled_blowdown
+                config = app_state.runner.config
 
-                # Define engine callback for coupled solver
+                # Shared engine callback (used by both code paths below)
                 def engine_evaluator(P_lox_Pa: float, P_fuel_Pa: float):
-                    # Run single-point evaluation
-                    # Note: evaluate returns dict with mdot_O and mdot_F (kg/s)
                     try:
                         res = app_state.runner.evaluate(
                             P_tank_O=P_lox_Pa,
@@ -1114,43 +1227,117 @@ async def generate_from_segments(request: SegmentsRequest):
                         )
                         return 0.0, 0.0
 
-                # Run coupled simulation
-                blowdown_results = simulate_coupled_blowdown(
-                    times=times,
-                    evaluate_engine_fn=engine_evaluator,
-                    P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
-                    P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
-                    config=app_state.runner.config,
-                    R_pressurant=296.803,  # N2
-                    T_lox_gas_K=250.0,
-                    T_fuel_gas_K=293.0,
-                    n_polytropic=1.2,
-                    use_real_gas=True,
-                    n2_Z_csv=N2_Z_LOOKUP_CSV,
-                    m_lox_override_kg=request.lox_initial_mass_kg,
-                    m_fuel_override_kg=request.fuel_initial_mass_kg,
-                )
+                if request.lox_solenoid_schedule or request.fuel_solenoid_schedule:
+                    # ── PRESSURE-FED PATH ─────────────────────────────────────
+                    # Single coupled ODE: COPV + both tanks + engine evaluated
+                    # simultaneously so that Pc, mdot, ullage, and COPV pressure
+                    # are self-consistent at every time step.
+                    from copv.press_fed_solver import simulate_pressure_fed
 
-                # Extract Actual Blowdown Pressures
-                lox_curve_pa = blowdown_results["lox"]["P_Pa"]
-                fuel_curve_pa = blowdown_results["fuel"]["P_Pa"]
-                lox_curve_psi = lox_curve_pa * PA_TO_PSI
-                fuel_curve_psi = fuel_curve_pa * PA_TO_PSI
+                    ps = getattr(config, "press_system", None)
+                    if ps is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Config missing press_system — required for solenoid simulation.",
+                        )
+                    pt = getattr(config, "press_tank", None)
+                    copv_vol_m3 = (getattr(pt, "free_volume_L", 4.5) / 1000.0) if pt else 0.0045
 
-                # Extract Propellant Mass History (for flameout masking)
-                lox_mass_kg = blowdown_results["lox"]["m_prop_kg"]
-                fuel_mass_kg = blowdown_results["fuel"]["m_prop_kg"]
+                    # Extract tank geometry from config
+                    def _tank_vol_and_mass(tank_attr, fluid_key):
+                        tank = getattr(config, tank_attr, None)
+                        if tank and getattr(tank, "tank_volume_m3", None):
+                            V = float(tank.tank_volume_m3)
+                        else:
+                            V = 0.01
+                        m = float(tank.mass) if (tank and hasattr(tank, "mass")) else 0.0
+                        rho = float(config.fluids[fluid_key].density)
+                        return V, m, rho
 
-                # Run final evaluation with actual blowdown pressures
-                data, summary = compute_timeseries_results(
-                    _runner_for_cd(request.use_cold_flow_cd),
-                    times,
-                    lox_curve_psi,
-                    fuel_curve_psi,
-                    run_copv=False,  # Skip COPV analysis for efficiency
-                    lox_mass_kg=lox_mass_kg,
-                    fuel_mass_kg=fuel_mass_kg,
-                )
+                    V_lox_m3, m_lox_cfg, rho_lox = _tank_vol_and_mass("lox_tank", "oxidizer")
+                    V_fuel_m3, m_fuel_cfg, rho_fuel = _tank_vol_and_mass("fuel_tank", "fuel")
+
+                    m_lox_init  = float(request.lox_initial_mass_kg)  if request.lox_initial_mass_kg  is not None else m_lox_cfg
+                    m_fuel_init = float(request.fuel_initial_mass_kg) if request.fuel_initial_mass_kg is not None else m_fuel_cfg
+
+                    lox_sch  = [(s.t_open, s.t_close) for s in request.lox_solenoid_schedule]  if request.lox_solenoid_schedule  else []
+                    fuel_sch = [(s.t_open, s.t_close) for s in request.fuel_solenoid_schedule] if request.fuel_solenoid_schedule else []
+
+                    pf = simulate_pressure_fed(
+                        times=times,
+                        engine_mdot_fn=engine_evaluator,
+                        P_copv_initial_Pa=float(ps.reg_initial_copv_psi) * PSI_TO_PA,
+                        P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
+                        P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
+                        m_lox_initial_kg=m_lox_init,
+                        m_fuel_initial_kg=m_fuel_init,
+                        V_copv_m3=copv_vol_m3,
+                        V_lox_tank_m3=V_lox_m3,
+                        V_fuel_tank_m3=V_fuel_m3,
+                        rho_lox=rho_lox,
+                        rho_fuel=rho_fuel,
+                        press_system_config=ps,
+                        lox_solenoid_schedule=lox_sch,
+                        fuel_solenoid_schedule=fuel_sch,
+                        T_copv_initial_K=300.0,
+                        T_ull_lox_K=250.0,
+                        T_ull_fuel_K=293.0,
+                    )
+
+                    lox_curve_psi  = np.asarray(pf["P_lox_Pa"],  dtype=float) * PA_TO_PSI
+                    fuel_curve_psi = np.asarray(pf["P_fuel_Pa"], dtype=float) * PA_TO_PSI
+                    lox_mass_kg    = np.asarray(pf["m_lox_kg"],  dtype=float)
+                    fuel_mass_kg   = np.asarray(pf["m_fuel_kg"], dtype=float)
+
+                    data, summary = compute_timeseries_results(
+                        _runner_for_cd(request.use_cold_flow_cd),
+                        times,
+                        lox_curve_psi,
+                        fuel_curve_psi,
+                        run_copv=False,
+                        lox_mass_kg=lox_mass_kg,
+                        fuel_mass_kg=fuel_mass_kg,
+                    )
+
+                    # Overlay COPV + corrected tank pressure traces on the result
+                    data["copv_pressure_psi"] = (np.asarray(pf["P_copv_Pa"], dtype=float) * PA_TO_PSI).tolist()
+                    data["P_tank_O_psi"]      = lox_curve_psi.tolist()
+                    data["P_tank_F_psi"]      = fuel_curve_psi.tolist()
+
+                else:
+                    # ── PURE BLOWDOWN PATH (no solenoids) ─────────────────────
+                    from copv.blowdown_solver import simulate_coupled_blowdown
+
+                    blowdown_results = simulate_coupled_blowdown(
+                        times=times,
+                        evaluate_engine_fn=engine_evaluator,
+                        P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
+                        P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
+                        config=app_state.runner.config,
+                        R_pressurant=296.803,
+                        T_lox_gas_K=250.0,
+                        T_fuel_gas_K=293.0,
+                        n_polytropic=1.2,
+                        use_real_gas=True,
+                        n2_Z_csv=N2_Z_LOOKUP_CSV,
+                        m_lox_override_kg=request.lox_initial_mass_kg,
+                        m_fuel_override_kg=request.fuel_initial_mass_kg,
+                    )
+
+                    lox_curve_psi = blowdown_results["lox"]["P_Pa"] * PA_TO_PSI
+                    fuel_curve_psi = blowdown_results["fuel"]["P_Pa"] * PA_TO_PSI
+                    lox_mass_kg = blowdown_results["lox"]["m_prop_kg"]
+                    fuel_mass_kg = blowdown_results["fuel"]["m_prop_kg"]
+
+                    data, summary = compute_timeseries_results(
+                        _runner_for_cd(request.use_cold_flow_cd),
+                        times,
+                        lox_curve_psi,
+                        fuel_curve_psi,
+                        run_copv=False,
+                        lox_mass_kg=lox_mass_kg,
+                        fuel_mass_kg=fuel_mass_kg,
+                    )
             
         else:
             # ===== REGULATED MODE (original behavior) =====

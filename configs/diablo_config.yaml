@@ -346,6 +346,13 @@ press_tank:
   initial_gas_mass: null
   mass: null
   free_volume_L: 4.5
+press_system:
+  reg_cv: 0.06
+  reg_droop_coeff: 0.070
+  reg_setpoint_psi: 1000.0        # placeholder — update from hardware notes
+  reg_initial_copv_psi: 4500.0   # placeholder — initial COPV fill pressure
+  line_cv_lox: null              # to be fitted from LOX branch static press test
+  line_cv_fuel: null             # to be fitted from fuel branch static press test
 rocket:
   airframe_mass: 78.72
   engine_mass: 8.0
