@@ -468,6 +468,11 @@ class PressTestRunRow(BaseModel):
 
     label: str = Field(default="Run")
     tank: Literal["lox", "fuel"] = Field(default="lox", description="Which propellant tank this run pressurizes")
+    ullage_fraction: float = Field(
+        ge=0,
+        le=1,
+        description="Ullage (gas) fraction 0-1 for the specified tank.",
+    )
 
     # COPV sensor window (start/end of solenoid-open transient, COPV side)
     copv_p_start_psi: float = Field(gt=0, description="COPV pressure at start of open window [psi]")
@@ -484,8 +489,17 @@ class PressTestRunRow(BaseModel):
 
 class PressTestFitRequest(BaseModel):
     rows: List[PressTestRunRow] = Field(min_length=1)
-    tank_volume_m3: float = Field(gt=0, description="Total tank volume [m³]")
-    fill_fraction: float = Field(default=0.0, ge=0, lt=1, description="Propellant fill fraction 0-1; 0 = fully gas-filled")
+    tank_volume_lox_m3: Optional[float] = Field(default=None, gt=0, description="Total LOX tank volume [m³]")
+    tank_volume_fuel_m3: Optional[float] = Field(default=None, gt=0, description="Total fuel tank volume [m³]")
+
+    # Legacy inputs (kept for backward compatibility; prefer the fields above)
+    tank_volume_m3: Optional[float] = Field(default=None, gt=0, description="LEGACY: total tank volume [m³] used for both LOX and fuel")
+    fill_fraction: Optional[float] = Field(
+        default=None,
+        ge=0,
+        lt=1,
+        description="LEGACY: propellant fill fraction 0-1 (ullage_fraction = 1 - fill_fraction)",
+    )
     copv_volume_L: float = Field(gt=0, description="COPV free volume [L]")
     T_copv_K: float = Field(default=300.0, gt=0)
     T_ull_K: float = Field(default=293.0, gt=0)
@@ -496,6 +510,7 @@ class PressTestFitRequest(BaseModel):
 
 
 class PressTestRunResult(BaseModel):
+    row_index: int = Field(ge=0, description="0-based index of this run in the submitted rows[]")
     label: str
     tank: Literal["lox", "fuel"]
     cv_line_estimate: float
@@ -506,8 +521,22 @@ class PressTestRunResult(BaseModel):
     tank_dp_psi: float
 
 
+class PressTestRowDiagnostic(BaseModel):
+    """Per submitted row: whether it contributed to Cv_line and why not if skipped."""
+
+    row_index: int = Field(ge=0)
+    label: str
+    tank: Literal["lox", "fuel"]
+    status: Literal["ok", "skipped"]
+    message: str = Field(default="", description="Empty when ok; human-readable reason when skipped")
+
+
 class PressTestFitResponse(BaseModel):
     rows: List[PressTestRunResult]
+    row_diagnostics: List[PressTestRowDiagnostic] = Field(
+        default_factory=list,
+        description="One entry per submitted row, same order as request.rows",
+    )
     # Per-branch fitted values (None if no runs for that branch)
     cv_line_lox_fitted: Optional[float]
     cv_line_lox_std: Optional[float]
@@ -526,6 +555,10 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
 
     Each run must specify which tank it pressurizes (lox/fuel). Runs are grouped by tank
     and Cv_line is fitted independently for each branch.
+
+    COPV and tank time windows need not overlap: the fit uses the **union** of both windows
+    and holds each pressure trace constant outside its stated interval (so solenoid / line
+    delay between COPV and tank transients is allowed).
     """
     from copv.press_resupply_solver import fit_cv_line_from_static_test, series_cv
     from engine.pipeline.config_schemas import PressSystemConfig
@@ -538,7 +571,28 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
     )
 
     V_copv_m3 = request.copv_volume_L / 1000.0
-    V_ull_m3 = request.tank_volume_m3 * (1.0 - request.fill_fraction)
+
+    # Resolve tank volumes (new per-branch inputs preferred)
+    tank_vol_lox_m3 = (
+        float(request.tank_volume_lox_m3)
+        if request.tank_volume_lox_m3 is not None
+        else float(request.tank_volume_m3) if request.tank_volume_m3 is not None else None
+    )
+    tank_vol_fuel_m3 = (
+        float(request.tank_volume_fuel_m3)
+        if request.tank_volume_fuel_m3 is not None
+        else float(request.tank_volume_m3) if request.tank_volume_m3 is not None else None
+    )
+    if tank_vol_lox_m3 is None or tank_vol_fuel_m3 is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Provide tank_volume_lox_m3 and tank_volume_fuel_m3 (or legacy tank_volume_m3).",
+        )
+
+    def _ullage_volume_m3_for_row(row: PressTestRunRow) -> float:
+        tank_vol = tank_vol_lox_m3 if row.tank == "lox" else tank_vol_fuel_m3
+        uf = float(np.clip(float(row.ullage_fraction), 0.0, 1.0))
+        return float(max(tank_vol * uf, 1e-9))
 
     def _interp_2pt(t: np.ndarray, t0: float, tf: float, p0: float, pf: float) -> np.ndarray:
         if tf <= t0:
@@ -546,33 +600,83 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
         x = (t - t0) / (tf - t0)
         return p0 + x * (pf - p0)
 
+    def _interp_clamped(t: np.ndarray, t0: float, tf: float, p0: float, pf: float) -> np.ndarray:
+        """Linear between [t0, tf]; hold p0 / pf outside (models unknown pre/post window)."""
+        if tf <= t0:
+            raise ValueError("Invalid window: tf must be > t0.")
+        x = np.clip((t - t0) / (tf - t0), 0.0, 1.0)
+        return p0 + x * (pf - p0)
+
     row_results: List[PressTestRunResult] = []
+    row_diagnostics: List[PressTestRowDiagnostic] = []
     lox_estimates: List[float] = []
     fuel_estimates: List[float] = []
 
-    for row in request.rows:
-        t0 = max(float(row.copv_t_start_s), float(row.tank_t_start_s))
-        tf = min(float(row.copv_t_end_s), float(row.tank_t_end_s))
-        if tf <= t0:
+    for row_index, row in enumerate(request.rows):
+        label = (row.label or "").strip() or f"Run {row_index + 1}"
+
+        def _diag_skip(message: str) -> None:
+            row_diagnostics.append(
+                PressTestRowDiagnostic(
+                    row_index=row_index,
+                    label=label,
+                    tank=row.tank,
+                    status="skipped",
+                    message=message,
+                )
+            )
+
+        c0, c1 = float(row.copv_t_start_s), float(row.copv_t_end_s)
+        k0, k1 = float(row.tank_t_start_s), float(row.tank_t_end_s)
+        if c1 <= c0:
+            _diag_skip("COPV time window is invalid: copv_t_end_s must be greater than copv_t_start_s.")
+            continue
+        if k1 <= k0:
+            _diag_skip("Tank time window is invalid: tank_t_end_s must be greater than tank_t_start_s.")
             continue
 
-        t_mid = 0.5 * (t0 + tf)
-        times = np.array([t0, t_mid, tf], dtype=float)
+        # Union of COPV and tank observation windows (allows line/solenoid delay between sides).
+        # Each trace is clamped outside its own [start, end] so pre-delay / post-transient plateaus
+        # do not extrapolate the linear ramp past measured endpoints.
+        t0 = min(c0, k0)
+        tf = max(c1, k1)
+        if tf <= t0:
+            _diag_skip("Combined time span is invalid after merging COPV and tank windows.")
+            continue
 
-        P_copv = _interp_2pt(
+        if float(row.copv_p_end_psi) >= float(row.copv_p_start_psi):
+            _diag_skip(
+                "COPV pressure should fall over the window (copv_p_end_psi must be less than copv_p_start_psi)."
+            )
+            continue
+        if float(row.tank_p_end_psi) <= float(row.tank_p_start_psi):
+            _diag_skip(
+                "Tank pressure should rise over the window (tank_p_end_psi must be greater than tank_p_start_psi)."
+            )
+            continue
+
+        # Many samples along the hull — sparse (3-point) grids made np.gradient() noisy on
+        # short clamped ramps, so physically similar rows alternately inferred Cv_eff >= reg_cv.
+        n_samples = 33
+        times = np.linspace(t0, tf, n_samples, dtype=float)
+
+        P_copv = _interp_clamped(
             times,
-            float(row.copv_t_start_s), float(row.copv_t_end_s),
+            c0,
+            c1,
             float(row.copv_p_start_psi) * PSI_TO_PA,
             float(row.copv_p_end_psi) * PSI_TO_PA,
         )
-        P_tank = _interp_2pt(
+        P_tank = _interp_clamped(
             times,
-            float(row.tank_t_start_s), float(row.tank_t_end_s),
+            k0,
+            k1,
             float(row.tank_p_start_psi) * PSI_TO_PA,
             float(row.tank_p_end_psi) * PSI_TO_PA,
         )
 
         try:
+            V_ull_m3 = _ullage_volume_m3_for_row(row)
             fit = fit_cv_line_from_static_test(
                 times=times,
                 P_copv_Pa=P_copv,
@@ -583,11 +687,23 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
                 T_copv_K=float(request.T_copv_K),
                 T_ull_K=float(request.T_ull_K),
             )
-        except ValueError:
+        except ValueError as exc:
+            msg = str(exc)
+            if "Could not infer any finite Cv_line" in msg:
+                msg += (
+                    " Typical causes: (1) modeled reg_cv is lower than the hardware path implies—"
+                    "try increasing press_system.reg_cv in System Parameters; "
+                    "(2) time windows are very short so slopes were noisy (fitter now uses many samples along the hull)."
+                )
+            _diag_skip(msg)
             continue
 
         cv_line_est = float(fit["cv_line_median"])
         if not np.isfinite(cv_line_est) or cv_line_est <= 0:
+            _diag_skip(
+                f"Cv_line estimate was not a positive finite number (got {cv_line_est!r}). "
+                "Regulator Cv may be inconsistent with the inferred effective Cv."
+            )
             continue
 
         if row.tank == "lox":
@@ -595,9 +711,13 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
         else:
             fuel_estimates.append(cv_line_est)
 
+        row_diagnostics.append(
+            PressTestRowDiagnostic(row_index=row_index, label=label, tank=row.tank, status="ok", message="")
+        )
         row_results.append(
             PressTestRunResult(
-                label=row.label,
+                row_index=row_index,
+                label=label,
                 tank=row.tank,
                 cv_line_estimate=round(cv_line_est, 6),
                 mdot_copv_avg=round(float(np.mean(fit["mdot_copv_side"])), 8),
@@ -606,16 +726,6 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
                 copv_dp_psi=round(float(row.copv_p_start_psi - row.copv_p_end_psi), 2),
                 tank_dp_psi=round(float(row.tank_p_end_psi - row.tank_p_start_psi), 2),
             )
-        )
-
-    if not lox_estimates and not fuel_estimates:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "No valid Cv_line estimates from provided rows. "
-                "Check that COPV pressure drops and tank pressure rises are physically consistent, "
-                "and that COPV/tank windows overlap."
-            ),
         )
 
     def _summarise(estimates: List[float]) -> tuple:
@@ -636,18 +746,28 @@ async def fit_press_test(request: PressTestFitRequest) -> PressTestFitResponse:
     )
 
     all_ok = all(abs(r.cross_check_ratio - 1.0) < 0.10 for r in row_results) if row_results else False
-    parts = []
-    if cv_lox is not None:
-        parts.append(f"LOX Cv_line = {cv_lox:.4f} ± {cv_lox_std:.4f} ({len(lox_estimates)} runs, Cv_eff = {cv_eff_lox:.4f})")
-    if cv_fuel is not None:
-        parts.append(f"Fuel Cv_line = {cv_fuel:.4f} ± {cv_fuel_std:.4f} ({len(fuel_estimates)} runs, Cv_eff = {cv_eff_fuel:.4f})")
-    recommendation = "; ".join(parts) + ". " + (
-        "Cross-check ratios within ±10% — good." if all_ok
-        else "Some cross-check ratios outside ±10% — verify temperature assumptions."
-    )
+    parts: List[str] = []
+    if not lox_estimates and not fuel_estimates:
+        recommendation = (
+            "No row produced a valid Cv_line. See row diagnostics below for each submitted row."
+        )
+    else:
+        if cv_lox is not None:
+            parts.append(
+                f"LOX Cv_line = {cv_lox:.4f} ± {cv_lox_std:.4f} ({len(lox_estimates)} runs, Cv_eff = {cv_eff_lox:.4f})"
+            )
+        if cv_fuel is not None:
+            parts.append(
+                f"Fuel Cv_line = {cv_fuel:.4f} ± {cv_fuel_std:.4f} ({len(fuel_estimates)} runs, Cv_eff = {cv_eff_fuel:.4f})"
+            )
+        recommendation = "; ".join(parts) + ". " + (
+            "Cross-check ratios within ±10% — good." if all_ok
+            else "Some cross-check ratios outside ±10% — verify temperature assumptions."
+        )
 
     return PressTestFitResponse(
         rows=row_results,
+        row_diagnostics=row_diagnostics,
         cv_line_lox_fitted=round(cv_lox, 6) if cv_lox is not None else None,
         cv_line_lox_std=round(cv_lox_std, 6) if cv_lox_std is not None else None,
         cv_line_fuel_fitted=round(cv_fuel, 6) if cv_fuel is not None else None,
@@ -667,7 +787,14 @@ class SaveCvLineRequest(BaseModel):
 
 @router.post("/press_test_save_cv_line")
 async def save_cv_line(request: SaveCvLineRequest):
-    """Persist fitted Cv_line values (LOX / fuel) to the active config's press_system section."""
+    """Persist fitted Cv_line values (LOX / fuel) to the active config's press_system section.
+
+    Updates both the in-memory config and the backing YAML file on disk so the values
+    survive backend restarts and a 'Reload from Config (disk)'.
+    """
+    import yaml
+    from backend.routers.config import config_to_dict
+
     if not (hasattr(app_state, "config") and app_state.config is not None):
         raise HTTPException(status_code=400, detail="No config loaded.")
     if getattr(app_state.config, "press_system", None) is None:
@@ -675,6 +802,9 @@ async def save_cv_line(request: SaveCvLineRequest):
             status_code=400,
             detail="Config has no press_system section. Add press_system to your YAML first.",
         )
+    if request.cv_line_lox is None and request.cv_line_fuel is None:
+        raise HTTPException(status_code=400, detail="Provide at least one of cv_line_lox or cv_line_fuel.")
+
     saved: Dict[str, float] = {}
     if request.cv_line_lox is not None:
         app_state.config.press_system.line_cv_lox = float(request.cv_line_lox)
@@ -682,6 +812,28 @@ async def save_cv_line(request: SaveCvLineRequest):
     if request.cv_line_fuel is not None:
         app_state.config.press_system.line_cv_fuel = float(request.cv_line_fuel)
         saved["cv_line_fuel"] = float(request.cv_line_fuel)
-    if not saved:
-        raise HTTPException(status_code=400, detail="Provide at least one of cv_line_lox or cv_line_fuel.")
-    return {"status": "saved", **saved}
+
+    # Persist to the backing YAML file if one is known.
+    persisted_path: Optional[str] = None
+    if app_state.config_path:
+        try:
+            with open(app_state.config_path, "w", encoding="utf-8") as f:
+                yaml.dump(
+                    config_to_dict(app_state.config),
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
+                )
+            persisted_path = app_state.config_path
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Updated in-memory config but failed to write YAML to {app_state.config_path}: {exc}",
+            )
+
+    return {
+        "status": "saved",
+        "persisted_to_disk": persisted_path is not None,
+        "config_path": persisted_path,
+        **saved,
+    }

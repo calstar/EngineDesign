@@ -51,15 +51,18 @@ def n2_mass_flow_cv(
     if P_up_Pa <= P_down_Pa:
         return 0.0
     A = cv_to_effective_area(cv_eff)
-    rho_up = P_up_Pa / (R * T_up_K)
     ratio = P_down_Pa / P_up_Pa
     if ratio <= CRIT_PRESS_RATIO:
         # Choked flow
         factor = (2.0 / (gamma + 1)) ** ((gamma + 1) / (2 * (gamma - 1)))
         mdot = A * P_up_Pa * np.sqrt(gamma / (R * T_up_K)) * factor
     else:
-        # Subsonic — isentropic approximation
-        mdot = A * np.sqrt(2.0 * rho_up * (P_up_Pa - P_down_Pa))
+        # Subsonic (unchoked) — isentropic nozzle relation
+        #
+        # mdot = A * P0 * sqrt( (2*gamma)/(R*T0*(gamma-1)) *
+        #                       ( (P/P0)^(2/gamma) - (P/P0)^((gamma+1)/gamma) ) )
+        term = ratio ** (2.0 / gamma) - ratio ** ((gamma + 1.0) / gamma)
+        mdot = A * P_up_Pa * np.sqrt((2.0 * gamma) / (R * T_up_K * (gamma - 1.0)) * max(term, 0.0))
     return float(max(mdot, 0.0))
 
 
@@ -334,8 +337,11 @@ def fit_cv_line_from_static_test(
             factor = (2.0 / (gamma + 1)) ** ((gamma + 1) / (2 * (gamma - 1)))
             A_eff_i = mdot_copv[i] / (P_u * np.sqrt(gamma / (R * T_copv_K)) * factor)
         else:
-            rho_up = P_u / (R * T_copv_K)
-            A_eff_i = mdot_copv[i] / np.sqrt(2.0 * rho_up * (P_u - P_d))
+            term = ratio ** (2.0 / gamma) - ratio ** ((gamma + 1.0) / gamma)
+            denom = P_u * np.sqrt((2.0 * gamma) / (R * T_copv_K * (gamma - 1.0)) * max(term, 0.0))
+            if denom <= 0:
+                continue
+            A_eff_i = mdot_copv[i] / denom
         cv_eff_arr[i] = float(A_eff_i / 2.853e-5)
 
     cv_line_arr = np.full_like(times, np.nan, dtype=float)
