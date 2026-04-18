@@ -1,8 +1,8 @@
-"""Experiment router — cold-flow Cd characterization and real-propellant prediction.
+"""Experiment router — cold-flow CdA characterization and real-propellant prediction.
 
-Per-row: mdot = weight / dT,  Cd = mdot / (A * sqrt(2 * rho_water * dP))
-Exit pressure is taken as 0 (atmospheric reference), so dP = inlet pressure.
-Mean Cd then predicts real-propellant mdot at operating conditions.
+Per-row: mdot = weight / dT,  CdA = mdot / sqrt(2 * rho_water * dP)
+No orifice diameter required — CdA is measured directly.
+Mean CdA then predicts real-propellant mdot at operating conditions.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from engine.core.discharge import calculate_reynolds_number
 
 from backend.state import app_state
 
@@ -41,7 +40,6 @@ class ExperimentRow(BaseModel):
 
 class ExperimentRequest(BaseModel):
     propellant: Literal["fuel", "lox"]
-    choke_diameter_m: float      = Field(gt=0, description="Injector orifice diameter [m]")
     water_density: float         = Field(default=998.2, gt=0, description="Water density [kg/m³]")
     real_pressure_drop_pa: float = Field(gt=0, description="Real-propellant ΔP [Pa]")
     rows: List[ExperimentRow]    = Field(min_length=1)
@@ -53,23 +51,18 @@ class RowResult(BaseModel):
     weight: float
     delta_p_psi: float
     mdot: float
-    cd: float
+    cda_m2: float
 
 
 class ValidationResult(BaseModel):
     cavitation_number: float
     cavitation_warning: bool
-    re_water: float
-    re_real: float
-    re_ratio: float
-    re_similarity_warning: bool
 
 
 class ExperimentResponse(BaseModel):
     rows: List[RowResult]
-    mean_cd: float
-    std_cd: float
-    cda_m2: float
+    mean_cda_m2: float
+    std_cda_m2: float
     propellant_name: str
     rho_real: float
     mu_real: float
@@ -85,8 +78,6 @@ class ExperimentResponse(BaseModel):
 async def calculate_experiment(request: ExperimentRequest) -> ExperimentResponse:
     """Process cold-flow water test data and predict real-propellant mass flow rate."""
 
-    area = math.pi * (request.choke_diameter_m / 2.0) ** 2
-
     # ---- per-row calculations (dW = weight[i] - weight[i-1], weight[-1] = 0) -
     row_results: List[RowResult] = []
     for i, row in enumerate(request.rows):
@@ -99,24 +90,23 @@ async def calculate_experiment(request: ExperimentRequest) -> ExperimentResponse
         if dw < 0:
             raise HTTPException(status_code=400, detail=f"Row '{row.label}': weight decreased vs previous row — check row order.")
 
-        mdot        = dw / dt
-        delta_p_pa  = row.delta_p_psi * PSI_TO_PA
-        denominator = area * math.sqrt(2.0 * request.water_density * delta_p_pa)
+        mdot       = dw / dt
+        delta_p_pa = row.delta_p_psi * PSI_TO_PA
+        denominator = math.sqrt(2.0 * request.water_density * delta_p_pa)
 
         if denominator == 0:
-            raise HTTPException(status_code=400, detail=f"Row '{row.label}': zero denominator — check diameter and ΔP.")
+            raise HTTPException(status_code=400, detail=f"Row '{row.label}': zero denominator — check ΔP.")
 
-        cd = mdot / denominator
+        cda_m2 = mdot / denominator
         row_results.append(RowResult(
             label=row.label, dt=dt, weight=dw,
-            delta_p_psi=row.delta_p_psi, mdot=mdot, cd=cd,
+            delta_p_psi=row.delta_p_psi, mdot=mdot, cda_m2=cda_m2,
         ))
 
     # ---------------------------------------------------------- summary stats
-    cd_values = [r.cd for r in row_results]
-    mean_cd   = statistics.mean(cd_values)
-    std_cd    = statistics.stdev(cd_values) if len(cd_values) > 1 else 0.0
-    cda_m2    = mean_cd * area
+    cda_values   = [r.cda_m2 for r in row_results]
+    mean_cda_m2  = statistics.mean(cda_values)
+    std_cda_m2   = statistics.stdev(cda_values) if len(cda_values) > 1 else 0.0
 
     # ----------------------------------------- propellant properties from config
     if not app_state.has_config():
@@ -133,32 +123,19 @@ async def calculate_experiment(request: ExperimentRequest) -> ExperimentResponse
     propellant_name = getattr(fluid, "name", fluid_key.upper())
 
     # ----------------------------------------- real-propellant prediction
-    mdot_real = mean_cd * area * math.sqrt(2.0 * rho_real * request.real_pressure_drop_pa)
+    mdot_real = mean_cda_m2 * math.sqrt(2.0 * rho_real * request.real_pressure_drop_pa)
 
-    # ---------------------------------------------------------- validation
-    mean_mdot_water = statistics.mean([r.mdot for r in row_results])
-    mean_dp_pa      = statistics.mean([r.delta_p_psi * PSI_TO_PA for r in row_results])
-
-    v_water  = mean_mdot_water / (request.water_density * area) if area > 0 else 0.0
-    re_water = request.water_density * v_water * request.choke_diameter_m / WATER_VISCOSITY_PA_S
-
-    v_real   = mdot_real / (rho_real * area) if area > 0 else 0.0
-    re_real  = rho_real * v_real * request.choke_diameter_m / mu_real if mu_real > 0 else 0.0
-    re_ratio = (re_real / re_water) if re_water > 0 else float("inf")
-
+    # ---------------------------------------------------------- validation (cavitation only)
+    mean_dp_pa    = statistics.mean([r.delta_p_psi * PSI_TO_PA for r in row_results])
     cavitation_number = mean_dp_pa / WATER_VAPOR_PRESSURE_PA
 
     validation = ValidationResult(
         cavitation_number=cavitation_number,
         cavitation_warning=cavitation_number < 2.0,
-        re_water=re_water,
-        re_real=re_real,
-        re_ratio=re_ratio,
-        re_similarity_warning=abs(re_ratio - 1.0) > 0.5,
     )
 
     return ExperimentResponse(
-        rows=row_results, mean_cd=mean_cd, std_cd=std_cd, cda_m2=cda_m2,
+        rows=row_results, mean_cda_m2=mean_cda_m2, std_cda_m2=std_cda_m2,
         propellant_name=propellant_name, rho_real=rho_real, mu_real=mu_real,
         mdot_real=mdot_real, validation=validation,
     )
@@ -169,17 +146,16 @@ async def calculate_experiment(request: ExperimentRequest) -> ExperimentResponse
 # ---------------------------------------------------------------------------
 
 class PropellantTable(BaseModel):
-    choke_diameter_m: float = Field(gt=0, description="Choke orifice diameter [m]")
-    water_density: float    = Field(default=998.2, gt=0, description="Water density [kg/m³]")
+    water_density: float      = Field(default=998.2, gt=0, description="Water density [kg/m³]")
     rows: List[ExperimentRow] = Field(min_length=1)
 
 
 class FuelTable(PropellantTable):
-    choke_diameter_m: float = Field(default=0.0079, gt=0, description="Fuel choke equivalent diameter [m]")
+    pass
 
 
 class LoxTable(PropellantTable):
-    choke_diameter_m: float = Field(default=0.0074, gt=0, description="LOX choke equivalent diameter [m]")
+    pass
 
 
 class RunTimeseriesRequest(BaseModel):
@@ -187,9 +163,8 @@ class RunTimeseriesRequest(BaseModel):
     lox:  LoxTable
 
 
-def _extract_cd_pairs(table: PropellantTable) -> List[Tuple[float, float]]:
-    """Return list of (delta_p_pa, cd) from per-row water-test data."""
-    area   = math.pi * (table.choke_diameter_m / 2) ** 2
+def _extract_cda_pairs(table: PropellantTable) -> List[Tuple[float, float]]:
+    """Return list of (delta_p_pa, cda_m2) from per-row water-test data."""
     pairs: List[Tuple[float, float]] = []
     for i, row in enumerate(table.rows):
         dt    = row.tf - row.t0
@@ -200,41 +175,11 @@ def _extract_cd_pairs(table: PropellantTable) -> List[Tuple[float, float]]:
         if dw < 0:
             continue
         dp_pa = row.delta_p_psi * PSI_TO_PA
-        denom = area * math.sqrt(2.0 * table.water_density * dp_pa)
+        denom = math.sqrt(2.0 * table.water_density * dp_pa)
         if denom == 0:
             continue
         pairs.append((dp_pa, (dw / dt) / denom))
     return pairs
-
-
-def _mean_re_water(table: PropellantTable) -> float:
-    """Mean injector Re from cold-flow rows (matches frontend spreadsheet: Re = ρ u d / μ_water)."""
-    area = math.pi * (table.choke_diameter_m / 2.0) ** 2
-    if area <= 0:
-        return 0.0
-    values: List[float] = []
-    for i, row in enumerate(table.rows):
-        dt = row.tf - row.t0
-        if dt <= 0:
-            continue
-        prev_w = table.rows[i - 1].weight if i > 0 else 0.0
-        dw = row.weight - prev_w
-        if dw < 0:
-            continue
-        mdot = dw / dt
-        v = mdot / (table.water_density * area)
-        re = table.water_density * v * table.choke_diameter_m / WATER_VISCOSITY_PA_S
-        values.append(re)
-    return float(statistics.mean(values)) if values else 0.0
-
-
-def _re_hotfire_choke(mdot: float, rho: float, mu: float, choke_d_m: float) -> float:
-    """Re at operating conditions using choke diameter and area (consistent with cold-flow table)."""
-    area = math.pi * (choke_d_m / 2.0) ** 2
-    if area <= 0 or rho <= 0:
-        return 0.0
-    u = mdot / (rho * area)
-    return calculate_reynolds_number(rho, u, choke_d_m, mu)
 
 
 def _within_two_orders_of_magnitude(sim: float, ref: float) -> bool:
@@ -245,10 +190,10 @@ def _within_two_orders_of_magnitude(sim: float, ref: float) -> bool:
     return 1e-2 <= ratio <= 1e2
 
 
-def _fit_cd_sqrt_dp(pairs: List[Tuple[float, float]]) -> Tuple[float, float]:
+def _fit_cda_sqrt_dp(pairs: List[Tuple[float, float]]) -> Tuple[float, float]:
     """
-    Fit Cd as a linear function of sqrt(ΔP):
-        Cd = a*sqrt(ΔP_pa) + b
+    Fit CdA as a linear function of sqrt(ΔP):
+        CdA = a*sqrt(ΔP_pa) + b  [m²]
 
     Returns:
         (a, b)
@@ -256,35 +201,34 @@ def _fit_cd_sqrt_dp(pairs: List[Tuple[float, float]]) -> Tuple[float, float]:
     if not pairs:
         return 0.0, 0.0
     if len(pairs) == 1:
-        # Constant Cd model: a=0, b=Cd
         return 0.0, float(pairs[0][1])
 
-    dp = np.asarray([p for p, _ in pairs], dtype=float)
-    cd = np.asarray([c for _, c in pairs], dtype=float)
-    mask = np.isfinite(dp) & np.isfinite(cd) & (dp > 0.0)
-    dp = dp[mask]
-    cd = cd[mask]
+    dp  = np.asarray([p for p, _ in pairs], dtype=float)
+    cda = np.asarray([c for _, c in pairs], dtype=float)
+    mask = np.isfinite(dp) & np.isfinite(cda) & (dp > 0.0)
+    dp  = dp[mask]
+    cda = cda[mask]
     if dp.size == 0:
         return 0.0, 0.0
     if dp.size == 1:
-        return 0.0, float(cd[0])
+        return 0.0, float(cda[0])
 
     x = np.sqrt(dp)
-    y = cd
+    y = cda
     a, b = np.polyfit(x, y, 1)
     if not np.isfinite(a) or not np.isfinite(b):
         return 0.0, float(np.nanmean(y)) if y.size else 0.0
     return float(a), float(b)
 
 
-def _cd_from_fit(dp_pa: float, a: float, b: float) -> float:
-    """Evaluate fitted Cd model at ΔP (Pa) with safety clamps."""
+def _cda_from_fit(dp_pa: float, a: float, b: float) -> float:
+    """Evaluate fitted CdA model at ΔP (Pa) with safety clamps."""
     if not np.isfinite(dp_pa) or dp_pa <= 0.0:
         return 0.0
-    cd = a * math.sqrt(dp_pa) + b
-    if not np.isfinite(cd):
+    cda = a * math.sqrt(dp_pa) + b
+    if not np.isfinite(cda):
         return 0.0
-    return float(max(0.0, cd))
+    return float(max(0.0, cda))
 
 
 def _segments_to_curve_pa(segments, n_points: int) -> np.ndarray:
@@ -324,13 +268,13 @@ async def run_timeseries(request: RunTimeseriesRequest):
 
     from engine.core.runner import PintleEngineRunner
 
-    # ---- extract (ΔP, Cd) characterisation tables ----
-    fuel_pairs = _extract_cd_pairs(request.fuel)
-    lox_pairs  = _extract_cd_pairs(request.lox)
+    # ---- extract (ΔP, CdA) characterisation tables ----
+    fuel_pairs = _extract_cda_pairs(request.fuel)
+    lox_pairs  = _extract_cda_pairs(request.lox)
     if not fuel_pairs:
-        raise HTTPException(status_code=400, detail="Fuel table: not enough valid rows to compute Cd.")
+        raise HTTPException(status_code=400, detail="Fuel table: not enough valid rows to compute CdA.")
     if not lox_pairs:
-        raise HTTPException(status_code=400, detail="LOX table: not enough valid rows to compute Cd.")
+        raise HTTPException(status_code=400, detail="LOX table: not enough valid rows to compute CdA.")
 
     # ---- get pressure curves from config (hotfire-representative) ----
     cfg_active = app_state.config
@@ -353,52 +297,28 @@ async def run_timeseries(request: RunTimeseriesRequest):
     P_lox_curve_pa  = _segments_to_curve_pa(pcfg.lox_segments, n_points=n_points)
     P_fuel_curve_pa = _segments_to_curve_pa(pcfg.fuel_segments, n_points=n_points)
 
-    # ---- deep-copy config and override injector geometry ----
+    # ---- deep-copy config; geometry stays as-is (CdA overrides mass flow) ----
     cfg = copy.deepcopy(app_state.config)
 
-    # LOX — simple circular orifice
-    cfg.injector.geometry.lox.n_orifices = 1
-    cfg.injector.geometry.lox.d_orifice  = request.lox.choke_diameter_m
+    # ---- fit/extrapolate CdA(ΔP) = a*sqrt(ΔP) + b  [m²] ----
+    a_fuel, b_fuel = _fit_cda_sqrt_dp(fuel_pairs)
+    a_lox,  b_lox  = _fit_cda_sqrt_dp(lox_pairs)
 
-    # Fuel — annular gap: A = pi*h*(2R + h), solve for h
-    R_tip        = cfg.injector.geometry.fuel.d_pintle_tip / 2
-    A_fuel_tgt   = math.pi * (request.fuel.choke_diameter_m / 2) ** 2
-    h_gap        = -R_tip + math.sqrt(R_tip ** 2 + A_fuel_tgt / math.pi)
-    cfg.injector.geometry.fuel.h_gap = max(h_gap, 1e-6)
-
-    # ---- fit/extrapolate Cd(ΔP) = a*sqrt(ΔP) + b ----
-    a_fuel, b_fuel = _fit_cd_sqrt_dp(fuel_pairs)
-    a_lox,  b_lox  = _fit_cd_sqrt_dp(lox_pairs)
-
-    # ---- install fit coefficients on discharge configs (done once, not per-step) ----
-    # The injector solver will re-evaluate Cd = a·√(ΔP_inj) + b at each Pc iteration
-    # using the *actual* injector ΔP = P_inj − Pc, fixing the previous bug where Cd
-    # was evaluated at the full tank pressure (equivalent to cold-flow ΔP ≈ 0 back-pressure).
-    cfg.discharge["oxidizer"].cd_dp_fit_a = a_lox
-    cfg.discharge["oxidizer"].cd_dp_fit_b = b_lox
-    cfg.discharge["oxidizer"].a_Re        = 0.0
-    cfg.discharge["fuel"].cd_dp_fit_a     = a_fuel
-    cfg.discharge["fuel"].cd_dp_fit_b     = b_fuel
-    cfg.discharge["fuel"].a_Re            = 0.0
+    # ---- install CdA fit coefficients on discharge configs (done once, not per-step) ----
+    # The injector solver will re-evaluate CdA = a·√(ΔP_inj) + b at each Pc iteration.
+    cfg.discharge["oxidizer"].cda_fit_a = a_lox
+    cfg.discharge["oxidizer"].cda_fit_b = b_lox
+    cfg.discharge["fuel"].cda_fit_a     = a_fuel
+    cfg.discharge["fuel"].cda_fit_b     = b_fuel
 
     # ---- build runner ----
     runner = PintleEngineRunner(cfg)
-
-    rho_f = cfg.fluids["fuel"].density
-    mu_f  = cfg.fluids["fuel"].viscosity
-    rho_o = cfg.fluids["oxidizer"].density
-    mu_o  = cfg.fluids["oxidizer"].viscosity
-
-    mean_re_water_fuel = _mean_re_water(request.fuel)
-    mean_re_water_lox  = _mean_re_water(request.lox)
 
     # ---- per-step loop ----
     keys = ["Pc", "mdot_O", "mdot_F", "F", "Isp", "MR", "Cd_O", "Cd_F",
             "delta_p_injector_O", "delta_p_injector_F"]
     out  = {k: np.zeros(len(times)) for k in keys}
     failures: List[str] = []
-    re_hot_f_samples: List[float] = []
-    re_hot_o_samples: List[float] = []
 
     for i in range(len(times)):
         P_O = float(P_lox_curve_pa[i])
@@ -413,12 +333,6 @@ async def run_timeseries(request: RunTimeseriesRequest):
             inj = pt.get("injector_pressure", {}) or {}
             out["delta_p_injector_O"][i] = inj.get("delta_p_injector_O") or 0.0
             out["delta_p_injector_F"][i] = inj.get("delta_p_injector_F") or 0.0
-            mdot_F = float(pt.get("mdot_F", 0.0))
-            mdot_O = float(pt.get("mdot_O", 0.0))
-            if mdot_F > 0.0:
-                re_hot_f_samples.append(_re_hotfire_choke(mdot_F, rho_f, mu_f, request.fuel.choke_diameter_m))
-            if mdot_O > 0.0:
-                re_hot_o_samples.append(_re_hotfire_choke(mdot_O, rho_o, mu_o, request.lox.choke_diameter_m))
         except Exception as e:
             msg = f"step {i} failed (P_O={P_O:.0f} Pa, P_F={P_F:.0f} Pa): {e}"
             failures.append(msg)
@@ -427,35 +341,20 @@ async def run_timeseries(request: RunTimeseriesRequest):
     if failures and len(failures) == len(times):
         raise HTTPException(status_code=500, detail=f"Time-series failed for every step. First error: {failures[0]}")
 
-    mean_re_hotfire_fuel = float(statistics.mean(re_hot_f_samples)) if re_hot_f_samples else 0.0
-    mean_re_hotfire_lox  = float(statistics.mean(re_hot_o_samples)) if re_hot_o_samples else 0.0
-
-    re_similarity = {
-        "mean_re_water_fuel":     mean_re_water_fuel,
-        "mean_re_water_lox":      mean_re_water_lox,
-        "mean_re_hotfire_fuel":   mean_re_hotfire_fuel,
-        "mean_re_hotfire_lox":    mean_re_hotfire_lox,
-        "ratio_hotfire_to_water_fuel": (mean_re_hotfire_fuel / mean_re_water_fuel) if mean_re_water_fuel > 0.0 else None,
-        "ratio_hotfire_to_water_lox":  (mean_re_hotfire_lox / mean_re_water_lox) if mean_re_water_lox > 0.0 else None,
-        "fuel_within_two_orders": _within_two_orders_of_magnitude(mean_re_hotfire_fuel, mean_re_water_fuel),
-        "lox_within_two_orders":  _within_two_orders_of_magnitude(mean_re_hotfire_lox, mean_re_water_lox),
-    }
-
     return {
         "status":  "success",
         "t":       times.tolist(),
         "results": {k: v.tolist() for k, v in out.items()},
-        "fuel_cd_pressure_pairs": fuel_pairs,
-        "lox_cd_pressure_pairs":  lox_pairs,
+        "fuel_cda_pressure_pairs": fuel_pairs,
+        "lox_cda_pressure_pairs":  lox_pairs,
         "pressure_curves_used": {
             "P_tank_O_pa": P_lox_curve_pa.tolist(),
             "P_tank_F_pa": P_fuel_curve_pa.tolist(),
         },
-        "cd_fit": {
-            "fuel": {"model": "Cd = a*sqrt(dP_pa) + b", "a": a_fuel, "b": b_fuel},
-            "lox":  {"model": "Cd = a*sqrt(dP_pa) + b", "a": a_lox,  "b": b_lox},
+        "cda_fit": {
+            "fuel": {"model": "CdA = a*sqrt(dP_pa) + b [m²]", "a": a_fuel, "b": b_fuel},
+            "lox":  {"model": "CdA = a*sqrt(dP_pa) + b [m²]", "a": a_lox,  "b": b_lox},
         },
-        "re_similarity": re_similarity,
     }
 
 

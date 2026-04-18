@@ -5,7 +5,7 @@ import type { RunnerResults, EngineConfig } from '../api/client';
 function hasCdFit(config: EngineConfig | null): boolean {
   const d = config?.discharge as Record<string, unknown> | undefined;
   const fuel = d?.fuel as Record<string, unknown> | undefined;
-  return fuel?.cd_dp_fit_a != null;
+  return fuel?.cda_fit_a != null;
 }
 import { ResultsDisplay } from './ResultsDisplay';
 

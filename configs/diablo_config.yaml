@@ -176,8 +176,8 @@ discharge:
     use_temperature_correction: false
     T_ref: 300.0
     a_T: 0.0
-    cd_dp_fit_a: -8.439015607277476e-05
-    cd_dp_fit_b: 0.45010589750218527
+    cda_fit_a: -4.136526910650889e-09
+    cda_fit_b: 2.2062705465965105e-05
   oxidizer:
     Cd_inf: 0.45
     a_Re: 0.15
@@ -188,8 +188,8 @@ discharge:
     use_temperature_correction: false
     T_ref: 90.0
     a_T: 0.0
-    cd_dp_fit_a: 1.1323713617465921e-05
-    cd_dp_fit_b: 0.44736874964898765
+    cda_fit_a: 4.870148435590843e-10
+    cda_fit_b: 1.924061566582445e-05
 spray:
   momentum_flux_ratio: true
   spray_angle:

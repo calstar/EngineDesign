@@ -178,7 +178,7 @@ function massFromLiquidLiters(
 function hasCdFit(config: EngineConfig | null): boolean {
   const d = config?.discharge as Record<string, unknown> | undefined;
   const fuel = d?.fuel as Record<string, unknown> | undefined;
-  return fuel?.cd_dp_fit_a != null;
+  return fuel?.cda_fit_a != null;
 }
 
 /** Expand a list of PWM segments into (t_open, t_close) intervals for the API. */

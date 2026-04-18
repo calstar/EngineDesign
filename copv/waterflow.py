@@ -7,9 +7,9 @@ back-pressure — no combustion, no chamber pressure.
 
 Physics:
 - Tank blowdown uses the same polytropic N2 expansion as hot-fire blowdown
-- Cd is computed via the same cd_from_re(Re) model the hot-fire engine uses,
+- CdA is computed via the same effective_cda() model the hot-fire engine uses,
   with water density/viscosity substituted for propellant properties.
-  If the discharge config has cd_dp_fit_a/b set (cold-flow empirical fit),
+  If the discharge config has cda_fit_a/b set (cold-flow empirical fit),
   those are used automatically instead.
 - Cd_override bypasses cd_from_re entirely when you want to manually tune
   against a specific test.
@@ -24,7 +24,7 @@ from typing import Optional
 
 from copv.blowdown_solver import simulate_coupled_blowdown
 from engine.core.geometry import get_effective_areas, get_hydraulic_diameters
-from engine.core.discharge import cd_from_re, calculate_reynolds_number
+from engine.core.discharge import effective_cda, calculate_reynolds_number
 from engine.pipeline.feed_loss import delta_p_feed
 
 
@@ -49,9 +49,9 @@ def simulate_waterflow(
     Simulate a bench water flow test.
 
     Both tanks are treated as containing water (rho_water) pressurized by N2.
-    Flow through the injector uses the same cd_from_re model as hot-fire, with
+    Flow through the injector uses the same effective_cda() model as hot-fire, with
     water density/viscosity substituted. If the discharge config has a cold-flow
-    empirical fit (cd_dp_fit_a/b), that is used automatically.
+    empirical fit (cda_fit_a/b), that is used automatically.
 
     Parameters
     ----------
@@ -112,16 +112,17 @@ def simulate_waterflow(
     feed_O = config.feed_system["oxidizer"]
     feed_F = config.feed_system["fuel"]
 
-    def _compute_Cd(A: float, d_hyd: float, discharge_cfg, dp_inj: float, mdot_guess: float) -> float:
-        """Compute Cd via cd_from_re with water properties."""
+    def _compute_CdA(A: float, d_hyd: float, discharge_cfg, dp_inj: float, mdot_guess: float) -> float:
+        """Compute CdA via effective_cda() with water properties."""
         u = mdot_guess / (rho_water * A) if (rho_water * A) > 0 else 0.0
         Re = calculate_reynolds_number(rho_water, u, d_hyd, mu_water)
-        return cd_from_re(
-            Re,
+        return effective_cda(
             discharge_cfg,
-            P_inlet=None,       # no pressure correction for water (near-incompressible)
+            A,
+            dp_inj,
+            Re,
+            P_inlet=None,
             T_inlet=T_water_K,
-            delta_p_inj=dp_inj,
         )
 
     def _waterflow_evaluator(P_lox_Pa: float, P_fuel_Pa: float):
@@ -131,13 +132,17 @@ def simulate_waterflow(
         Mirrors the hot-fire pintle injector iteration:
           1. Estimate feed losses from current mdot
           2. Compute injector ΔP
-          3. Compute Re → Cd via cd_from_re (water properties)
+          3. Compute Re → CdA via effective_cda() (water properties)
           4. Update mdot
           5. Repeat 3 times for self-consistency
         """
-        # Initial mdot guess using Cd_inf at full tank pressure
-        mdot_O = discharge_O.Cd_inf * A_LOX * np.sqrt(max(0.0, 2 * rho_water * (P_lox_Pa - P_ambient_Pa)))
-        mdot_F = discharge_F.Cd_inf * A_fuel * np.sqrt(max(0.0, 2 * rho_water * (P_fuel_Pa - P_ambient_Pa)))
+        # Initial mdot guess using Cd_inf * A (or cda_fit_b if set) at full tank pressure
+        dp_O_guess = max(0.0, P_lox_Pa - P_ambient_Pa)
+        dp_F_guess = max(0.0, P_fuel_Pa - P_ambient_Pa)
+        CdA_O_init = effective_cda(discharge_O, A_LOX, dp_O_guess, 1e4, P_inlet=None, T_inlet=T_water_K)
+        CdA_F_init = effective_cda(discharge_F, A_fuel, dp_F_guess, 1e4, P_inlet=None, T_inlet=T_water_K)
+        mdot_O = CdA_O_init * np.sqrt(max(0.0, 2 * rho_water * dp_O_guess))
+        mdot_F = CdA_F_init * np.sqrt(max(0.0, 2 * rho_water * dp_F_guess))
 
         for _ in range(5):
             # Feed losses
@@ -156,11 +161,11 @@ def simulate_waterflow(
             dp_inj_O = max(0.0, P_inj_O - P_ambient_Pa)
             dp_inj_F = max(0.0, P_inj_F - P_ambient_Pa)
 
-            Cd_O = _compute_Cd(A_LOX, d_hyd_O, discharge_O, dp_inj_O, mdot_O)
-            Cd_F = _compute_Cd(A_fuel, d_hyd_F, discharge_F, dp_inj_F, mdot_F)
+            CdA_O = _compute_CdA(A_LOX, d_hyd_O, discharge_O, dp_inj_O, mdot_O)
+            CdA_F = _compute_CdA(A_fuel, d_hyd_F, discharge_F, dp_inj_F, mdot_F)
 
-            mdot_O = Cd_O * A_LOX * np.sqrt(max(0.0, 2 * rho_water * dp_inj_O))
-            mdot_F = Cd_F * A_fuel * np.sqrt(max(0.0, 2 * rho_water * dp_inj_F))
+            mdot_O = CdA_O * np.sqrt(max(0.0, 2 * rho_water * dp_inj_O))
+            mdot_F = CdA_F * np.sqrt(max(0.0, 2 * rho_water * dp_inj_F))
 
         return float(mdot_O), float(mdot_F)
 

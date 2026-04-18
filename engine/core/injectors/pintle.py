@@ -9,7 +9,7 @@ import numpy as np
 from engine.pipeline.config_schemas import PintleEngineConfig, PintleInjectorConfig
 from engine.pipeline.feed_loss import delta_p_feed
 from engine.pipeline.thermal.regen_cooling import delta_p_regen_channels
-from engine.core.discharge import cd_from_re, calculate_reynolds_number
+from engine.core.discharge import cd_from_re, calculate_reynolds_number, effective_cda
 from engine.core.geometry import get_effective_areas, get_hydraulic_diameters
 from engine.core.spray import (
     momentum_flux_ratio,
@@ -182,15 +182,16 @@ class PintleInjector(InjectorModel):
             # But these should be configurable, not hardcoded
             T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)  # Use config if available
             T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)  # Use config if available
-            Cd_O_quick_base = cd_from_re(Re_O_quick, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O, delta_p_inj=delta_p_inj_O)
-            Cd_F_quick_base = cd_from_re(Re_F_quick, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F, delta_p_inj=delta_p_inj_F)
-            _fit_O = discharge_O.cd_dp_fit_a is not None and discharge_O.cd_dp_fit_b is not None
-            _fit_F = discharge_F.cd_dp_fit_a is not None and discharge_F.cd_dp_fit_b is not None
-            Cd_O_quick = Cd_O_quick_base if _fit_O else min(Cd_O_quick_base, Cd_O_eff)
-            Cd_F_quick = Cd_F_quick_base if _fit_F else min(Cd_F_quick_base, Cd_F_eff)
+            CdA_O_quick = effective_cda(discharge_O, A_LOX, delta_p_inj_O, Re_O_quick, P_inlet=P_inj_O, T_inlet=T_tank_O)
+            CdA_F_quick = effective_cda(discharge_F, A_fuel, delta_p_inj_F, Re_F_quick, P_inlet=P_inj_F, T_inlet=T_tank_F)
+            # In Re-based mode, cap quick estimate at spray-constrained effective Cd
+            if discharge_O.cda_fit_a is None:
+                CdA_O_quick = min(CdA_O_quick, Cd_O_eff * A_LOX)
+            if discharge_F.cda_fit_a is None:
+                CdA_F_quick = min(CdA_F_quick, Cd_F_eff * A_fuel)
 
-            mdot_O = Cd_O_quick * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O)
-            mdot_F = Cd_F_quick * A_fuel * np.sqrt(2 * rho_F * delta_p_inj_F)
+            mdot_O = CdA_O_quick * np.sqrt(2 * rho_O * delta_p_inj_O)
+            mdot_F = CdA_F_quick * np.sqrt(2 * rho_F * delta_p_inj_F)
 
         delta_p_inj_O = max(0.0, P_inj_O - Pc)
         delta_p_inj_F = max(0.0, P_inj_F - Pc)
@@ -209,22 +210,28 @@ class PintleInjector(InjectorModel):
         # CRITICAL FIX: Use same temperature values as above, not hardcoded
         T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)
         T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)
-        Cd_O_base = cd_from_re(Re_O, discharge_O, P_inlet=P_inj_O, T_inlet=T_tank_O, delta_p_inj=delta_p_inj_O)
-        Cd_F_base = cd_from_re(Re_F, discharge_F, P_inlet=P_inj_F, T_inlet=T_tank_F, delta_p_inj=delta_p_inj_F)
-        # In empirical-fit mode the fit already clips Cd internally; skip the
-        # Cd_eff spray-iteration cap so it doesn't freeze Cd at Cd_inf.
-        using_fit_O = discharge_O.cd_dp_fit_a is not None and discharge_O.cd_dp_fit_b is not None
-        using_fit_F = discharge_F.cd_dp_fit_a is not None and discharge_F.cd_dp_fit_b is not None
-        Cd_O = Cd_O_base if using_fit_O else min(Cd_O_base, Cd_O_eff)
-        Cd_F = Cd_F_base if using_fit_F else min(Cd_F_base, Cd_F_eff)
+        CdA_O = effective_cda(discharge_O, A_LOX, delta_p_inj_O, Re_O, P_inlet=P_inj_O, T_inlet=T_tank_O)
+        CdA_F = effective_cda(discharge_F, A_fuel, delta_p_inj_F, Re_F, P_inlet=P_inj_F, T_inlet=T_tank_F)
+        # In Re-based mode, cap at spray-constrained effective Cd
+        using_fit_O = discharge_O.cda_fit_a is not None
+        using_fit_F = discharge_F.cda_fit_a is not None
+        if not using_fit_O:
+            CdA_O = min(CdA_O, Cd_O_eff * A_LOX)
+        if not using_fit_F:
+            CdA_F = min(CdA_F, Cd_F_eff * A_fuel)
+        # Expose effective Cd for diagnostics (CdA / geometric area)
+        Cd_O_base = CdA_O / A_LOX if A_LOX > 0 else 0.0
+        Cd_F_base = CdA_F / A_fuel if A_fuel > 0 else 0.0
+        Cd_O = Cd_O_base
+        Cd_F = Cd_F_base
 
         if delta_p_inj_O > 0:
-            mdot_O = Cd_O * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O)
+            mdot_O = CdA_O * np.sqrt(2 * rho_O * delta_p_inj_O)
         else:
             mdot_O = 0.0
 
         if delta_p_inj_F > 0:
-            mdot_F = Cd_F * A_fuel * np.sqrt(2 * rho_F * delta_p_inj_F)
+            mdot_F = CdA_F * np.sqrt(2 * rho_F * delta_p_inj_F)
         else:
             mdot_F = 0.0
 
@@ -343,10 +350,14 @@ class PintleInjector(InjectorModel):
         # Reuses delta_p_inj_O/F from Pass 1; feed losses don't change enough at
         # this correction magnitude to warrant re-running the full feed_iter loop.
         if factor_O < 1.0 or factor_F < 1.0:
-            Cd_O = Cd_O_base if using_fit_O else min(Cd_O_base, Cd_O_eff)
-            Cd_F = Cd_F_base if using_fit_F else min(Cd_F_base, Cd_F_eff)
-            mdot_O = Cd_O * A_LOX * np.sqrt(2 * rho_O * delta_p_inj_O) if delta_p_inj_O > 0 else 0.0
-            mdot_F = Cd_F * A_fuel * np.sqrt(2 * rho_F * delta_p_inj_F) if delta_p_inj_F > 0 else 0.0
+            if not using_fit_O:
+                CdA_O = min(CdA_O, Cd_O_eff * A_LOX)
+            if not using_fit_F:
+                CdA_F = min(CdA_F, Cd_F_eff * A_fuel)
+            Cd_O = CdA_O / A_LOX if A_LOX > 0 else 0.0
+            Cd_F = CdA_F / A_fuel if A_fuel > 0 else 0.0
+            mdot_O = CdA_O * np.sqrt(2 * rho_O * delta_p_inj_O) if delta_p_inj_O > 0 else 0.0
+            mdot_F = CdA_F * np.sqrt(2 * rho_F * delta_p_inj_F) if delta_p_inj_F > 0 else 0.0
         # ---------------------------------------------------------------------------
 
         # CRITICAL: Recalculate feed losses one final time with converged mass flows

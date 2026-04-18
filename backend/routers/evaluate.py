@@ -64,8 +64,8 @@ async def evaluate(request: EvaluateRequest):
             cfg = copy.deepcopy(app_state.config)
             for fluid in ("oxidizer", "fuel"):
                 if fluid in cfg.discharge:
-                    cfg.discharge[fluid].cd_dp_fit_a = None
-                    cfg.discharge[fluid].cd_dp_fit_b = None
+                    cfg.discharge[fluid].cda_fit_a = None
+                    cfg.discharge[fluid].cda_fit_b = None
             runner = PintleEngineRunner(cfg)
         else:
             runner = app_state.runner

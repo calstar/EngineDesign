@@ -86,13 +86,13 @@ interface TimeseriesResponse {
     delta_p_injector_O: number[];
     delta_p_injector_F: number[];
   };
-  fuel_cd_pressure_pairs: [number, number][];
-  lox_cd_pressure_pairs:  [number, number][];
+  fuel_cda_pressure_pairs: [number, number][];
+  lox_cda_pressure_pairs:  [number, number][];
   pressure_curves_used?: {
     P_tank_O_pa: number[];
     P_tank_F_pa: number[];
   };
-  cd_fit?: {
+  cda_fit?: {
     fuel: { model: string; a: number; b: number };
     lox: { model: string; a: number; b: number };
   };
@@ -262,15 +262,14 @@ const COLS: ColDef[] = [
     },
   },
   {
-    kind: 'computed', key: 'cd', header: 'Cd', width: 80,
-    compute: (row, prevRow, chokeDiamM, waterRho) => {
+    kind: 'computed', key: 'cda_m2', header: 'CdA [m²]', width: 110,
+    compute: (row, prevRow, _chokeDiamM, waterRho) => {
       const dt = parseFloat(row.tf) - parseFloat(row.t0);
       const dw = parseFloat(row.weight) - (prevRow ? parseFloat(prevRow.weight) : 0);
       const dp = parseFloat(row.deltaP) * PSI_TO_PA;
-      if (!isFinite(dt) || dt <= 0 || !isFinite(dw) || dw < 0 || !isFinite(dp) || dp <= 0 || chokeDiamM <= 0 || waterRho <= 0) return '—';
-      const area = Math.PI * (chokeDiamM / 2) ** 2;
+      if (!isFinite(dt) || dt <= 0 || !isFinite(dw) || dw < 0 || !isFinite(dp) || dp <= 0 || waterRho <= 0) return '—';
       const mdot = dw / dt;
-      return (mdot / (area * Math.sqrt(2 * waterRho * dp))).toFixed(4);
+      return (mdot / Math.sqrt(2 * waterRho * dp)).toExponential(4);
     },
   },
   {
@@ -281,19 +280,6 @@ const COLS: ColDef[] = [
       return (dp / 2337).toFixed(2);
     },
     highlight: (val) => val === '—' ? null : parseFloat(val) >= 2 ? 'good' : 'warn',
-  },
-  {
-    kind: 'computed', key: 're_water', header: 'Re', width: 90,
-    compute: (row, prevRow, chokeDiamM, waterRho) => {
-      const dt = parseFloat(row.tf) - parseFloat(row.t0);
-      const dw = parseFloat(row.weight) - (prevRow ? parseFloat(prevRow.weight) : 0);
-      if (!isFinite(dt) || dt <= 0 || !isFinite(dw) || dw < 0 || chokeDiamM <= 0 || waterRho <= 0) return '—';
-      const area  = Math.PI * (chokeDiamM / 2) ** 2;
-      const mdot  = dw / dt;
-      const v     = mdot / (waterRho * area);
-      const re    = waterRho * v * chokeDiamM / 0.001;
-      return re.toExponential(2);
-    },
   },
 ];
 
@@ -798,20 +784,15 @@ function GridPanel({
   accentColor,
   rows,
   onChange,
-  chokeDiameterMm,
-  onChokeDiamChange,
   waterDensity,
 }: {
   title: string;
   accentColor: string;
   rows: RowInput[];
   onChange: (rows: RowInput[]) => void;
-  chokeDiameterMm: string;
-  onChokeDiamChange: (v: string) => void;
   waterDensity: string;
 }) {
-  const chokeDiamM = parseFloat(chokeDiameterMm) / 1000;
-  const waterRho   = parseFloat(waterDensity) || 998.2;
+  const waterRho = parseFloat(waterDensity) || 998.2;
 
   function copyAll() {
     const header = COLS.map(c => c.header).join('\t');
@@ -819,7 +800,7 @@ function GridPanel({
     const body = rows.map((r, i) => {
       const prev = rows[i - 1] ?? null;
       return INPUT_COLS.map(c => r[c.inputKey]).join('\t')
-        + '\t' + computedCols.map(c => c.compute(r, prev, chokeDiamM, waterRho)).join('\t');
+        + '\t' + computedCols.map(c => c.compute(r, prev, 0, waterRho)).join('\t');
     }).join('\n');
     navigator.clipboard.writeText(header + '\n' + body);
   }
@@ -847,19 +828,7 @@ function GridPanel({
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
-        <label className="text-xs text-[var(--color-text-secondary)] whitespace-nowrap">Choke Ø [mm]</label>
-        <input
-          type="number" step="0.01" min="0"
-          value={chokeDiameterMm}
-          onChange={e => onChokeDiamChange(e.target.value)}
-          className={inputCls}
-          placeholder="3.0"
-          style={{ maxWidth: 100 }}
-        />
-      </div>
-
-      <SpreadsheetGrid rows={rows} onChange={onChange} chokeDiameterMm={chokeDiameterMm} waterDensity={waterDensity} />
+      <SpreadsheetGrid rows={rows} onChange={onChange} chokeDiameterMm="0" waterDensity={waterDensity} />
     </div>
   );
 }
@@ -1730,9 +1699,7 @@ function PressureFeedExperiment({
 export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps) {
   const [activeTab, setActiveTab] = useState<ExperimentTab>('cold_flow');
 
-  const [chokeDiamFuelMm,  setChokeDiamFuelMm]  = useState('3.0');
-  const [chokeDiamLoxMm,   setChokeDiamLoxMm]   = useState('3.0');
-  const [waterDensity,     setWaterDensity]      = useState('998.2');
+  const [waterDensity, setWaterDensity] = useState('998.2');
   const [fuelRows, setFuelRows] = useState<RowInput[]>([
     { id: 1, label: 'Run 1', t0: '', tf: '', deltaP: '', weight: '' },
   ]);
@@ -1749,11 +1716,6 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
   async function handleCalculate() {
     setError(null);
     setResults(null);
-
-    const chokeFuelM = parseFloat(chokeDiamFuelMm) / 1000;
-    const chokeLoxM  = parseFloat(chokeDiamLoxMm)  / 1000;
-    if (isNaN(chokeFuelM) || chokeFuelM <= 0) { setError('Enter a valid Fuel choke diameter (mm).'); return; }
-    if (isNaN(chokeLoxM)  || chokeLoxM  <= 0) { setError('Enter a valid LOX choke diameter (mm).'); return; }
 
     function buildRows(rows: RowInput[], label: string) {
       const parsed = rows.map((r, i) => ({
@@ -1784,12 +1746,10 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           fuel: {
-            choke_diameter_m: chokeFuelM,
             water_density: parseFloat(waterDensity) || 998.2,
             rows: parsedFuel,
           },
           lox: {
-            choke_diameter_m: chokeLoxM,
             water_density: parseFloat(waterDensity) || 998.2,
             rows: parsedLox,
           },
@@ -1809,12 +1769,12 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
   }
 
   async function handleSaveCdToConfig() {
-    if (!results?.cd_fit) return;
+    if (!results?.cda_fit) return;
     setSaveStatus('saving');
     const res = await updateConfig({
       discharge: {
-        fuel:     { cd_dp_fit_a: results.cd_fit.fuel.a, cd_dp_fit_b: results.cd_fit.fuel.b },
-        oxidizer: { cd_dp_fit_a: results.cd_fit.lox.a,  cd_dp_fit_b: results.cd_fit.lox.b },
+        fuel:     { cda_fit_a: results.cda_fit.fuel.a, cda_fit_b: results.cda_fit.fuel.b },
+        oxidizer: { cda_fit_a: results.cda_fit.lox.a,  cda_fit_b: results.cda_fit.lox.b },
       },
     } as Partial<EngineConfig>);
     if (res.error) {
@@ -1832,7 +1792,7 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
       <div className="p-5 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
         <h2 className="text-xl font-bold text-[var(--color-text-primary)] mb-1">Cold-Flow Experiment</h2>
         <p className="text-sm text-[var(--color-text-secondary)]">
-          Characterize injector Cd from water flow tests, then run the engine time-series with interpolated per-step Cd.
+          Characterize injector CdA [m²] from water flow tests, then run the engine time-series with interpolated per-step CdA.
         </p>
       </div>
 
@@ -1857,8 +1817,6 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
           accentColor="#f97316"
           rows={fuelRows}
           onChange={setFuelRows}
-          chokeDiameterMm={chokeDiamFuelMm}
-          onChokeDiamChange={setChokeDiamFuelMm}
           waterDensity={waterDensity}
         />
         <GridPanel
@@ -1866,8 +1824,6 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
           accentColor="#60a5fa"
           rows={loxRows}
           onChange={setLoxRows}
-          chokeDiameterMm={chokeDiamLoxMm}
-          onChokeDiamChange={setChokeDiamLoxMm}
           waterDensity={waterDensity}
         />
       </div>
@@ -1909,7 +1865,7 @@ export function ExperimentMode({ config, onConfigUpdated }: ExperimentModeProps)
         }}
       >
         {[
-          { key: 'cold_flow' as ExperimentTab, label: 'Feed System Cd — Water Flow' },
+          { key: 'cold_flow' as ExperimentTab, label: 'Feed System CdA — Water Flow' },
           { key: 'press_feed' as ExperimentTab, label: 'Pressure Feed Experiment' },
         ].map(tab => (
           <button
@@ -2013,10 +1969,10 @@ function CdFitChart({
   return (
     <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
       <h3 className="text-sm font-semibold text-[var(--color-text-primary)] uppercase tracking-wider mb-1">
-        Cd Characterisation — Cold Flow Fit
+        CdA Characterisation — Cold Flow Fit
       </h3>
       <p className="text-xs text-[var(--color-text-secondary)] mb-4">
-        Cd = a·√ΔP<sub>pa</sub> + b &nbsp;·&nbsp; dots = measured, lines = extrapolated fit
+        CdA = a·√ΔP<sub>pa</sub> + b [m²] &nbsp;·&nbsp; dots = measured, lines = extrapolated fit
       </p>
       <ResponsiveContainer width="100%" height={260}>
         <ComposedChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 20 }}>
@@ -2033,7 +1989,7 @@ function CdFitChart({
           <YAxis
             stroke="var(--color-text-secondary)"
             tick={{ fill: 'var(--color-text-secondary)', fontSize: 11 }}
-            label={{ value: 'Cd', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)', fontSize: 11 }}
+            label={{ value: 'CdA [m²]', angle: -90, position: 'insideLeft', fill: 'var(--color-text-secondary)', fontSize: 11 }}
             domain={['auto', 'auto']}
           />
           <Tooltip content={tip} />
@@ -2220,9 +2176,9 @@ function TimeseriesResults({ results, onSaveCdToConfig, saveStatus }: {
     <div className="space-y-5">
       {/* Cd vs sqrt(ΔP) characterisation chart */}
       <CdFitChart
-        fuelPairs={results.fuel_cd_pressure_pairs}
-        loxPairs={results.lox_cd_pressure_pairs}
-        cdFit={results.cd_fit}
+        fuelPairs={results.fuel_cda_pressure_pairs}
+        loxPairs={results.lox_cda_pressure_pairs}
+        cdFit={results.cda_fit}
       />
 
       {/* Summary cards */}
@@ -2242,30 +2198,30 @@ function TimeseriesResults({ results, onSaveCdToConfig, saveStatus }: {
       )}
 
       {/* Fit + pressure curve metadata */}
-      {(results.cd_fit || results.pressure_curves_used) && (
+      {(results.cda_fit || results.pressure_curves_used) && (
         <div className="p-4 rounded-xl bg-[var(--color-bg-secondary)] border border-[var(--color-border)]">
           <h3 className="text-sm font-semibold text-[var(--color-text-primary)] uppercase tracking-wider mb-3">Operating Curves Used</h3>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-            {results.cd_fit && (
+            {results.cda_fit && (
               <div className="p-3 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-border)]">
-                <p className="text-xs text-[var(--color-text-secondary)] mb-1">Cd fit model</p>
-                <p className="text-[var(--color-text-primary)] font-mono text-xs">{results.cd_fit.fuel.model}</p>
+                <p className="text-xs text-[var(--color-text-secondary)] mb-1">CdA fit model</p>
+                <p className="text-[var(--color-text-primary)] font-mono text-xs">{results.cda_fit.fuel.model}</p>
                 <div className="mt-2 grid grid-cols-2 gap-2 font-mono text-xs">
                   <div>
                     <p className="text-[var(--color-text-secondary)]">Fuel a</p>
-                    <p className="text-[#f97316]">{results.cd_fit.fuel.a.toExponential(3)}</p>
+                    <p className="text-[#f97316]">{results.cda_fit.fuel.a.toExponential(3)}</p>
                   </div>
                   <div>
                     <p className="text-[var(--color-text-secondary)]">Fuel b</p>
-                    <p className="text-[#f97316]">{results.cd_fit.fuel.b.toFixed(4)}</p>
+                    <p className="text-[#f97316]">{results.cda_fit.fuel.b.toExponential(4)}</p>
                   </div>
                   <div>
                     <p className="text-[var(--color-text-secondary)]">LOX a</p>
-                    <p className="text-[#60a5fa]">{results.cd_fit.lox.a.toExponential(3)}</p>
+                    <p className="text-[#60a5fa]">{results.cda_fit.lox.a.toExponential(3)}</p>
                   </div>
                   <div>
                     <p className="text-[var(--color-text-secondary)]">LOX b</p>
-                    <p className="text-[#60a5fa]">{results.cd_fit.lox.b.toFixed(4)}</p>
+                    <p className="text-[#60a5fa]">{results.cda_fit.lox.b.toExponential(4)}</p>
                   </div>
                 </div>
                 <button
@@ -2273,7 +2229,7 @@ function TimeseriesResults({ results, onSaveCdToConfig, saveStatus }: {
                   disabled={saveStatus === 'saving'}
                   className="mt-3 w-full px-3 py-2 rounded-lg text-xs font-semibold transition-colors bg-amber-500 hover:bg-amber-400 text-black disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved to Config' : saveStatus === 'error' ? 'Save Failed' : 'Save Cd to Config'}
+                  {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved to Config' : saveStatus === 'error' ? 'Save Failed' : 'Save CdA to Config'}
                 </button>
               </div>
             )}
@@ -2302,8 +2258,8 @@ function TimeseriesResults({ results, onSaveCdToConfig, saveStatus }: {
 
       {/* Cd characterisation tables */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <CdTable title="Fuel Cd vs ΔP" accentColor="#f97316" pairs={results.fuel_cd_pressure_pairs} />
-        <CdTable title="LOX Cd vs ΔP"  accentColor="#60a5fa" pairs={results.lox_cd_pressure_pairs}  />
+        <CdTable title="Fuel CdA vs ΔP" accentColor="#f97316" pairs={results.fuel_cda_pressure_pairs} />
+        <CdTable title="LOX CdA vs ΔP"  accentColor="#60a5fa" pairs={results.lox_cda_pressure_pairs}  />
       </div>
 
       {/* All the same plots as Time-Series Analysis tab */}
@@ -2322,16 +2278,16 @@ function CdTable({ title, accentColor, pairs }: { title: string; accentColor: st
       <table style={{ borderCollapse: 'collapse', fontSize: 12, fontFamily: 'ui-monospace, monospace', width: '100%' }}>
         <thead>
           <tr>
-            {['ΔP [psi]', 'Cd'].map(h => (
+            {['ΔP [psi]', 'CdA [m²]'].map(h => (
               <th key={h} style={{ padding: '3px 8px', textAlign: 'right', fontSize: 11, fontWeight: 600, color: 'var(--color-text-secondary)', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>{h}</th>
             ))}
           </tr>
         </thead>
         <tbody>
-          {pairs.map(([dp_pa, cd], i) => (
+          {pairs.map(([dp_pa, cda], i) => (
             <tr key={i}>
               <td style={{ padding: '3px 8px', textAlign: 'right', color: 'var(--color-text-primary)' }}>{fmtN(dp_pa / PSI_TO_PA, 2)}</td>
-              <td style={{ padding: '3px 8px', textAlign: 'right', color: accentColor }}>{fmtN(cd, 4)}</td>
+              <td style={{ padding: '3px 8px', textAlign: 'right', color: accentColor }}>{cda.toExponential(4)}</td>
             </tr>
           ))}
         </tbody>

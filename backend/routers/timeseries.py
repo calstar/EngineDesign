@@ -99,8 +99,8 @@ def _runner_for_cd(use_cold_flow_cd: bool) -> PintleEngineRunner:
         cfg = copy.deepcopy(app_state.config)
         for fluid in ("oxidizer", "fuel"):
             if fluid in cfg.discharge:
-                cfg.discharge[fluid].cd_dp_fit_a = None
-                cfg.discharge[fluid].cd_dp_fit_b = None
+                cfg.discharge[fluid].cda_fit_a = None
+                cfg.discharge[fluid].cda_fit_b = None
         return PintleEngineRunner(cfg)
     return app_state.runner
 
