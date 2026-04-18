@@ -337,7 +337,7 @@ fuel_tank:
   fuel_tank_pos: 3.0
   mass: 4.596307181110419
   initial_pressure_psi: 579.5996703461636
-  tank_volume_m3: 0.00915
+  tank_volume_m3: 0.00779
 press_tank:
   press_h: 0.457
   press_radius: 0.0762
