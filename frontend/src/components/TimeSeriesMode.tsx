@@ -825,8 +825,8 @@ export function TimeSeriesMode({ config, onConfigLoaded }: TimeSeriesModeProps) 
               <span className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${useColdFlowCd ? 'translate-x-4' : 'translate-x-0'}`} />
             </button>
             <span className="text-sm text-[var(--color-text-secondary)]">
-              Use Cd Cold Flow&nbsp;
-              <span className="font-mono text-xs opacity-70">(Cd = a·√ΔP + b)</span>
+              Use CdA Cold Flow&nbsp;
+              <span className="font-mono text-xs opacity-70">(CdA = a·√ΔP + b)</span>
             </span>
           </div>
         )}

@@ -1206,14 +1206,12 @@ async def generate_from_segments(request: SegmentsRequest):
 
             else:
                 # ===== HOT-FIRE BLOWDOWN MODE =====
-                # Same runner for blowdown ODE mdots and downstream time-series — respects use_cold_flow_cd.
-                ts_runner = _runner_for_cd(request.use_cold_flow_cd)
-                config = ts_runner.config
+                config = app_state.runner.config
 
                 # Shared engine callback (used by both code paths below)
                 def engine_evaluator(P_lox_Pa: float, P_fuel_Pa: float):
                     try:
-                        res = ts_runner.evaluate(
+                        res = app_state.runner.evaluate(
                             P_tank_O=P_lox_Pa,
                             P_tank_F=P_fuel_Pa,
                             silent=True,
@@ -1292,7 +1290,7 @@ async def generate_from_segments(request: SegmentsRequest):
                     fuel_mass_kg   = np.asarray(pf["m_fuel_kg"], dtype=float)
 
                     data, summary = compute_timeseries_results(
-                        ts_runner,
+                        _runner_for_cd(request.use_cold_flow_cd),
                         times,
                         lox_curve_psi,
                         fuel_curve_psi,
@@ -1315,7 +1313,7 @@ async def generate_from_segments(request: SegmentsRequest):
                         evaluate_engine_fn=engine_evaluator,
                         P_lox_initial_Pa=request.lox_initial_pressure_psi * PSI_TO_PA,
                         P_fuel_initial_Pa=request.fuel_initial_pressure_psi * PSI_TO_PA,
-                        config=config,
+                        config=app_state.runner.config,
                         R_pressurant=296.803,
                         T_lox_gas_K=250.0,
                         T_fuel_gas_K=293.0,
@@ -1332,7 +1330,7 @@ async def generate_from_segments(request: SegmentsRequest):
                     fuel_mass_kg = blowdown_results["fuel"]["m_prop_kg"]
 
                     data, summary = compute_timeseries_results(
-                        ts_runner,
+                        _runner_for_cd(request.use_cold_flow_cd),
                         times,
                         lox_curve_psi,
                         fuel_curve_psi,

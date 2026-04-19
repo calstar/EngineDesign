@@ -328,15 +328,15 @@ lox_tank:
   lox_h: 1.14
   lox_radius: 0.06985
   ox_tank_pos: 0.8
-  mass: 8.904500646009808
-  initial_pressure_psi: 348.14337111866917
+  mass: 7.3
+  initial_pressure_psi: 550
   tank_volume_m3: 0.01265
 fuel_tank:
   rp1_h: 0.609
   rp1_radius: 0.0762
   fuel_tank_pos: 3.0
-  mass: 4.596307181110419
-  initial_pressure_psi: 579.5996703461636
+  mass: 4.00
+  initial_pressure_psi: 800
   tank_volume_m3: 0.00779
 press_tank:
   press_h: 0.457

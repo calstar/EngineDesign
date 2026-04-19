@@ -150,43 +150,16 @@ Where:
 
 ---
 
-## Cold-flow CdA mode (empirical)
-
-When both `cda_fit_a` and `cda_fit_b` are set on `DischargeConfig` (from water cold-flow characterization or the experiment UI), the solver uses an **effective discharge area** that can depend on injector pressure drop, instead of `Cd(Re) × A`:
-
-$$
-(CdA)(\Delta P) = a \sqrt{\Delta P_{\mathrm{inj}}} + b \quad [m^2]
-$$
-
-Mass flow remains the incompressible orifice form with that effective area:
-
-$$
-\dot{m} = (CdA)(\Delta P_{\mathrm{inj}}) \cdot \sqrt{2 \rho \Delta P_{\mathrm{inj}}}
-$$
-
-**Physical intent:** Cold-flow rows give $CdA = \dot{m} / \sqrt{2 \rho_{\mathrm{water}} \Delta P}$ at each tested $\Delta P$. For hot fire, the same $(CdA)(\Delta P)$ is multiplied by $\sqrt{2 \rho_{\mathrm{propellant}} \Delta P}$ at the **live** $\Delta P_{\mathrm{inj}} = P_{\mathrm{inj}} - P_c$ each chamber iteration. That is the usual **constant effective area vs. fluid density** assumption: geometry and losses set $CdA$, and density enters only through the Bernoulli prefactor.
-
-**Caveats:**
-
-- The linear-in-$\sqrt{\Delta P}$ model for $CdA$ is a **regression choice**; it can absorb Reynolds-dependent trends from water data that will not match LOX/RP-1 Reynolds exactly. In fit mode, `Re` is not used inside `effective_cda()`.
-- With the fit active, pintle (and related) injectors **do not** apply the spray-constrained `min(CdA, Cd_{\mathrm{eff}} \times A)$ cap** used in pure Reynolds mode, so the curve can exceed what the spray sub-model would otherwise cap.
-- `Cd_O` / `Cd_F` reported in results are $CdA / A_{\mathrm{geom}}$ for diagnostics when a fit is used, not necessarily a classical single-fluid $C_d$.
-
-**Time series and blowdown:** When “use cold-flow Cd” is toggled off in the API, a runner is built from a config copy with `cda_fit_*` cleared. Blowdown and pressure-fed tank integration use the **same** runner instance as the subsequent time-series evaluation so tank histories and chamber performance always share one discharge model.
-
----
-
 ## Source Files
 
 The Cd calculation is implemented in:
 
 | File | Purpose |
 |------|---------|
-| [`engine/core/discharge.py`](../engine/core/discharge.py) | `cd_from_re()`, `effective_cda()` (Re-based vs cold-flow fit) |
-| [`engine/pipeline/config_schemas.py`](../engine/pipeline/config_schemas.py) | `DischargeConfig` schema definition |
-| [`engine/core/injectors/pintle.py`](../engine/core/injectors/pintle.py) | Pintle injector integration |
-| [`backend/routers/timeseries.py`](../backend/routers/timeseries.py) | `_runner_for_cd()` for time-series / blowdown toggle |
-| [`configs/default.yaml`](../configs/default.yaml) | Default configuration values |
+| [`engine/core/discharge.py`](file:///Users/carlton/Downloads/STAR_ASF/EngineDesign/engine/core/discharge.py) | Core `cd_from_re()` function |
+| [`engine/pipeline/config_schemas.py`](file:///Users/carlton/Downloads/STAR_ASF/EngineDesign/engine/pipeline/config_schemas.py) | `DischargeConfig` schema definition |
+| [`engine/core/injectors/pintle.py`](file:///Users/carlton/Downloads/STAR_ASF/EngineDesign/engine/core/injectors/pintle.py) | Pintle injector integration |
+| [`configs/default.yaml`](file:///Users/carlton/Downloads/STAR_ASF/EngineDesign/configs/default.yaml) | Default configuration values |
 
 ---
 
