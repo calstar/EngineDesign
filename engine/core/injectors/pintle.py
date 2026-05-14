@@ -137,61 +137,50 @@ class PintleInjector(InjectorModel):
         delta_p_feed_F = 0.0
 
         for feed_iter in range(3):
-            # Calculate feed losses with current mass flows
-            # CRITICAL: Recalculate on each iteration to ensure consistency
             delta_p_feed_O = delta_p_feed(mdot_O, rho_O, feed_O, P_tank_O)
             delta_p_feed_F_base = delta_p_feed(mdot_F, rho_F, feed_F, P_tank_F)
 
-            # CRITICAL: Ensure feed loss is calculated - if it's still 0.0 with non-zero flow, something is wrong
             if delta_p_feed_O == 0.0 and mdot_O > 0.01:
                 import warnings
                 K0_val = feed_O.get('K0', 'N/A') if isinstance(feed_O, dict) else getattr(feed_O, 'K0', 'N/A')
                 warnings.warn(f"[WARNING] LOX feed loss is 0.0 with mdot_O={mdot_O:.4f} kg/s. Check feed system config (K0={K0_val}, K_eff should be > 0).")
 
-        # CRITICAL: Ensure final feed losses are stored (recalculate one more time after loop)
-        delta_p_feed_O = delta_p_feed(mdot_O, rho_O, feed_O, P_tank_O)
-        delta_p_feed_F_base = delta_p_feed(mdot_F, rho_F, feed_F, P_tank_F)
-        if config.regen_cooling is not None and config.regen_cooling.enabled:
-            delta_p_regen = delta_p_regen_channels(
-                mdot_F,
-                rho_F,
-                mu_F,
-                config.regen_cooling,
-                P_tank_F,
-            )
-            delta_p_feed_F = delta_p_feed_F_base + delta_p_regen
-        else:
-            delta_p_feed_F = delta_p_feed_F_base
+            if config.regen_cooling is not None and config.regen_cooling.enabled:
+                delta_p_regen = delta_p_regen_channels(
+                    mdot_F,
+                    rho_F,
+                    mu_F,
+                    config.regen_cooling,
+                    P_tank_F,
+                )
+                delta_p_feed_F = delta_p_feed_F_base + delta_p_regen
+            else:
+                delta_p_feed_F = delta_p_feed_F_base
 
-        # CRITICAL: Calculate injector pressures AFTER feed loss calculation (always, not just in else block)
-        P_inj_O = P_tank_O - delta_p_feed_O
-        P_inj_F = P_tank_F - delta_p_feed_F
+            P_inj_O = P_tank_O - delta_p_feed_O
+            P_inj_F = P_tank_F - delta_p_feed_F
 
-        if feed_iter < 2:
-            delta_p_inj_O = max(0.0, P_inj_O - Pc)
-            delta_p_inj_F = max(0.0, P_inj_F - Pc)
+            if feed_iter < 2:
+                delta_p_inj_O = max(0.0, P_inj_O - Pc)
+                delta_p_inj_F = max(0.0, P_inj_F - Pc)
 
-            u_O_quick = np.sqrt(2 * delta_p_inj_O / rho_O) if delta_p_inj_O > 0 else 0.0
-            u_F_quick = np.sqrt(2 * delta_p_inj_F / rho_F) if delta_p_inj_F > 0 else 0.0
+                u_O_quick = np.sqrt(2 * delta_p_inj_O / rho_O) if delta_p_inj_O > 0 else 0.0
+                u_F_quick = np.sqrt(2 * delta_p_inj_F / rho_F) if delta_p_inj_F > 0 else 0.0
 
-            Re_O_quick = calculate_reynolds_number(rho_O, u_O_quick, d_hyd_O, mu_O)
-            Re_F_quick = calculate_reynolds_number(rho_F, u_F_quick, d_hyd_F, mu_F)
+                Re_O_quick = calculate_reynolds_number(rho_O, u_O_quick, d_hyd_O, mu_O)
+                Re_F_quick = calculate_reynolds_number(rho_F, u_F_quick, d_hyd_F, mu_F)
 
-            # CRITICAL FIX: Remove hardcoded temperatures - should come from config or fluid properties
-            # LOX is typically at saturation temperature ~90K, RP-1 at ambient ~300K
-            # But these should be configurable, not hardcoded
-            T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)  # Use config if available
-            T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)  # Use config if available
-            CdA_O_quick = effective_cda(discharge_O, A_LOX, delta_p_inj_O, Re_O_quick, P_inlet=P_inj_O, T_inlet=T_tank_O)
-            CdA_F_quick = effective_cda(discharge_F, A_fuel, delta_p_inj_F, Re_F_quick, P_inlet=P_inj_F, T_inlet=T_tank_F)
-            # In Re-based mode, cap quick estimate at spray-constrained effective Cd
-            if discharge_O.cda_fit_a is None:
-                CdA_O_quick = min(CdA_O_quick, Cd_O_eff * A_LOX)
-            if discharge_F.cda_fit_a is None:
-                CdA_F_quick = min(CdA_F_quick, Cd_F_eff * A_fuel)
+                T_tank_O = getattr(fluids["oxidizer"], 'temperature', 90.0)
+                T_tank_F = getattr(fluids["fuel"], 'temperature', 300.0)
+                CdA_O_quick = effective_cda(discharge_O, A_LOX, delta_p_inj_O, Re_O_quick, P_inlet=P_inj_O, T_inlet=T_tank_O)
+                CdA_F_quick = effective_cda(discharge_F, A_fuel, delta_p_inj_F, Re_F_quick, P_inlet=P_inj_F, T_inlet=T_tank_F)
+                if discharge_O.cda_fit_a is None:
+                    CdA_O_quick = min(CdA_O_quick, Cd_O_eff * A_LOX)
+                if discharge_F.cda_fit_a is None:
+                    CdA_F_quick = min(CdA_F_quick, Cd_F_eff * A_fuel)
 
-            mdot_O = CdA_O_quick * np.sqrt(2 * rho_O * delta_p_inj_O)
-            mdot_F = CdA_F_quick * np.sqrt(2 * rho_F * delta_p_inj_F)
+                mdot_O = CdA_O_quick * np.sqrt(2 * rho_O * delta_p_inj_O)
+                mdot_F = CdA_F_quick * np.sqrt(2 * rho_F * delta_p_inj_F)
 
         delta_p_inj_O = max(0.0, P_inj_O - Pc)
         delta_p_inj_F = max(0.0, P_inj_F - Pc)

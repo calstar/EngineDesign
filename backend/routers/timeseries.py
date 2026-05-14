@@ -1208,10 +1208,12 @@ async def generate_from_segments(request: SegmentsRequest):
                 # ===== HOT-FIRE BLOWDOWN MODE =====
                 config = app_state.runner.config
 
-                # Shared engine callback (used by both code paths below)
+                # Build runner once so both the blowdown ODE and post-pass use the same Cd model.
+                runner_for_cd = _runner_for_cd(request.use_cold_flow_cd)
+
                 def engine_evaluator(P_lox_Pa: float, P_fuel_Pa: float):
                     try:
-                        res = app_state.runner.evaluate(
+                        res = runner_for_cd.evaluate(
                             P_tank_O=P_lox_Pa,
                             P_tank_F=P_fuel_Pa,
                             silent=True,
@@ -1290,7 +1292,7 @@ async def generate_from_segments(request: SegmentsRequest):
                     fuel_mass_kg   = np.asarray(pf["m_fuel_kg"], dtype=float)
 
                     data, summary = compute_timeseries_results(
-                        _runner_for_cd(request.use_cold_flow_cd),
+                        runner_for_cd,
                         times,
                         lox_curve_psi,
                         fuel_curve_psi,
@@ -1330,7 +1332,7 @@ async def generate_from_segments(request: SegmentsRequest):
                     fuel_mass_kg = blowdown_results["fuel"]["m_prop_kg"]
 
                     data, summary = compute_timeseries_results(
-                        _runner_for_cd(request.use_cold_flow_cd),
+                        runner_for_cd,
                         times,
                         lox_curve_psi,
                         fuel_curve_psi,
@@ -1338,7 +1340,7 @@ async def generate_from_segments(request: SegmentsRequest):
                         lox_mass_kg=lox_mass_kg,
                         fuel_mass_kg=fuel_mass_kg,
                     )
-            
+
         else:
             # ===== REGULATED MODE (original behavior) =====
             # Convert segments to dict format
